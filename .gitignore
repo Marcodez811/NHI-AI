@@ -1,0 +1,58 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Node.js and frontend builds
+node_modules/
+.next/
+.nuxt/
+.svelte-kit/
+.vite/
+coverage/
+*.tsbuildinfo
+
+# Runtime data and logs
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+logs/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo
+
+# Local agent and analysis output
+.agents/
+.codex/
+graphify-out/
+
+# Deployment tooling
+.vercel/

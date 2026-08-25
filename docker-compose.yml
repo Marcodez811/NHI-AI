@@ -1,0 +1,87 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: nhi_ai
+      POSTGRES_USER: nhi_ai
+      POSTGRES_PASSWORD: nhi_ai_local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nhi_ai -d nhi_ai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - nhi-ai-postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    image: nhi-ai-backend:local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: ./backend/.env
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    environment:
+      DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
+      SLIDES_JOBS_ROOT: /data/jobs
+      SLIDES_DOCUMENTS_ROOT: /data/documents
+      SLIDES_OUTPUT_ROOT: /data/output
+    volumes:
+      - slides-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  worker:
+    image: nhi-ai-backend:local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: ./backend/.env
+    command: ["uv", "run", "--no-sync", "taskiq", "worker", "app.broker:broker", "app.tasks.slides", "app.tasks.documents", "--workers", "1", "--max-async-tasks", "1"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
+      SLIDES_JOBS_ROOT: /data/jobs
+      SLIDES_DOCUMENTS_ROOT: /data/documents
+      SLIDES_OUTPUT_ROOT: /data/output
+    volumes:
+      - slides-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    image: nhi-ai-frontend:local
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        BACKEND_INTERNAL_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    environment:
+      BACKEND_INTERNAL_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  slides-data:
+  nhi-ai-postgres:

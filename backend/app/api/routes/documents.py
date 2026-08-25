@@ -1,0 +1,292 @@
+"""Document and folder management API."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Annotated, Any
+from uuid import UUID, uuid4
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
+
+from app.config import settings
+from app.models.documents import (
+    Document,
+    DocumentCategory,
+    DocumentListResponse,
+    DocumentRead,
+    DocumentStatus,
+    DocumentTaskPayload,
+    DocumentUpdate,
+    DocumentUploadResponse,
+    Folder,
+    FolderCreate,
+    FolderRead,
+    FolderUpdate,
+    IngestionJob,
+    IngestionJobRead,
+    as_document_read,
+)
+from app.services.documents.repository import (
+    DocumentRepository,
+    DocumentNotFoundError,
+    DuplicateDocumentError,
+    FolderNotEmptyError,
+    FolderNotFoundError,
+    InMemoryDocumentRepository,
+)
+from app.services.documents.storage import (
+    DocumentStorage,
+    DocumentStorageError,
+    DocumentTooLargeError,
+    LocalDocumentStorage,
+    UnsupportedDocumentError,
+)
+from app.tasks.documents import ingest_document_task
+
+router = APIRouter(prefix="/documents", tags=["documents"])
+
+_repository = InMemoryDocumentRepository()
+
+
+def get_document_repository() -> DocumentRepository:
+    """Default dependency; production should override with a SQLModel session repository."""
+
+    return _repository
+
+
+def get_document_storage() -> DocumentStorage:
+    return LocalDocumentStorage(settings.slides_documents_root)
+
+
+def get_ingestion_task() -> Any:
+    return ingest_document_task
+
+
+def _not_found(message: str = "Document was not found.") -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+
+
+def _map_repository_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, (DocumentNotFoundError, FolderNotFoundError)):
+        return _not_found()
+    if isinstance(exc, DuplicateDocumentError):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": str(exc), "existing_document_id": str(exc.existing_id)},
+        )
+    if isinstance(exc, FolderNotEmptyError):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Folder is not empty.")
+    return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Document catalog is unavailable.")
+
+
+async def _queue_ingestion(repo: DocumentRepository, task: Any, document: Document) -> IngestionJob:
+    job = IngestionJob(document_id=document.id)
+    await repo.create_ingestion_job(job)
+    try:
+        await task.kicker().with_task_id(str(job.id)).kiq(
+            DocumentTaskPayload(
+                document_id=document.id,
+                ingestion_job_id=job.id,
+                category=DocumentCategory(document.category),
+            )
+        )
+    except Exception as exc:
+        document.status = DocumentStatus.FAILED.value
+        document.stage = "failed"
+        document.error = "Document indexing could not be queued."
+        await repo.update_document(document)
+        job.status = DocumentStatus.FAILED.value
+        job.stage = "failed"
+        job.error = "Document indexing could not be queued."
+        await repo.update_ingestion_job(job)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Document indexing is temporarily unavailable.") from exc
+    return job
+
+
+@router.post("", status_code=status.HTTP_202_ACCEPTED, response_model=DocumentUploadResponse)
+async def upload_document(
+    file: Annotated[UploadFile, File(...)],
+    category: Annotated[DocumentCategory, Form(...)],
+    folder_id: Annotated[UUID | None, Form()] = None,
+    repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None,
+    storage: Annotated[DocumentStorage, Depends(get_document_storage)] = None,
+    task: Annotated[Any, Depends(get_ingestion_task)] = None,
+) -> DocumentUploadResponse:
+    document_id = uuid4()
+    try:
+        storage_key, size_bytes, checksum = await storage.save_upload(
+            document_id,
+            file,
+            max_bytes=settings.max_upload_bytes,
+        )
+        extension = Path(file.filename or "source").suffix.lower()
+        document = Document(
+            id=document_id,
+            original_filename=file.filename or "source" + extension,
+            display_name=file.filename or "source" + extension,
+            mime_type=file.content_type or "application/octet-stream",
+            extension=extension,
+            size_bytes=size_bytes,
+            checksum=checksum,
+            category=category.value,
+            folder_id=folder_id,
+            storage_key=storage_key,
+            status=DocumentStatus.QUEUED.value,
+            stage="queued",
+        )
+        await repo.create_document(document)
+        job = await _queue_ingestion(repo, task, document)
+        return DocumentUploadResponse(**as_document_read(document).model_dump(), ingestion_job_id=job.id)
+    except (UnsupportedDocumentError, DocumentTooLargeError) as exc:
+        try:
+            await storage.delete(document_id)
+        except Exception:
+            pass
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except DocumentStorageError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except Exception as exc:
+        try:
+            await storage.delete(document_id)
+        except Exception:
+            pass
+        if isinstance(exc, HTTPException):
+            raise
+        raise _map_repository_error(exc) from exc
+
+
+@router.get("", response_model=DocumentListResponse)
+async def list_documents(
+    category: DocumentCategory | None = None,
+    folder_id: UUID | None = None,
+    document_status: Annotated[DocumentStatus | None, Query(alias="status")] = None,
+    retrieval_enabled: bool | None = None,
+    q: str | None = Query(default=None, max_length=255),
+    repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None,
+) -> DocumentListResponse:
+    documents = await repo.list_documents(
+        category=category,
+        folder_id=folder_id,
+        status=document_status,
+        retrieval_enabled=retrieval_enabled,
+        query=q,
+    )
+    return DocumentListResponse(items=[as_document_read(item) for item in documents], total=len(documents))
+
+
+# Static folder paths must be registered before the UUID document paths.
+@router.post("/folders", status_code=status.HTTP_201_CREATED, response_model=FolderRead)
+async def create_folder(request: FolderCreate, repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None):
+    try:
+        return await repo.create_folder(Folder(name=request.name))
+    except Exception as exc:
+        raise _map_repository_error(exc) from exc
+
+
+@router.get("/folders", response_model=list[FolderRead])
+async def list_folders(repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None):
+    return await repo.list_folders()
+
+
+@router.patch("/folders/{folder_id}", response_model=FolderRead)
+async def update_folder(folder_id: UUID, request: FolderUpdate, repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None):
+    folder = await repo.get_folder(folder_id)
+    if not folder:
+        raise _not_found("Folder was not found.")
+    folder.name = request.name
+    try:
+        return await repo.update_folder(folder)
+    except Exception as exc:
+        raise _map_repository_error(exc) from exc
+
+
+@router.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_folder(folder_id: UUID, repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None):
+    try:
+        await repo.delete_folder(folder_id)
+    except Exception as exc:
+        raise _map_repository_error(exc) from exc
+
+
+@router.get("/{document_id}", response_model=DocumentRead)
+async def get_document(document_id: UUID, repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None):
+    document = await repo.get_document(document_id)
+    if not document:
+        raise _not_found()
+    return as_document_read(document)
+
+
+@router.patch("/{document_id}", response_model=DocumentRead)
+async def update_document(
+    document_id: UUID,
+    request: DocumentUpdate,
+    repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None,
+    task: Annotated[Any, Depends(get_ingestion_task)] = None,
+) -> DocumentRead:
+    document = await repo.get_document(document_id)
+    if not document:
+        raise _not_found()
+    changes = request.model_dump(exclude_unset=True)
+    category_changed = "category" in changes and changes["category"] is not None and changes["category"].value != document.category
+    if "category" in changes and changes["category"] is not None:
+        changes["category"] = changes["category"].value
+    for key, value in changes.items():
+        setattr(document, key, value)
+    if category_changed:
+        document.status = DocumentStatus.QUEUED.value
+        document.stage = "queued"
+        document.error = None
+    try:
+        await repo.update_document(document)
+        if category_changed:
+            await _queue_ingestion(repo, task, document)
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        raise _map_repository_error(exc) from exc
+    return as_document_read(document)
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_document(
+    document_id: UUID,
+    repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None,
+    storage: Annotated[DocumentStorage, Depends(get_document_storage)] = None,
+) -> None:
+    document = await repo.get_document(document_id)
+    if not document:
+        raise _not_found()
+    document.status = DocumentStatus.DELETING.value
+    document.stage = "deleting"
+    await repo.update_document(document)
+    try:
+        await storage.delete(document_id)
+    except DocumentStorageError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.get("/{document_id}/download")
+async def download_document(document_id: UUID, repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None, storage: Annotated[DocumentStorage, Depends(get_document_storage)] = None):
+    document = await repo.get_document(document_id)
+    if not document:
+        raise _not_found()
+    if document.status not in {DocumentStatus.READY.value, DocumentStatus.INDEXING.value, DocumentStatus.QUEUED.value}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document is unavailable for download.")
+    try:
+        source = storage.resolve(document_id)
+    except DocumentStorageError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document source is unavailable.") from exc
+    return FileResponse(source, media_type=document.mime_type, filename=document.original_filename)
+
+
+@router.get("/{document_id}/ingestion", response_model=IngestionJobRead)
+async def get_ingestion_status(document_id: UUID, repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None):
+    document = await repo.get_document(document_id)
+    if not document:
+        raise _not_found()
+    jobs = await repo.list_ingestion_jobs(document_id)
+    job = max(jobs, key=lambda value: value.created_at, default=None)
+    if job is None:
+        raise _not_found("Ingestion job was not found.")
+    return IngestionJobRead.model_validate(job)

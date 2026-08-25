@@ -1,0 +1,13 @@
+{
+  "name": "nhi-ai-slides-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Node runtime dependencies for the presentation worker",
+  "dependencies": {
+    "pptxgenjs": "4.0.1",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-icons": "5.5.0",
+    "sharp": "0.34.5"
+  }
+}
