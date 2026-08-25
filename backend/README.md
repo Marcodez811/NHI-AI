@@ -28,15 +28,15 @@ flowchart LR
 
 ### Runtime responsibilities
 
-| Component | Current responsibility |
-|---|---|
-| FastAPI process | Validates requests, manages document/folder records, saves uploads, enqueues jobs, reports job state, serves downloads, and handles grounded chat requests. |
-| PostgreSQL | Stores `Document`, `Folder`, and `IngestionJob` rows. It stores metadata and opaque OpenAI IDs, not document binary content. |
-| Shared `slides-data` volume | Stores original documents, temporary slide workspaces, and published `.pptx` files. Both the API and worker mount the same volume. |
-| Redis | Provides the Taskiq Redis Stream queue and stores task progress plus terminal results for one hour. Both document and slide tasks currently use the `slides` queue. |
-| Taskiq worker | Runs document ingestion and slide generation outside the request/response process. Compose limits the worker to one process and one asynchronous task at a time. |
-| OpenAI vector store | Holds indexed copies of uploaded documents used by `file_search`. Every indexed source is tagged with its application document ID and non-news metadata. |
-| Codex slide runtime | Works inside a per-job directory with staged source files, two local skills, offline dependencies, and workspace-write-only permissions. |
+| Component                   | Current responsibility                                                                                                                                              |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| FastAPI process             | Validates requests, manages document/folder records, saves uploads, enqueues jobs, reports job state, serves downloads, and handles grounded chat requests.         |
+| PostgreSQL                  | Stores `Document`, `Folder`, and `IngestionJob` rows. It stores metadata and opaque OpenAI IDs, not document binary content.                                        |
+| Shared `slides-data` volume | Stores original documents, temporary slide workspaces, and published `.pptx` files. Both the API and worker mount the same volume.                                  |
+| Redis                       | Provides the Taskiq Redis Stream queue and stores task progress plus terminal results for one hour. Both document and slide tasks currently use the `slides` queue. |
+| Taskiq worker               | Runs document ingestion and slide generation outside the request/response process. Compose limits the worker to one process and one asynchronous task at a time.    |
+| OpenAI vector store         | Holds indexed copies of uploaded documents used by `file_search`. Every indexed source is tagged with its application document ID and non-news metadata.            |
+| Codex slide runtime         | Works inside a per-job directory with staged source files, two local skills, offline dependencies, and workspace-write-only permissions.                            |
 
 ## Data ownership
 
@@ -269,11 +269,11 @@ flowchart TD
 
 ```json
 {
-  "title": "健保政策簡報",
-  "document_ids": ["00000000-0000-0000-0000-000000000000"],
-  "slides_count": 10,
-  "guidance": "Emphasize the policy timeline and evidence.",
-  "tone": "formal"
+    "title": "健保政策簡報",
+    "document_ids": ["00000000-0000-0000-0000-000000000000"],
+    "slides_count": 10,
+    "guidance": "Emphasize the policy timeline and evidence.",
+    "tone": "formal"
 }
 ```
 
@@ -281,8 +281,8 @@ The API validates a nonblank title, 1–20 unique document UUIDs, an exact reque
 
 ```json
 {
-  "job_id": "<uuid>",
-  "status": "queued"
+    "job_id": "<uuid>",
+    "status": "queued"
 }
 ```
 
@@ -373,11 +373,11 @@ Clients poll `GET /api/v1/slides/jobs/{job_id}`. A completed response includes a
 
 ```json
 {
-  "job_id": "<uuid>",
-  "status": "completed",
-  "stage": "completed",
-  "message": "Presentation is ready for download.",
-  "download_url": "/api/v1/slides/jobs/<uuid>/download"
+    "job_id": "<uuid>",
+    "status": "completed",
+    "stage": "completed",
+    "message": "Presentation is ready for download.",
+    "download_url": "/api/v1/slides/jobs/<uuid>/download"
 }
 ```
 
@@ -396,27 +396,27 @@ There is currently no automatic retry for slide generation. The task catches int
 
 All application routes are under `/api/v1` except health endpoints.
 
-| Method | Route | Purpose |
-|---|---|---|
-| `GET` | `/health/live` | Process liveness. |
-| `GET` | `/health` | Redis and database readiness. |
-| `GET` | `/api/v1/qa-modes` | List supported Q&A categories. |
-| `POST` | `/api/v1/chat` | Return one grounded answer. |
-| `POST` | `/api/v1/chat/stream` | Stream a grounded answer as SSE. |
-| `POST` | `/api/v1/documents` | Upload a document and enqueue ingestion. |
-| `GET` | `/api/v1/documents` | Filter and list documents. |
-| `POST` | `/api/v1/documents/folders` | Create a folder. |
-| `GET` | `/api/v1/documents/folders` | List folders. |
-| `PATCH` | `/api/v1/documents/folders/{folder_id}` | Rename a folder. |
-| `DELETE` | `/api/v1/documents/folders/{folder_id}` | Delete an empty folder. |
-| `GET` | `/api/v1/documents/{document_id}` | Read document metadata. |
-| `PATCH` | `/api/v1/documents/{document_id}` | Update document metadata. |
-| `DELETE` | `/api/v1/documents/{document_id}` | Mark deleting and remove the local source. |
-| `GET` | `/api/v1/documents/{document_id}/download` | Download the original source. |
-| `GET` | `/api/v1/documents/{document_id}/ingestion` | Read the latest ingestion job. |
-| `POST` | `/api/v1/slides/jobs` | Queue a presentation job. |
-| `GET` | `/api/v1/slides/jobs/{job_id}` | Poll progress or terminal status. |
-| `GET` | `/api/v1/slides/jobs/{job_id}/download` | Download a completed presentation. |
+| Method   | Route                                       | Purpose                                    |
+| -------- | ------------------------------------------- | ------------------------------------------ |
+| `GET`    | `/health/live`                              | Process liveness.                          |
+| `GET`    | `/health`                                   | Redis and database readiness.              |
+| `GET`    | `/api/v1/qa-modes`                          | List supported Q&A categories.             |
+| `POST`   | `/api/v1/chat`                              | Return one grounded answer.                |
+| `POST`   | `/api/v1/chat/stream`                       | Stream a grounded answer as SSE.           |
+| `POST`   | `/api/v1/documents`                         | Upload a document and enqueue ingestion.   |
+| `GET`    | `/api/v1/documents`                         | Filter and list documents.                 |
+| `POST`   | `/api/v1/documents/folders`                 | Create a folder.                           |
+| `GET`    | `/api/v1/documents/folders`                 | List folders.                              |
+| `PATCH`  | `/api/v1/documents/folders/{folder_id}`     | Rename a folder.                           |
+| `DELETE` | `/api/v1/documents/folders/{folder_id}`     | Delete an empty folder.                    |
+| `GET`    | `/api/v1/documents/{document_id}`           | Read document metadata.                    |
+| `PATCH`  | `/api/v1/documents/{document_id}`           | Update document metadata.                  |
+| `DELETE` | `/api/v1/documents/{document_id}`           | Mark deleting and remove the local source. |
+| `GET`    | `/api/v1/documents/{document_id}/download`  | Download the original source.              |
+| `GET`    | `/api/v1/documents/{document_id}/ingestion` | Read the latest ingestion job.             |
+| `POST`   | `/api/v1/slides/jobs`                       | Queue a presentation job.                  |
+| `GET`    | `/api/v1/slides/jobs/{job_id}`              | Poll progress or terminal status.          |
+| `GET`    | `/api/v1/slides/jobs/{job_id}/download`     | Download a completed presentation.         |
 
 FastAPI's interactive OpenAPI UI is available at `http://localhost:8000/docs` while the API is running.
 
@@ -428,20 +428,20 @@ Copy the example file before starting locally or through Compose:
 cp backend/.env.example backend/.env
 ```
 
-| Variable | Purpose | Current default |
-|---|---|---|
-| `REDIS_URL` | Task queue, progress, and result Redis connection. | Required |
-| `OPENAI_API_KEY` | OpenAI Files/vector store, Responses API, and Codex SDK credential. | Required |
-| `OPENAI_MODEL` | Slide-generation Codex model. | `gpt-5.6-luna` |
-| `OPENAI_CHAT_MODEL` | Grounded chat model. | `gpt-5.6-luna` |
-| `OPENAI_VECTOR_STORE_ID` | Shared non-news retrieval index. | Optional setting, required for ingestion/chat |
-| `DATABASE_URL` | SQLModel database connection. | `sqlite:///./nhi_ai.db` |
-| `SLIDES_JOBS_ROOT` | Temporary slide job workspaces. | `/tmp/slides/jobs` |
-| `SLIDES_DOCUMENTS_ROOT` | Original shared document storage. | `/tmp/slides/documents` |
-| `SLIDES_OUTPUT_ROOT` | Published PPTX storage. | `/tmp/slides/output` |
-| `SLIDES_TIMEOUT_MINUTES` | Maximum Codex turn duration. | `45` |
-| `SLIDES_KEEP_WORKSPACE_ON_FAILURE` | Retain failed workspaces for diagnosis. | `true` |
-| `MAX_UPLOAD_BYTES` | Maximum document upload size. | `262144000` (250 MiB) |
+| Variable                           | Purpose                                                             | Current default                               |
+| ---------------------------------- | ------------------------------------------------------------------- | --------------------------------------------- |
+| `REDIS_URL`                        | Task queue, progress, and result Redis connection.                  | Required                                      |
+| `OPENAI_API_KEY`                   | OpenAI Files/vector store, Responses API, and Codex SDK credential. | Required                                      |
+| `OPENAI_MODEL`                     | Slide-generation Codex model.                                       | `gpt-5.6-luna`                                |
+| `OPENAI_CHAT_MODEL`                | Grounded chat model.                                                | `gpt-5.6-luna`                                |
+| `OPENAI_VECTOR_STORE_ID`           | Shared non-news retrieval index.                                    | Optional setting, required for ingestion/chat |
+| `DATABASE_URL`                     | SQLModel database connection.                                       | `sqlite:///./nhi_ai.db`                       |
+| `SLIDES_JOBS_ROOT`                 | Temporary slide job workspaces.                                     | `/tmp/slides/jobs`                            |
+| `SLIDES_DOCUMENTS_ROOT`            | Original shared document storage.                                   | `/tmp/slides/documents`                       |
+| `SLIDES_OUTPUT_ROOT`               | Published PPTX storage.                                             | `/tmp/slides/output`                          |
+| `SLIDES_TIMEOUT_MINUTES`           | Maximum Codex turn duration.                                        | `45`                                          |
+| `SLIDES_KEEP_WORKSPACE_ON_FAILURE` | Retain failed workspaces for diagnosis.                             | `true`                                        |
+| `MAX_UPLOAD_BYTES`                 | Maximum document upload size.                                       | `262144000` (250 MiB)                         |
 
 Do not commit `.env`; it contains the API key.
 
@@ -492,3 +492,11 @@ uv run pytest
 ```
 
 The suite covers slide API contracts, safe job progress/results, worker resolution/failure handling, slide orchestration, chat grounding/streaming, document repository/storage behavior, and shared-volume path safety.
+
+## Elaboration, Ideas going onward
+
+The idea is that, instead of using the Codex SDK solely for slide generation, the Codex SDK should eventually act as the brain of the entire application, providing multiple services, similar to NotebookLM.
+
+For instance, it should be able to provide slides-generation, news-generation, etc. as separate services.
+
+Under the hood, these services would consist of multiple instances built around the Codex SDK, each using different skills and scripts to support the required functionality, generalizing the architecture.
