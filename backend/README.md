@@ -1,11 +1,11 @@
 # NHI-AI backend
 
-The backend is a FastAPI application with two Taskiq background pipelines:
+The backend is a FastAPI application with two independently tunable Taskiq pipelines:
 
 - document ingestion into an OpenAI vector store for source-grounded Q&A;
-- evidence-first PowerPoint generation from previously uploaded documents.
+- generic Codex-backed agent workflows, whose first registered workflow is evidence-first PowerPoint generation from previously uploaded documents.
 
-PostgreSQL stores document, folder, and ingestion metadata. Uploaded source files and generated PowerPoint files live on a shared filesystem volume. Redis Streams carries asynchronous tasks and stores short-lived task progress/results. News ingestion and news generation are intentionally outside the current scope.
+The generic worker has one stable task entrypoint, `agents.run`. It accepts only a typed job ID, an explicit workflow name, and workflow input. A registry maps that name to an adapter; the current adapter is `slides`. PostgreSQL stores document, folder, and ingestion metadata. Uploaded source files and generated PowerPoint files live on a shared filesystem volume. Redis Streams carries asynchronous tasks and stores short-lived progress/results for agent jobs. News ingestion and news generation are intentionally outside the current scope.
 
 The repository-level setup guide is in [../README.md](../README.md). This document describes the backend package as it exists now.
 
@@ -16,16 +16,19 @@ flowchart LR
     UI[Next.js frontend] -->|HTTP /api/v1| API[FastAPI API]
     API -->|catalog metadata| DB[(PostgreSQL)]
     API -->|source uploads and downloads| VOL[(Shared slides-data volume)]
-    API -->|enqueue and poll| REDIS[(Redis Streams + result backend)]
-    REDIS --> DW[documents-worker]
-    REDIS --> TW[tasks-worker]
+    API -->|documents.ingest| DQ[(Redis documents stream)]
+    API -->|agents.run| TQ[(Redis tasks stream)]
+    DQ --> DW[documents-worker]
+    TQ --> TW[tasks-worker]
     DW --> DB
     DW --> VOL
     DW -->|document upload/index| VS[OpenAI vector store]
-    TW --> VOL
     API -->|Responses API + file_search| VS
-    TW -->|isolated agent turns| CODEX[OpenAI Codex SDK]
+    TW --> ADAPTER[Allowlisted workflow adapter]
+    ADAPTER -->|isolated, reviewed turns| CODEX[OpenAI Codex SDK]
     CODEX -->|PPTX + evidence + QA artifacts| VOL
+    TW --> RB[(tasks:result, 1 hour)]
+    API -->|poll progress/result| RB
 ```
 
 ### Runtime responsibilities
@@ -34,11 +37,11 @@ flowchart LR
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | FastAPI process             | Validates requests, manages document/folder records, saves uploads, enqueues jobs, reports job state, serves downloads, and handles grounded chat requests.         |
 | PostgreSQL                  | Stores `Document`, `Folder`, and `IngestionJob` rows. It stores metadata and opaque OpenAI IDs, not document binary content.                                        |
-| Shared `slides-data` volume | Stores original documents, temporary agent workspaces, and published `.pptx` files. API and both workers mount the same volume.                                  |
-| Redis                       | Provides separate `documents` and `tasks` Taskiq Redis Streams; task progress/results use `tasks:result` and expire after one hour. |
+| Shared `slides-data` volume | Stores original documents, temporary agent workspaces, and published artifacts. API and both workers mount the same volume.                                      |
+| Redis                       | Provides separate `documents` and `tasks` Taskiq Redis Streams. Agent task progress/results use `tasks:result` and expire after one hour.                        |
 | Taskiq workers              | `documents-worker` handles `documents.ingest` (1 process/4 async tasks); `tasks-worker` handles the generic `agents.run` entrypoint (2 processes/2 async tasks). |
 | OpenAI vector store         | Holds indexed copies of uploaded documents used by `file_search`. Every indexed source is tagged with its application document ID and non-news metadata.            |
-| Codex slide runtime         | The registered `slides` adapter runs generation/correction in workspace-write mode, semantic review read-only, and publishes only after deterministic and semantic gates pass. |
+| Codex agent runtime         | Resolves only registered adapters. The current `slides` adapter runs generation/correction in workspace-write mode, semantic review read-only, and publishes only after deterministic and semantic gates pass. |
 
 ## Data ownership
 
@@ -55,14 +58,14 @@ PostgreSQL
 Redis
   serialized Taskiq payloads, sanitized progress, and terminal task results
 
-/data/jobs/<slide job UUID>/
-  temporary slide inputs, skills, audit files, renders, and QA artifacts
+/data/jobs/<agent job UUID>/
+  temporary workflow inputs, staged skills, audit files, and workflow artifacts
 
-/data/output/<slide job UUID>.pptx
-  the published presentation
+/data/output/<agent job UUID>.pptx
+  the published presentation produced by the current slides workflow
 ```
 
-Only UUIDs cross the task queue boundary. Absolute source paths are resolved by workers from the shared volume and absolute artifact paths are never returned to the client.
+Queue payloads contain opaque identifiers and typed, path-free workflow input. Absolute source paths are resolved by workers from the shared volume, and absolute artifact paths are never returned to the client.
 
 ## Complete backend file tree
 
@@ -89,6 +92,7 @@ backend/
 │   ├── config.py                       # Environment-backed settings
 │   ├── db.py                           # SQLModel engine, tables, request sessions
 │   ├── broker.py                       # Separate document/task brokers and result backend
+│   ├── worker.py                       # Settings-driven documents/tasks worker launcher
 │   ├── api/
 │   │   └── routes/
 │   │       ├── __init__.py
@@ -108,7 +112,9 @@ backend/
 │   │   └── agents.py                   # stable agents.run worker import boundary
 │   └── services/
 │       ├── agentic/
+│       │   ├── __init__.py
 │       │   ├── contracts.py             # generic task/turn/adapter contracts
+│       │   ├── models.py                # compatibility exports for boundary models
 │       │   ├── registry.py              # explicit workflow allowlist
 │       │   ├── runner.py                # Codex turns, progress, heartbeat, audits
 │       │   ├── service.py               # lifecycle and bounded review loop
@@ -128,10 +134,10 @@ backend/
 │       │   └── local.py                 # UUID-to-source-path worker resolver
 │       └── slides/
 │           ├── __init__.py
-│           ├── agent.py                 # Top-level slide orchestration facade
+│           ├── agent.py                 # legacy in-process compatibility facade
 │           ├── artifacts.py             # Workspaces, staging, preflight, validation, publish
 │           ├── contracts.py             # JobError and progress callback contracts
-│           ├── runtime.py               # Legacy prompt/runtime compatibility helpers
+│           ├── runtime.py               # legacy prompt/runtime compatibility helpers
 │           ├── adapter.py                # Registered slides WorkflowAdapter
 │           └── fonts/
 │           │   ├── NotoSansTC-Black.ttf
@@ -214,7 +220,27 @@ Supported upload extensions are currently `.pdf`, `.docx`, `.md`, `.markdown`, a
 4. Provider citations are normalized and remote file IDs are mapped back to local document UUIDs.
 5. If the final answer has no source citation, the backend replaces it with `無法回答，因為無相關資料`. The streaming route buffers answer deltas until final citations are known, preventing ungrounded text from being emitted.
 
-## Slides pipeline workflow
+## Generic agent workflow
+
+All Codex-backed work crosses one Taskiq boundary: `agents.run`. It accepts an `AgentTaskPayload` containing only `job_id`, `workflow`, and `input`. The payload is strict and rejects extra fields; it cannot name a Python import, command, skill directory, or source path. `WorkflowRegistry` resolves `workflow` from an explicit in-process allowlist, so an unknown workflow fails safely before a workspace or SDK session is created.
+
+An adapter owns its domain policy: typed input/output, preparation, declared skills, prompt construction, deterministic validation, optional semantic review, publication, and cleanup. The generic service owns the operational lifecycle:
+
+1. Validate the typed input, create a UUID-contained workspace, prepare inputs, and stage only the adapter's declared skills from `backend/.agents/skills`.
+2. Start one ephemeral `AsyncCodex` thread rooted at that workspace, with denied approvals and safe streamed progress/heartbeats.
+3. Run an initial write-capable turn. After every write-capable turn, run the adapter's deterministic validator.
+4. If the candidate is valid, run an optional structured semantic-review turn in a read-only sandbox. Deterministic findings or blocking review findings create a write-capable correction turn on the same thread.
+5. Stop after the adapter's bounded review limit; publish only a fully accepted result. The job records `work/codex_result.json` and `work/progress.jsonl`; failed workspaces are retained or removed according to `AGENT_KEEP_WORKSPACE_ON_FAILURE`.
+
+The current `slides` adapter supplies the review hooks, making the review loop active. A workflow without review hooks still uses the same isolated runner, staging, timeout, and safe result boundary.
+
+### Adding an allowlisted workflow
+
+Add a typed adapter under its domain service rather than adding a Taskiq task per workflow. The adapter should inherit `BaseWorkflowAdapter` (or implement `WorkflowAdapter`), declare its exact skill names, and return a typed published result. Add its skills under `backend/.agents/skills/<skill-name>/`, register the adapter in `WorkflowRegistry`, and ensure its module is imported by the task worker so registration occurs. A public API route can then translate its request into `AgentTaskPayload(workflow="<name>", input=...)` and enqueue `agents.run`.
+
+The generic worker remains the only Codex queue entrypoint. Workflow scripts, if required, belong to an allowlisted staged skill or adapter implementation; they are never selected or executed from queue payload data.
+
+## Slides workflow (current `slides` adapter)
 
 The slides API is asynchronous because extraction, generation, rendering, revision, and validation can take several minutes.
 
@@ -222,22 +248,24 @@ The slides API is asynchronous because extraction, generation, rendering, revisi
 flowchart TD
     A[POST /api/v1/slides/jobs] --> B[Validate request]
     B --> C[Create UUID and queued progress in Redis]
-    C --> D[Enqueue agents.run with UUIDs only]
+    C --> D[Enqueue agents.run with typed path-free input]
     D --> E[Worker marks job running]
     E --> F[Resolve UUIDs from shared document volume]
     F --> G[Create isolated job workspace]
     G --> H[Preflight dependencies and CJK fonts]
     H --> I[Stage sources and required skills]
-    I --> J[Build prompt and locked-down environment]
-    J --> K[Run one streamed Codex SDK turn]
-    K --> L[Extract sources and build evidence map]
-    L --> M[Generate editable PPTX]
-    M --> N[Render, review, revise, and produce QA reports]
-    N --> O{All release validators pass?}
-    O -->|No| P[Return sanitized failed result]
-    O -->|Yes| Q[Publish job-id.pptx]
-    Q --> R[Delete successful workspace]
-    R --> S[Expose download URL]
+    I --> J[Build prompt and start Codex thread]
+    J --> K[Initial or correction write turn]
+    K --> L{Deterministic validation passes?}
+    L -->|No| M{Review rounds remain?}
+    M -->|Yes| K
+    M -->|No| X[Return sanitized failed result]
+    L -->|Yes| N[Read-only structured semantic review]
+    N --> O{Blocking findings?}
+    O -->|Yes| M
+    O -->|No| P[Publish job-id.pptx]
+    P --> Q[Delete successful workspace]
+    Q --> R[Expose download URL]
 ```
 
 ### 1. API acceptance and queueing
@@ -277,7 +305,7 @@ The resolver rejects missing or multiple files, symlinks, path escapes, non-regu
 
 ### 3. Isolated workspace and preflight
 
-`generate_slides()` creates this job-local structure:
+The slides adapter creates this job-local structure:
 
 ```text
 <AGENT_JOBS_ROOT>/<job UUID>/
@@ -421,7 +449,7 @@ cp backend/.env.example backend/.env
 | `DOCUMENTS_ROOT`                   | Original shared document storage.                                   | `/tmp/documents`                              |
 | `AGENT_JOBS_ROOT`                  | Temporary agent job workspaces.                                     | `/tmp/agents/jobs`                             |
 | `AGENT_OUTPUT_ROOT`                | Published agent artifacts (including PPTX).                         | `/tmp/agents/output`                           |
-| `AGENT_TIMEOUT_MINUTES`            | Maximum Codex turn duration.                                        | `45`                                          |
+| `AGENT_TIMEOUT_MINUTES`            | Total deadline for one agent workflow, including reviews.           | `45`                                          |
 | `AGENT_KEEP_WORKSPACE_ON_FAILURE`  | Retain failed workspaces for diagnosis.                             | `true`                                        |
 | `AGENT_MAX_REVIEW_ROUNDS`          | Maximum same-thread semantic review/correction rounds.               | `3`                                           |
 | `DOCUMENTS_QUEUE_NAME`             | Redis Stream for document ingestion.                                | `documents`                                   |
@@ -486,12 +514,4 @@ From `backend/`:
 uv run pytest
 ```
 
-The suite covers slide API contracts, safe job progress/results, worker resolution/failure handling, slide orchestration, chat grounding/streaming, document repository/storage behavior, and shared-volume path safety.
-
-## Elaboration, Ideas going onward
-
-The idea is that, instead of using the Codex SDK solely for slide generation, the Codex SDK should eventually act as the brain of the entire application, providing multiple services, similar to NotebookLM.
-
-For instance, it should be able to provide slides-generation, news-generation, etc. as separate services.
-
-Under the hood, these services would consist of multiple instances built around the Codex SDK, each using different skills and scripts to support the required functionality, generalizing the architecture.
+The suite covers generic agent workflow contracts and review-loop behavior, slide API contracts, safe job progress/results, worker resolution/failure handling, chat grounding/streaming, document repository/storage behavior, and shared-volume path safety.
