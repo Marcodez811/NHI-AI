@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import stat
 from pathlib import Path
 from uuid import UUID
@@ -29,7 +30,10 @@ class SharedVolumeDocumentResolver(DocumentResolver):
         self._documents_root = documents_root
 
     async def resolve_many(self, document_ids: list[UUID]) -> list[Path]:
-        return [self._resolve_one(document_id) for document_id in document_ids]
+        # Resolution performs synchronous filesystem metadata calls.  Run each
+        # lookup in a worker thread so a Taskiq event loop can serve its other
+        # in-flight jobs while shared-volume I/O is underway.
+        return list(await asyncio.gather(*(asyncio.to_thread(self._resolve_one, document_id) for document_id in document_ids)))
 
     def _resolve_one(self, document_id: UUID) -> Path:
         try:

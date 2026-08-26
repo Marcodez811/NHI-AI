@@ -36,9 +36,11 @@ services:
       retries: 12
     environment:
       DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
-      SLIDES_JOBS_ROOT: /data/jobs
-      SLIDES_DOCUMENTS_ROOT: /data/documents
-      SLIDES_OUTPUT_ROOT: /data/output
+      DOCUMENTS_ROOT: /data/documents
+      AGENT_JOBS_ROOT: /data/jobs
+      AGENT_OUTPUT_ROOT: /data/output
+      DOCUMENTS_QUEUE_NAME: documents
+      TASKS_QUEUE_NAME: tasks
     volumes:
       - slides-data:/data
     depends_on:
@@ -47,18 +49,42 @@ services:
       postgres:
         condition: service_healthy
 
-  worker:
+  documents-worker:
     image: nhi-ai-backend:local
     build:
       context: ./backend
       dockerfile: Dockerfile
     env_file: ./backend/.env
-    command: ["uv", "run", "--no-sync", "taskiq", "worker", "app.broker:broker", "app.tasks.slides", "app.tasks.documents", "--workers", "1", "--max-async-tasks", "1"]
+    command: ["uv", "run", "--no-sync", "python", "-m", "app.worker", "documents"]
     environment:
       DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
-      SLIDES_JOBS_ROOT: /data/jobs
-      SLIDES_DOCUMENTS_ROOT: /data/documents
-      SLIDES_OUTPUT_ROOT: /data/output
+      DOCUMENTS_ROOT: /data/documents
+      AGENT_JOBS_ROOT: /data/jobs
+      AGENT_OUTPUT_ROOT: /data/output
+      DOCUMENTS_QUEUE_NAME: documents
+      TASKS_QUEUE_NAME: tasks
+    volumes:
+      - slides-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  tasks-worker:
+    image: nhi-ai-backend:local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: ./backend/.env
+    command: ["uv", "run", "--no-sync", "python", "-m", "app.worker", "tasks"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
+      DOCUMENTS_ROOT: /data/documents
+      AGENT_JOBS_ROOT: /data/jobs
+      AGENT_OUTPUT_ROOT: /data/output
+      DOCUMENTS_QUEUE_NAME: documents
+      TASKS_QUEUE_NAME: tasks
     volumes:
       - slides-data:/data
     depends_on:

@@ -70,6 +70,8 @@ async def test_create_job_records_queued_progress_before_enqueue():
 
     assert task.task_id == str(response.job_id)
     assert task.payload.job_id == response.job_id
+    assert task.payload.workflow == "slides"
+    assert task.payload.input["title"] == "NHI update"
     assert backend.progress[str(response.job_id)].state == "queued"
 
 

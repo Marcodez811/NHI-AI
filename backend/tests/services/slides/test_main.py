@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from app.models.slides import JobStatus, SlidesTaskPayload
 from app.services.slides import agent as slides
+from app.services.slides.adapter import slides_adapter
+from app.services.slides.artifacts import JobError, publish_output
 
 
 def _payload(job_id):
@@ -106,3 +108,24 @@ class SlidesServiceTests(unittest.TestCase):
                         )
                     )
             self.assertTrue((root / "jobs" / str(job_id)).is_dir())
+
+    def test_publish_does_not_overwrite_existing_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "presentation.pptx"
+            source.write_bytes(b"new deck")
+            destination = root / "published"
+            destination.mkdir()
+            existing = destination / "job.pptx"
+            existing.write_bytes(b"existing deck")
+            with self.assertRaises(JobError):
+                publish_output(source, "job", destination)
+            self.assertEqual(existing.read_bytes(), b"existing deck")
+            self.assertEqual(source.read_bytes(), b"new deck")
+
+    def test_semantic_review_rejects_malformed_findings(self):
+        with self.assertRaises(ValueError):
+            slides_adapter.parse_review(
+                '{"summary":"ok","blocking_findings":[],"findings":["not an object"]}',
+                Path("/tmp/workspace"),
+            )

@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 
 import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, status
@@ -8,7 +9,7 @@ from sqlmodel import Session, select
 from app.api.routes.chat import get_chat_document_repository, get_chat_service, router as chat_router
 from app.api.routes.documents import get_document_repository, router as documents_router
 from app.api.routes.slides import router as slides_router
-from app.broker import broker
+from app.broker import documents_broker, tasks_broker
 from app.config import settings
 from app.db import engine, get_session, init_db
 from app.models.documents import Document
@@ -19,16 +20,30 @@ redis_client = redis.from_url(settings.redis_url)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
-    owns_broker_lifecycle = not getattr(broker, "is_worker_process", False)
-    if owns_broker_lifecycle:
-        await broker.startup()
+    await asyncio.to_thread(init_db)
+    brokers = (documents_broker, tasks_broker)
+    started: list[object] = []
     try:
+        for broker in brokers:
+            if getattr(broker, "is_worker_process", False):
+                continue
+            # Record before startup: Taskiq startup can allocate resources and
+            # then raise, so its shutdown still belongs in partial-startup
+            # cleanup.
+            started.append(broker)
+            await broker.startup()
         yield
     finally:
-        await redis_client.aclose()
-        if owns_broker_lifecycle:
-            await broker.shutdown()
+        try:
+            await redis_client.aclose()
+        finally:
+            for broker in reversed(started):
+                try:
+                    await broker.shutdown()
+                except Exception:
+                    # Shutdown must not mask the original startup/request
+                    # exception, and one broker failing must not leak the other.
+                    pass
 
 app = FastAPI(lifespan=lifespan)
 

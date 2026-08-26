@@ -1,0 +1,4 @@
+interface:
+  display_name: "NHI Taiwan PPTX"
+  short_description: "Evidence-traceable zh-TW NHI policy presentations"
+  default_prompt: "Use $pptx-nhi-tw to create an evidence-traceable Traditional-Chinese NHI policy briefing."

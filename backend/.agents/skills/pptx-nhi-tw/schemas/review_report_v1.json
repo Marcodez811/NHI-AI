@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SlideReview v1",
+  "type": "object",
+  "required": ["format_version", "presentation", "review_round", "checks", "findings", "reviewed_renders", "overall_status"],
+  "additionalProperties": false,
+  "properties": {
+    "format_version": {"const": "SlideReview v1"},
+    "presentation": {
+      "type": "object",
+      "required": ["path", "sha256", "slide_count"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "slide_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "review_round": {"type": "integer", "minimum": 1},
+    "checks": {
+      "type": "object",
+      "required": ["narrative_coherence", "factual_coherence", "design_coherence", "title_branding", "visual_quality"],
+      "additionalProperties": false,
+      "properties": {
+        "narrative_coherence": {"$ref": "#/$defs/check"},
+        "factual_coherence": {"$ref": "#/$defs/check"},
+        "design_coherence": {"$ref": "#/$defs/check"},
+        "title_branding": {"$ref": "#/$defs/check"},
+        "visual_quality": {"$ref": "#/$defs/check"}
+      }
+    },
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "reviewed_renders": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["slide_number", "sha256"],
+        "additionalProperties": false,
+        "properties": {
+          "slide_number": {"type": "integer", "minimum": 1},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      }
+    },
+    "overall_status": {"enum": ["pass", "fail"]}
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "required": ["status", "notes"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["pass", "fail"]},
+        "notes": {"type": "string", "minLength": 20}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": ["slide_numbers", "category", "severity", "status", "description", "resolution"],
+      "additionalProperties": false,
+      "properties": {
+        "slide_numbers": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}},
+        "category": {"enum": ["narrative", "factual", "design", "branding", "visual"]},
+        "severity": {"enum": ["blocking", "advisory"]},
+        "status": {"enum": ["open", "resolved"]},
+        "description": {"type": "string", "minLength": 1},
+        "resolution": {"type": "string"}
+      }
+    }
+  }
+}

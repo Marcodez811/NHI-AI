@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QAReport v1",
+  "type": "object",
+  "required": ["format_version", "presentation", "evidence_map", "checks", "overall_status"],
+  "additionalProperties": false,
+  "properties": {
+    "format_version": {"const": "QAReport v1"},
+    "presentation": {
+      "type": "object",
+      "required": ["path", "sha256", "slide_count"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "slide_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "evidence_map": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "checks": {
+      "type": "object",
+      "required": ["content", "evidence_map", "office_validation", "visual_review"],
+      "additionalProperties": false,
+      "properties": {
+        "content": {"$ref": "#/$defs/check"},
+        "evidence_map": {"$ref": "#/$defs/check"},
+        "office_validation": {"$ref": "#/$defs/check"},
+        "visual_review": {"$ref": "#/$defs/check"}
+      }
+    },
+    "overall_status": {"enum": ["pass", "fail"]}
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {"status": {"enum": ["pass", "fail", "not_run"]}}
+    }
+  }
+}

@@ -6,11 +6,17 @@ from app.config import settings
 result_backend = RedisAsyncResultBackend(
     redis_url=settings.redis_url,
     result_ex_time=3600,
-    prefix_str="slides:result",
+    prefix_str="tasks:result",
 )
 
-# Redis Streams is the queue; result_backend stores terminal results and progress.
-broker = RedisStreamBroker(
+# Redis Streams are intentionally separated by workload.  Document ingestion
+# must never compete with agent jobs for a consumer slot.
+documents_broker = RedisStreamBroker(
     url=settings.redis_url,
-    queue_name="slides",
+    queue_name=settings.documents_queue_name,
+)
+
+tasks_broker = RedisStreamBroker(
+    url=settings.redis_url,
+    queue_name=settings.tasks_queue_name,
 ).with_result_backend(result_backend)

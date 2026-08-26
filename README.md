@@ -10,7 +10,8 @@ News ingestion, news retrieval, news UI, and news generation are intentionally o
 | ---------- | ------------------------------------------------------------ | ----------------------- |
 | `frontend` | Next.js chat, knowledge-base, and slides UI                  | `http://localhost:3000` |
 | `backend`  | FastAPI API, document catalog, chat adapter, slide-job API   | `http://localhost:8000` |
-| `worker`   | Taskiq consumers for document ingestion and slide generation | none                    |
+| `documents-worker` | Taskiq consumer for document ingestion                  | none                    |
+| `tasks-worker`     | Taskiq consumer for the generic `agents.run` agent entrypoint | none                    |
 | `postgres` | Document, folder, and ingestion metadata                     | `localhost:5432`        |
 | `redis`    | Queue, progress, and short-lived job results                 | `localhost:6379`        |
 | OpenAI     | Managed vector store, `file_search`, and response generation | external                |
@@ -21,9 +22,14 @@ PostgreSQL is the source of truth. Uploaded files and generated PPTX artifacts a
 
 1. The browser calls the Next.js app; `/api/v1/*` is rewritten to FastAPI.
 2. A document upload writes metadata to PostgreSQL and one secure UUID directory to shared storage, then queues a Taskiq ingestion job in Redis.
-3. The worker uploads the source to the configured news-free OpenAI vector store and records opaque provider IDs in PostgreSQL.
+3. `documents-worker` uploads the source to the configured news-free OpenAI vector store and records opaque provider IDs in PostgreSQL.
 4. Chat uses an explicit scope (`legislative_qa`, `public_opinion`, or `bei_can`) and OpenAI `file_search`; responses include citations or the insufficient-evidence fallback.
-5. Slide jobs resolve selected document IDs inside the worker, generate and validate a PPTX, and publish it under the shared output volume.
+5. Agent jobs resolve selected document IDs inside `tasks-worker`, generate and validate a PPTX, and publish it under the shared output volume.
+
+Redis uses separate streams: `documents` carries `documents.ingest`, while `tasks`
+carries `agents.run`. Terminal task results/progress use the `tasks:result` namespace
+and expire after one hour. Worker process and concurrency limits are configured by
+`DOCUMENTS_WORKER_*` and `TASKS_WORKER_*` settings.
 
 Uploads currently accept PDF, DOCX, Markdown (`.md`/`.markdown`), and TXT sources, with a 250 MiB per-file limit.
 
@@ -79,13 +85,13 @@ Open:
 - Swagger/OpenAPI: <http://localhost:8000/docs>
 - Readiness: <http://localhost:8000/health>
 
-The backend waits for healthy PostgreSQL and Redis. The worker registers both `app.tasks.documents` and `app.tasks.slides`; keep it running for uploads and slide jobs to finish.
+The backend waits for healthy PostgreSQL and Redis. Keep both workers running for uploads and agent jobs to finish.
 
 Useful operations:
 
 ```bash
 docker compose ps
-docker compose logs -f backend worker
+docker compose logs -f backend documents-worker tasks-worker
 docker compose down
 ```
 
@@ -120,11 +126,15 @@ The Node dependencies in `backend/package.json` are used by the slide-generation
 Terminal 2, from `backend/`:
 
 ```bash
-uv run taskiq worker app.broker:broker app.tasks.slides app.tasks.documents \
-  --workers 1 --max-async-tasks 1
+uv run python -m app.worker documents
+# In a second terminal:
+uv run python -m app.worker tasks
 ```
 
-The API and worker must share the same `DATABASE_URL`, `REDIS_URL`, `SLIDES_DOCUMENTS_ROOT`, `SLIDES_JOBS_ROOT`, and `SLIDES_OUTPUT_ROOT`.
+The API and both workers must share the same `DATABASE_URL`, `REDIS_URL`,
+`DOCUMENTS_ROOT`, `AGENT_JOBS_ROOT`, and `AGENT_OUTPUT_ROOT`. The old `SLIDES_*`
+filesystem/runtime names remain accepted as deprecated aliases when canonical names
+are absent.
 
 ### Frontend
 
@@ -176,13 +186,13 @@ backend/
   app/services/chat/       file_search, response, citation adapters
   app/services/documents/  repository and secure file storage
   app/services/slides/     PPTX generation and validation runtime
-  app/tasks/               Taskiq document and slide consumers
+  app/tasks/               Taskiq document and agent consumers
   scripts/                 Corpus migration utilities
   tests/                   Backend tests
 frontend/
   app/page.tsx             Chat, knowledge-base, slide workspace
   lib/api.ts               Typed /api/v1 client and SSE parser
-docker-compose.yml          PostgreSQL, Redis, backend, worker, frontend
+docker-compose.yml          PostgreSQL, Redis, backend, split workers, frontend
 IMPLEMENTATION_PLAN.md      Architecture comparison and rollout decisions
 ```
 

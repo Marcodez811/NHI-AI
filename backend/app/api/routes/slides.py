@@ -24,7 +24,8 @@ from app.models.slides import (
     SlidesTaskPayload,
     SlidesTaskResult,
 )
-from app.tasks.slides import generate_slides_task
+from app.services.agentic import AgentTaskPayload
+from app.tasks.agents import run as agents_run
 
 router = APIRouter(prefix="/slides", tags=["slides"])
 
@@ -39,7 +40,8 @@ def get_result_backend() -> Any:
 
 
 def get_generate_slides_task() -> Any:
-    return generate_slides_task
+    # All agentic work, including slides, crosses the generic task boundary.
+    return agents_run
 
 
 def _safe_stage(value: object, *, fallback: str = "processing") -> str:
@@ -111,6 +113,16 @@ async def _read_result(backend: Any, job_id: UUID) -> SlidesTaskResult | None:
     if getattr(task_result, "is_err", False):
         return SlidesTaskResult(job_id=job_id, status=JobStatus.FAILED, error="Presentation generation failed.")
     value = getattr(task_result, "return_value", task_result)
+    # ``agents.run`` wraps workflow output in AgentTaskResult.  Unwrap only a
+    # successful slides result and preserve the historical SlidesTaskResult
+    # API returned to poll/download callers.
+    wrapped_workflow = value.get("workflow") if isinstance(value, dict) else getattr(value, "workflow", None)
+    wrapped_status = value.get("status") if isinstance(value, dict) else getattr(value, "status", None)
+    wrapped_output = value.get("output") if isinstance(value, dict) else getattr(value, "output", None)
+    if wrapped_workflow is not None and wrapped_output is not None:
+        if wrapped_workflow != "slides" or str(wrapped_status) != "completed":
+            return SlidesTaskResult(job_id=job_id, status=JobStatus.FAILED, error="Presentation generation failed.")
+        value = wrapped_output
     try:
         result = SlidesTaskResult.model_validate(value)
     except Exception:
@@ -201,8 +213,9 @@ async def create_slides_job(
         ) from exc
 
     payload = SlidesTaskPayload(job_id=job_id, **request.model_dump())
+    agent_payload = AgentTaskPayload(job_id=job_id, workflow="slides", input=payload.model_dump(mode="json"))
     try:
-        await task.kicker().with_task_id(str(job_id)).kiq(payload)
+        await task.kicker().with_task_id(str(job_id)).kiq(agent_payload)
     except Exception as exc:
         try:
             await _write_progress(
@@ -244,7 +257,7 @@ async def download_slides_job(
             detail="Presentation is not ready for download.",
         )
     key = Path(result.artifact_key or "")
-    output_root = settings.slides_output_root.resolve(strict=False)
+    output_root = settings.agent_output_root.resolve(strict=False)
     if not result.artifact_key or key.is_absolute() or ".." in key.parts:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Presentation file was not found.")
     artifact = (output_root / key).resolve(strict=False)

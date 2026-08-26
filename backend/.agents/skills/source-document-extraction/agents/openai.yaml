@@ -1,0 +1,4 @@
+interface:
+  display_name: "Source Document Extraction"
+  short_description: "Extract DOCX/PDF sources for slides"
+  default_prompt: "Use $source-document-extraction to extract these source documents into structured slide-planning artifacts."

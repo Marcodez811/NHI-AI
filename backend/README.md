@@ -17,12 +17,14 @@ flowchart LR
     API -->|catalog metadata| DB[(PostgreSQL)]
     API -->|source uploads and downloads| VOL[(Shared slides-data volume)]
     API -->|enqueue and poll| REDIS[(Redis Streams + result backend)]
-    REDIS --> WORKER[Taskiq worker]
-    WORKER --> DB
-    WORKER --> VOL
-    WORKER -->|document upload/index| VS[OpenAI vector store]
+    REDIS --> DW[documents-worker]
+    REDIS --> TW[tasks-worker]
+    DW --> DB
+    DW --> VOL
+    DW -->|document upload/index| VS[OpenAI vector store]
+    TW --> VOL
     API -->|Responses API + file_search| VS
-    WORKER -->|isolated slide turn| CODEX[OpenAI Codex SDK]
+    TW -->|isolated agent turns| CODEX[OpenAI Codex SDK]
     CODEX -->|PPTX + evidence + QA artifacts| VOL
 ```
 
@@ -32,11 +34,11 @@ flowchart LR
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | FastAPI process             | Validates requests, manages document/folder records, saves uploads, enqueues jobs, reports job state, serves downloads, and handles grounded chat requests.         |
 | PostgreSQL                  | Stores `Document`, `Folder`, and `IngestionJob` rows. It stores metadata and opaque OpenAI IDs, not document binary content.                                        |
-| Shared `slides-data` volume | Stores original documents, temporary slide workspaces, and published `.pptx` files. Both the API and worker mount the same volume.                                  |
-| Redis                       | Provides the Taskiq Redis Stream queue and stores task progress plus terminal results for one hour. Both document and slide tasks currently use the `slides` queue. |
-| Taskiq worker               | Runs document ingestion and slide generation outside the request/response process. Compose limits the worker to one process and one asynchronous task at a time.    |
+| Shared `slides-data` volume | Stores original documents, temporary agent workspaces, and published `.pptx` files. API and both workers mount the same volume.                                  |
+| Redis                       | Provides separate `documents` and `tasks` Taskiq Redis Streams; task progress/results use `tasks:result` and expire after one hour. |
+| Taskiq workers              | `documents-worker` handles `documents.ingest` (1 process/4 async tasks); `tasks-worker` handles the generic `agents.run` entrypoint (2 processes/2 async tasks). |
 | OpenAI vector store         | Holds indexed copies of uploaded documents used by `file_search`. Every indexed source is tagged with its application document ID and non-news metadata.            |
-| Codex slide runtime         | Works inside a per-job directory with staged source files, two local skills, offline dependencies, and workspace-write-only permissions.                            |
+| Codex slide runtime         | The registered `slides` adapter runs generation/correction in workspace-write mode, semantic review read-only, and publishes only after deterministic and semantic gates pass. |
 
 ## Data ownership
 
@@ -60,7 +62,7 @@ Redis
   the published presentation
 ```
 
-Only UUIDs cross the slide queue boundary. Absolute source paths are resolved by the worker from the shared volume and absolute artifact paths are never returned to the client.
+Only UUIDs cross the task queue boundary. Absolute source paths are resolved by workers from the shared volume and absolute artifact paths are never returned to the client.
 
 ## Complete backend file tree
 
@@ -77,12 +79,16 @@ backend/
 ├── package-lock.json
 ├── pyproject.toml
 ├── uv.lock
+├── .agents/
+│   └── skills/                         # backend-global allowlisted skills
+│       ├── source-document-extraction/
+│       └── pptx-nhi-tw/
 ├── app/
 │   ├── __init__.py
 │   ├── main.py                         # FastAPI assembly, lifecycle, DI, health routes
 │   ├── config.py                       # Environment-backed settings
 │   ├── db.py                           # SQLModel engine, tables, request sessions
-│   ├── broker.py                       # Redis Stream broker and result backend
+│   ├── broker.py                       # Separate document/task brokers and result backend
 │   ├── api/
 │   │   └── routes/
 │   │       ├── __init__.py
@@ -98,8 +104,15 @@ backend/
 │   ├── tasks/
 │   │   ├── __init__.py
 │   │   ├── documents.py                # documents.ingest Taskiq task
-│   │   └── slides.py                   # slides.generate Taskiq task
+│   │   ├── slides.py                   # deprecated in-process compatibility helper
+│   │   └── agents.py                   # stable agents.run worker import boundary
 │   └── services/
+│       ├── agentic/
+│       │   ├── contracts.py             # generic task/turn/adapter contracts
+│       │   ├── registry.py              # explicit workflow allowlist
+│       │   ├── runner.py                # Codex turns, progress, heartbeat, audits
+│       │   ├── service.py               # lifecycle and bounded review loop
+│       │   └── staging.py               # declared-skill staging
 │       ├── __init__.py
 │       ├── chat/
 │       │   ├── __init__.py
@@ -118,8 +131,9 @@ backend/
 │           ├── agent.py                 # Top-level slide orchestration facade
 │           ├── artifacts.py             # Workspaces, staging, preflight, validation, publish
 │           ├── contracts.py             # JobError and progress callback contracts
-│           ├── runtime.py               # Prompt, environment, Codex SDK execution
-│           ├── fonts/
+│           ├── runtime.py               # Legacy prompt/runtime compatibility helpers
+│           ├── adapter.py                # Registered slides WorkflowAdapter
+│           └── fonts/
 │           │   ├── NotoSansTC-Black.ttf
 │           │   ├── NotoSansTC-Bold.ttf
 │           │   ├── NotoSansTC-ExtraBold.ttf
@@ -139,55 +153,17 @@ backend/
 │           │   ├── NotoSerifTC-Regular.ttf
 │           │   ├── NotoSerifTC-SemiBold.ttf
 │           │   └── NotoSerifTC-VariableFont_wght.ttf
-│           └── .agents/
-│               └── skills/
-│                   ├── source-document-extraction/
-│                   │   ├── SKILL.md
-│                   │   ├── agents/
-│                   │   │   └── openai.yaml
-│                   │   ├── references/
-│                   │   │   ├── artifact-format.md
-│                   │   │   └── source-extraction.schema.json
-│                   │   └── scripts/
-│                   │       ├── extract_sources.py
-│                   │       ├── source_extraction.py
-│                   │       └── validate_sources.py
-│                   └── pptx-nhi-tw/
-│                       ├── SKILL.md
-│                       ├── agents/
-│                       │   └── openai.yaml
-│                       ├── assets/
-│                       │   ├── nhi_logo_large.png
-│                       │   └── nhi_logo_small.png
-│                       ├── references/
-│                       │   ├── generation-gotchas.md
-│                       │   ├── nhi-zh-tw.md
-│                       │   ├── qa.md
-│                       │   └── template-editing.md
-│                       ├── schemas/
-│                       │   ├── evidence_map_v1.json
-│                       │   ├── qa_report_v1.json
-│                       │   └── review_report_v1.json
-│                       └── scripts/
-│                           ├── __init__.py
-│                           ├── _upstream.py
-│                           ├── add_slide.py
-│                           ├── check_pptx_content.py
-│                           ├── clean.py
-│                           ├── contracts.py
-│                           ├── qa_report.py
-│                           ├── review_report.py
-│                           ├── thumbnail.py
-│                           ├── validate_evidence_map.py
-│                           └── office/
-│                               ├── soffice.py
-│                               └── validate.py
+│           └── (fonts and slide-specific helpers)
 ├── scripts/
 │   └── migrate_nhiqa.py                # Legacy NHI-QA metadata migration utility
 └── tests/
     ├── api/
     │   └── test_slides.py
+    ├── infrastructure/
+    │   └── test_workers.py
     ├── services/
+    │   ├── agentic/
+    │   │   └── test_framework.py
     │   ├── chat/
     │   │   ├── test_chat.py
     │   │   └── test_stream.py
@@ -211,7 +187,8 @@ backend/
 3. Document and chat routes receive a request-scoped `SQLModelDocumentRepository` backed by PostgreSQL or the configured SQLite database.
 4. The chat service receives the configured OpenAI model, vector-store ID, and a mapper from OpenAI file IDs back to local document UUIDs.
 5. Chat, document, and slide routers are mounted under `/api/v1`.
-6. Shutdown closes Redis and the API-owned broker connection.
+6. Shutdown closes Redis and both API-owned producer broker connections, including
+   partial-startup cleanup if the second broker cannot start.
 
 `GET /health/live` proves that the process is alive. `GET /health` also checks Redis and the database and returns `503` if either dependency is unavailable.
 
@@ -245,7 +222,7 @@ The slides API is asynchronous because extraction, generation, rendering, revisi
 flowchart TD
     A[POST /api/v1/slides/jobs] --> B[Validate request]
     B --> C[Create UUID and queued progress in Redis]
-    C --> D[Enqueue slides.generate with UUIDs only]
+    C --> D[Enqueue agents.run with UUIDs only]
     D --> E[Worker marks job running]
     E --> F[Resolve UUIDs from shared document volume]
     F --> G[Create isolated job workspace]
@@ -277,7 +254,7 @@ flowchart TD
 }
 ```
 
-The API validates a nonblank title, 1–20 unique document UUIDs, an exact requested length of 5–25 slides, and a `formal` or `casual` tone. It creates a job UUID, writes `queued` progress, and enqueues a `SlidesTaskPayload` using that same UUID as the Taskiq task ID. The response is immediate:
+The API validates a nonblank title, 1–20 unique document UUIDs, an exact requested length of 5–25 slides, and a `formal` or `casual` tone. It creates a job UUID, writes `queued` progress, and enqueues an `AgentTaskPayload` with `workflow="slides"` and the typed slide input using that same UUID as the Taskiq task ID. The response is immediate:
 
 ```json
 {
@@ -290,10 +267,10 @@ The payload contains document UUIDs, never filesystem paths, provider credential
 
 ### 2. Worker-side source resolution
 
-`generate_slides_task()` changes the job to `running` and uses `SharedVolumeDocumentResolver` to resolve each ID as:
+The generic `agents.run` task resolves the registered `slides` adapter. Its preparation hook changes the job to `running` and uses `SharedVolumeDocumentResolver` to resolve each ID as:
 
 ```text
-<SLIDES_DOCUMENTS_ROOT>/<document UUID>/<exactly one regular source file>
+<DOCUMENTS_ROOT>/<document UUID>/<exactly one regular source file>
 ```
 
 The resolver rejects missing or multiple files, symlinks, path escapes, non-regular files, and unsupported extensions. Its accepted set is `.pdf`, `.docx`, `.txt`, `.md`, `.rtf`, `.csv`, and `.xlsx`. This does not exactly match the upload API: uploads accept `.markdown`, but the slide resolver does not; the resolver accepts `.rtf`, `.csv`, and `.xlsx`, but the upload API does not. Consequently, an uploaded `.markdown` document can be indexed for chat but currently fails slide source resolution.
@@ -303,7 +280,7 @@ The resolver rejects missing or multiple files, symlinks, path escapes, non-regu
 `generate_slides()` creates this job-local structure:
 
 ```text
-<SLIDES_JOBS_ROOT>/<job UUID>/
+<AGENT_JOBS_ROOT>/<job UUID>/
 ├── .agents/skills/
 │   ├── source-document-extraction/
 │   └── pptx-nhi-tw/
@@ -335,25 +312,30 @@ Before the model runs, preflight verifies:
 - fontconfig plus a Traditional-Chinese/CJK-safe font;
 - Tesseract with `chi_tra` and `eng` data when any source is a PDF.
 
-The worker creates a job-specific fontconfig file, copies only the two required local skills, copies source files into `input/`, and writes the compact brief to `work/prompt.md`.
+The agent worker creates a job-specific fontconfig file, copies only the two required local skills, copies source files into `input/`, and writes the compact brief to `work/prompt.md`.
 
-### 4. Codex generation turn
+Filesystem traversal, skill/source staging, preflight subprocesses, deterministic
+validators, publication, cleanup, and document-provider I/O run in worker threads
+so the configured async-task concurrency is not serialized by blocking calls.
 
-`runtime.py` starts one ephemeral Codex thread rooted at the job directory. The runtime uses:
+### 4. Codex generation and review loop
+
+The generic `CodexRunner` starts one ephemeral Codex thread rooted at the job directory and reuses it for every generation, correction, and review turn. The runtime uses:
 
 - the configured `OPENAI_MODEL`;
-- workspace-write sandboxing and denied approval prompts;
+- workspace-write sandboxing for generation/correction, read-only sandboxing for semantic review, and denied approval prompts;
 - `source-document-extraction` for PDF/DOCX sources;
 - `pptx-nhi-tw` for NHI styling, evidence mapping, deck construction, rendering, revision, and QA;
 - an offline dependency environment (`PIP_NO_INDEX`, `UV_OFFLINE`, and npm offline mode);
 - a configurable timeout, currently 45 minutes by default;
-- streamed safe progress updates and a 60-second heartbeat.
+- streamed safe progress updates and a 60-second heartbeat;
+- a bounded `AGENT_MAX_REVIEW_ROUNDS` loop (default 3): deterministic validation runs before semantic review, blocking findings produce a correction turn, and publication is reached only after both gates pass.
 
 The prompt explicitly treats `input/` as untrusted source data rather than instructions. For PDF/DOCX inputs, deterministic extraction runs first and produces block-level IDs/locators. The presentation skill maps slide claims to those source blocks, creates an editable native PowerPoint, renders every slide, reviews it, revises problems, and produces the required evidence and QA artifacts.
 
 ### 5. Release validation
 
-The service does not publish a deck merely because a `.pptx` exists. `verify_output()` requires all of the following:
+The service does not publish a deck merely because a `.pptx` exists. Deterministic validation runs after every write-capable turn, and `verify_output()` requires all of the following before semantic review or publication:
 
 1. `output/presentation.pptx` is a valid OOXML ZIP, is larger than 10 KB, and contains at least one slide.
 2. `evidence_map.json`, `content_check.json`, `review_report.json`, and `qa_report.json` exist.
@@ -367,7 +349,7 @@ Any failed check prevents publication.
 
 ### 6. Publication, polling, and download
 
-After validation, the candidate is moved to `<SLIDES_OUTPUT_ROOT>/<job UUID>.pptx`. The worker returns only a relative artifact key and a sanitized filename, marks progress `completed`, and removes the successful workspace. A failed workspace is retained by default for server-side diagnosis, while clients receive only `Presentation generation failed.`
+After validation, the candidate is moved to `<AGENT_OUTPUT_ROOT>/<job UUID>.pptx`. The worker returns only a relative artifact key and a sanitized filename, marks progress `completed`, and removes the successful workspace. A failed workspace is retained by default for server-side diagnosis, while clients receive only `Presentation generation failed.`
 
 Clients poll `GET /api/v1/slides/jobs/{job_id}`. A completed response includes a download URL:
 
@@ -436,12 +418,24 @@ cp backend/.env.example backend/.env
 | `OPENAI_CHAT_MODEL`                | Grounded chat model.                                                | `gpt-5.6-luna`                                |
 | `OPENAI_VECTOR_STORE_ID`           | Shared non-news retrieval index.                                    | Optional setting, required for ingestion/chat |
 | `DATABASE_URL`                     | SQLModel database connection.                                       | `sqlite:///./nhi_ai.db`                       |
-| `SLIDES_JOBS_ROOT`                 | Temporary slide job workspaces.                                     | `/tmp/slides/jobs`                            |
-| `SLIDES_DOCUMENTS_ROOT`            | Original shared document storage.                                   | `/tmp/slides/documents`                       |
-| `SLIDES_OUTPUT_ROOT`               | Published PPTX storage.                                             | `/tmp/slides/output`                          |
-| `SLIDES_TIMEOUT_MINUTES`           | Maximum Codex turn duration.                                        | `45`                                          |
-| `SLIDES_KEEP_WORKSPACE_ON_FAILURE` | Retain failed workspaces for diagnosis.                             | `true`                                        |
+| `DOCUMENTS_ROOT`                   | Original shared document storage.                                   | `/tmp/documents`                              |
+| `AGENT_JOBS_ROOT`                  | Temporary agent job workspaces.                                     | `/tmp/agents/jobs`                             |
+| `AGENT_OUTPUT_ROOT`                | Published agent artifacts (including PPTX).                         | `/tmp/agents/output`                           |
+| `AGENT_TIMEOUT_MINUTES`            | Maximum Codex turn duration.                                        | `45`                                          |
+| `AGENT_KEEP_WORKSPACE_ON_FAILURE`  | Retain failed workspaces for diagnosis.                             | `true`                                        |
+| `AGENT_MAX_REVIEW_ROUNDS`          | Maximum same-thread semantic review/correction rounds.               | `3`                                           |
+| `DOCUMENTS_QUEUE_NAME`             | Redis Stream for document ingestion.                                | `documents`                                   |
+| `TASKS_QUEUE_NAME`                 | Redis Stream for agent jobs.                                         | `tasks`                                       |
+| `DOCUMENTS_WORKER_PROCESSES`       | Document worker process count.                                      | `1`                                           |
+| `DOCUMENTS_WORKER_MAX_ASYNC_TASKS` | Document async task limit per process.                              | `4`                                           |
+| `TASKS_WORKER_PROCESSES`           | Agent worker process count.                                          | `2`                                           |
+| `TASKS_WORKER_MAX_ASYNC_TASKS`     | Agent async task limit per process.                                  | `2`                                           |
+| `SLIDES_*`                         | Deprecated aliases; canonical names win when both are set.          | See `.env.example`                            |
 | `MAX_UPLOAD_BYTES`                 | Maximum document upload size.                                       | `262144000` (250 MiB)                         |
+
+Worker process and async-task limits are read when each worker starts; change
+the settings and restart the affected worker to apply them. There is no dynamic
+autoscaling.
 
 Do not commit `.env`; it contains the API key.
 
@@ -453,12 +447,12 @@ From the repository root:
 docker compose up --build
 ```
 
-This starts PostgreSQL, Redis, FastAPI, one Taskiq worker, and the frontend. Compose overrides the backend paths to `/data/jobs`, `/data/documents`, and `/data/output`, all backed by the `slides-data` volume shared by `backend` and `worker`.
+This starts PostgreSQL, Redis, FastAPI, separate document and agent Taskiq workers, and the frontend. Compose overrides the shared paths to `/data/jobs`, `/data/documents`, and `/data/output`, all backed by the `slides-data` volume shared by `backend` and both workers.
 
 ```bash
 curl http://localhost:8000/health/live
 curl http://localhost:8000/health
-docker compose logs -f backend worker
+docker compose logs -f backend documents-worker tasks-worker
 ```
 
 ## Run locally
@@ -477,8 +471,9 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 In another terminal:
 
 ```bash
-uv run taskiq worker app.broker:broker app.tasks.slides app.tasks.documents \
-  --workers 1 --max-async-tasks 1
+uv run python -m app.worker documents
+# In another terminal:
+uv run python -m app.worker tasks
 ```
 
 For host-native Redis, set `REDIS_URL=redis://localhost:6379/0`. Keep the API and worker on the same database and filesystem roots; otherwise the worker cannot resolve uploads or publish files that the API can serve.

@@ -9,7 +9,7 @@ from typing import Any
 
 from taskiq.depends.progress_tracker import TaskProgress
 
-from app.broker import broker, result_backend
+from app.broker import result_backend
 from app.config import settings
 from app.models.slides import JobStatus, SlidesTaskPayload, SlidesTaskResult
 from app.services.virtual_fs import DocumentResolutionError, SharedVolumeDocumentResolver
@@ -70,9 +70,13 @@ def _relative_artifact_key(artifact_key: str | None) -> str | None:
     return candidate.as_posix()
 
 
-@broker.task(task_name="slides.generate")
 async def generate_slides_task(payload: SlidesTaskPayload) -> SlidesTaskResult:
-    """Resolve documents in the worker, then run the slide-generation service."""
+    """Compatibility helper for direct callers; it is not a Taskiq task.
+
+    New jobs use ``agents.run`` exclusively.  Keeping this unregistered helper
+    lets older in-process integrations migrate without reintroducing a second
+    queue entrypoint.
+    """
 
     job_id = str(payload.job_id)
     started_at = _now()
@@ -98,7 +102,7 @@ async def generate_slides_task(payload: SlidesTaskPayload) -> SlidesTaskResult:
 
     try:
         source_paths = await SharedVolumeDocumentResolver(
-            settings.slides_documents_root,
+            settings.documents_root,
         ).resolve_many(payload.document_ids)
 
         # Imported here so an API process can start before the optional slide
@@ -109,12 +113,12 @@ async def generate_slides_task(payload: SlidesTaskPayload) -> SlidesTaskResult:
             job_id=payload.job_id,
             source_paths=source_paths,
             request=payload,
-            jobs_root=settings.slides_jobs_root,
-            output_root=settings.slides_output_root,
+            jobs_root=settings.agent_jobs_root,
+            output_root=settings.agent_output_root,
             api_key=settings.openai_api_key,
             model=settings.openai_model,
-            timeout_minutes=settings.slides_timeout_minutes,
-            keep_workspace_on_failure=settings.slides_keep_workspace_on_failure,
+            timeout_minutes=settings.agent_timeout_minutes,
+            keep_workspace_on_failure=settings.agent_keep_workspace_on_failure,
             progress_callback=report_progress,
         )
         result = SlidesTaskResult.model_validate(generated)
@@ -162,3 +166,9 @@ async def generate_slides_task(payload: SlidesTaskPayload) -> SlidesTaskResult:
         except Exception:
             pass
         return result
+
+
+# A few legacy in-process integrations accessed Taskiq's ``original_func``.
+# Keep that callable alias during migration, but do not expose task metadata or
+# register it with a broker: ``agents.run`` is the sole agent queue entrypoint.
+generate_slides_task.original_func = generate_slides_task

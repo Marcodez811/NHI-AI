@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "source-extraction.schema.json",
+  "title": "Structured source extraction artifacts",
+  "type": "object",
+  "required": ["format_version", "status", "documents"],
+  "properties": {
+    "format_version": {"const": "1.0"},
+    "status": {"enum": ["ok", "warning", "error"]},
+    "documents": {"type": "array", "items": {"$ref": "#/$defs/document"}},
+    "document_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}}
+  },
+  "$defs": {
+    "document": {"type": "object", "required": ["document_id", "status", "source", "index"], "properties": {"document_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "status": {"enum": ["ok", "warning", "error"]}, "source": {"type": "string"}, "index": {"type": "string"}}},
+    "block": {"type": "object", "required": ["id", "kind", "text", "locator"], "properties": {"id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "kind": {"enum": ["heading", "paragraph", "list_item", "table", "figure", "footnote"]}, "text": {"type": "string"}, "locator": {"type": "object"}}}
+  }
+}

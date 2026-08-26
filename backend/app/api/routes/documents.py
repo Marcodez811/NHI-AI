@@ -56,7 +56,7 @@ def get_document_repository() -> DocumentRepository:
 
 
 def get_document_storage() -> DocumentStorage:
-    return LocalDocumentStorage(settings.slides_documents_root)
+    return LocalDocumentStorage(settings.documents_root)
 
 
 def get_ingestion_task() -> Any:

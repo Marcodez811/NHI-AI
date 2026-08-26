@@ -51,6 +51,9 @@ Thumbs.db
 
 # Local agent and analysis output
 .agents/
+!backend/.agents/
+!backend/.agents/skills/
+!backend/.agents/skills/**
 .codex/
 graphify-out/
 

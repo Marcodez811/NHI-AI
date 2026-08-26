@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,16 +62,20 @@ async def generate_slides(
     job_dir: Path | None = None
     job_logger = logger.bind(job_id=str(job_id))
     try:
-        validated_sources = validate_source_paths(source_paths)
+        # These helpers perform filesystem traversal, ZIP parsing, and (during
+        # preflight/verification) blocking subprocess calls.  Keep them off
+        # Taskiq's event loop so another job in the same worker can make
+        # progress while this job is preparing or releasing artifacts.
+        validated_sources = await asyncio.to_thread(validate_source_paths, source_paths)
         job_logger.info("Starting presentation job with {} source file(s)", len(validated_sources))
-        job_dir = create_job_workspace(str(job_id), jobs_root)
-        fontconfig_file = create_job_fontconfig(job_dir)
+        job_dir = await asyncio.to_thread(create_job_workspace, str(job_id), jobs_root)
+        fontconfig_file = await asyncio.to_thread(create_job_fontconfig, job_dir)
         preflight_environment = build_job_environment(fontconfig_file=fontconfig_file)
-        cjk_font = preflight(validated_sources, environment=preflight_environment)
-        stage_required_skills(job_dir)
-        staged_names = stage_uploads(job_dir, validated_sources)
+        cjk_font = await asyncio.to_thread(preflight, validated_sources, environment=preflight_environment)
+        await asyncio.to_thread(stage_required_skills, job_dir)
+        staged_names = await asyncio.to_thread(stage_uploads, job_dir, validated_sources)
         prompt = build_prompt(request, staged_names, font_family=cjk_font)
-        (job_dir / "work" / "prompt.md").write_text(prompt, encoding="utf-8")
+        await asyncio.to_thread((job_dir / "work" / "prompt.md").write_text, prompt, encoding="utf-8")
         await run_codex(
             job_dir,
             prompt,
@@ -82,9 +87,10 @@ async def generate_slides(
             cjk_font=cjk_font,
             progress_callback=progress_callback,
         )
-        published = publish_output(verify_output(job_dir), str(job_id), output_root)
+        verified_output = await asyncio.to_thread(verify_output, job_dir)
+        published = await asyncio.to_thread(publish_output, verified_output, str(job_id), output_root)
         finished_at = datetime.now(timezone.utc)
-        cleanup_job(job_dir)
+        await asyncio.to_thread(cleanup_job, job_dir)
         job_logger.success("Presentation job completed")
         return SlidesTaskResult(
             job_id=job_id,
@@ -97,10 +103,10 @@ async def generate_slides(
     except JobError:
         job_logger.error("Presentation job failed")
         if job_dir is not None and not keep_workspace_on_failure:
-            cleanup_job(job_dir)
+            await asyncio.to_thread(cleanup_job, job_dir)
         raise
     except Exception as exc:
         job_logger.exception("Unexpected presentation job failure")
         if job_dir is not None and not keep_workspace_on_failure:
-            cleanup_job(job_dir)
+            await asyncio.to_thread(cleanup_job, job_dir)
         raise JobError("unexpected", f"presentation generation failed ({type(exc).__name__})") from exc

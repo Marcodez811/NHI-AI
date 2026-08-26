@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import zipfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 from xml.sax.saxutils import escape
 
 from app.models.slides import DEFAULT_MAX_DOCUMENTS
@@ -18,7 +20,9 @@ from .contracts import JobError
 
 ASSETS_ROOT = Path(__file__).resolve().parent
 BACKEND_ROOT = ASSETS_ROOT.parents[2]
-REPOSITORY_SKILLS_DIR = ASSETS_ROOT / ".agents" / "skills"
+# Skills are a backend-global catalog.  Adapters declare the subset they need
+# and the generic orchestrator stages only those names into each job.
+REPOSITORY_SKILLS_DIR = ASSETS_ROOT.parents[2] / ".agents" / "skills"
 WINDOWS_FONTS_DIR = Path("/mnt/c/Windows/Fonts")
 SOURCE_SKILL = "source-document-extraction"
 PPTX_SKILL = "pptx-nhi-tw"
@@ -133,7 +137,24 @@ def validate_source_paths(source_paths: Sequence[Path]) -> list[Path]:
 
 
 def create_job_workspace(job_id: str, jobs_root: Path) -> Path:
-    job_dir = jobs_root / job_id
+    if not isinstance(job_id, str) or not job_id or job_id in {".", ".."} or Path(job_id).name != job_id:
+        raise JobError("workspace", "job identifier is invalid")
+    jobs_root = Path(jobs_root).expanduser().resolve()
+    try:
+        jobs_root.mkdir(parents=True, exist_ok=True)
+        job_dir = jobs_root / job_id
+        if job_dir.is_symlink():
+            raise JobError("workspace", "job workspace is invalid")
+        job_dir.mkdir(parents=True, exist_ok=True)
+        resolved = job_dir.resolve(strict=True)
+    except JobError:
+        raise
+    except OSError as exc:
+        raise JobError("workspace", "job workspace is unavailable") from exc
+    try:
+        resolved.relative_to(jobs_root)
+    except ValueError as exc:
+        raise JobError("workspace", "job workspace is invalid") from exc
     for relative_path in ("input", "template", "work/extracted", "work/images", "work/intermediate", "output"):
         (job_dir / relative_path).mkdir(parents=True, exist_ok=True)
     return job_dir
@@ -233,10 +254,32 @@ def verify_output(job_dir: Path, *, runner: Callable[..., subprocess.CompletedPr
 
 
 def publish_output(output_path: Path, job_id: str, destination_dir: Path) -> Path:
+    if not isinstance(job_id, str) or not job_id or job_id in {".", ".."} or Path(job_id).name != job_id:
+        raise JobError("publish", "job identifier is invalid")
+    output_path = Path(output_path)
+    if output_path.is_symlink() or not output_path.is_file():
+        raise JobError("publish", "presentation artifact is unavailable")
     destination = destination_dir.expanduser().resolve()
-    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise JobError("publish", "presentation artifact could not be published") from exc
     published = destination / f"{job_id}.pptx"
-    shutil.move(str(output_path), published)
+    # Copy to a destination-local temporary file, then create a hard link with
+    # an exclusive no-overwrite operation.  This makes publication atomic and
+    # protects an already-published artifact from replayed job IDs.
+    temporary = destination / f".{published.name}.{uuid4().hex}.tmp"
+    try:
+        shutil.copy2(output_path, temporary, follow_symlinks=False)
+        os.link(temporary, published)
+        temporary.unlink(missing_ok=True)
+        output_path.unlink()
+    except FileExistsError as exc:
+        temporary.unlink(missing_ok=True)
+        raise JobError("publish", "presentation artifact already exists") from exc
+    except (OSError, shutil.Error) as exc:
+        temporary.unlink(missing_ok=True)
+        raise JobError("publish", "presentation artifact could not be published") from exc
     return published
 
 
