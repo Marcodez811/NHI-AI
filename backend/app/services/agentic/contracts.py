@@ -14,7 +14,7 @@ from enum import StrEnum
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class WorkflowStatus(StrEnum):
@@ -22,6 +22,25 @@ class WorkflowStatus(StrEnum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class AgentPhase(StrEnum):
+    """Stable, user-facing lifecycle phases for an agent workflow.
+
+    These values deliberately describe the workflow rather than a provider
+    SDK event or a worker implementation detail.  They are safe to persist in
+    progress metadata and to expose from workflow-specific APIs.
+    """
+
+    QUEUED = "queued"
+    PREPARING = "preparing"
+    DRAFTING = "drafting"
+    VALIDATING = "validating"
+    REVIEWING = "reviewing"
+    REVISING = "revising"
+    PUBLISHING = "publishing"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -60,10 +79,21 @@ class AgentTaskResult(BaseModel):
     job_id: UUID | str
     workflow: str
     status: WorkflowStatus
+    phase: AgentPhase | None = None
     output: Any = None
     started_at: datetime
     finished_at: datetime
     error: str | None = None
+
+    @model_validator(mode="after")
+    def default_terminal_phase(self) -> "AgentTaskResult":
+        """Keep older task constructors valid while normalizing terminals."""
+
+        if self.status is WorkflowStatus.COMPLETED:
+            self.phase = AgentPhase.COMPLETED
+        elif self.status is WorkflowStatus.FAILED:
+            self.phase = AgentPhase.FAILED
+        return self
 
 
 class TurnAudit(BaseModel):

@@ -21,7 +21,7 @@ from typing import Any
 from loguru import logger
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox, SkillInput, TextInput
 
-from .contracts import ProgressCallback, TurnAudit, TurnRequest
+from .contracts import AgentPhase, ProgressCallback, TurnAudit, TurnRequest
 
 
 class WorkflowExecutionError(RuntimeError):
@@ -111,6 +111,19 @@ def _safe_progress(method: str, payload: Any) -> tuple[str, str] | None:
     return mapping.get(method)
 
 
+def _turn_phase(kind: str) -> AgentPhase:
+    """Translate a labeled turn into the stable public phase vocabulary."""
+
+    normalized = str(kind or "").strip().lower()
+    if normalized in {"correction", "revision", "revising"}:
+        return AgentPhase.REVISING
+    if normalized in {"review", "reviewing"}:
+        return AgentPhase.REVIEWING
+    if normalized in {phase.value for phase in AgentPhase}:
+        return AgentPhase(normalized)
+    return AgentPhase.DRAFTING
+
+
 class ProgressReporter:
     """Serialize sanitized progress and emit periodic heartbeats."""
 
@@ -121,10 +134,25 @@ class ProgressReporter:
         self._lock = asyncio.Lock()
         self._sequence = 0
         self._started = asyncio.get_running_loop().time()
+        self._phase = AgentPhase.PREPARING
 
-    async def emit(self, stage: str, message: str, *, sdk_event: str | None = None, heartbeat: bool = False) -> None:
+    async def emit(
+        self,
+        stage: str,
+        message: str,
+        *,
+        phase: AgentPhase | str | None = None,
+        sdk_event: str | None = None,
+        heartbeat: bool = False,
+    ) -> None:
         stage = stage if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", str(stage)) else "working"
         message = safe_error(message, "Workflow is in progress.")
+        if phase is not None:
+            try:
+                self._phase = AgentPhase(phase)
+            except ValueError:
+                # Provider or adapter labels never become public phase values.
+                pass
         async with self._lock:
             self._sequence += 1
             event: dict[str, Any] = {
@@ -134,6 +162,7 @@ class ProgressReporter:
                 "message": message,
                 "heartbeat": heartbeat,
                 "elapsed_seconds": round(asyncio.get_running_loop().time() - self._started, 1),
+                "phase": self._phase.value,
             }
             if sdk_event:
                 event["sdk_event"] = sdk_event
@@ -142,10 +171,15 @@ class ProgressReporter:
             if self.callback is not None:
                 try:
                     callback_value = self.callback
+                    # SDK event names are audit details.  They are written to
+                    # the server-side progress log but never sent through the
+                    # public progress callback.
+                    public_event = event.copy()
+                    public_event.pop("sdk_event", None)
                     if inspect.iscoroutinefunction(callback_value):
-                        await callback_value(event.copy())
+                        await callback_value(public_event)
                     else:
-                        result = await asyncio.to_thread(callback_value, event.copy())
+                        result = await asyncio.to_thread(callback_value, public_event)
                         if inspect.isawaitable(result):
                             await result
                 except Exception:
@@ -202,7 +236,6 @@ class CodexRunner:
         started = datetime.now(timezone.utc)
 
         async def execute() -> CodexRunResult:
-            await reporter.emit("starting", "Initializing Codex workflow execution")
             environment = os.environ.copy()
             environment["PYTHONPATH"] = os.pathsep.join(str(self.backend_root) for _ in [0]) + (os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else "")
             async with self.codex_factory(CodexConfig(env=environment, cwd=str(workspace))) as codex:
@@ -210,14 +243,17 @@ class CodexRunner:
                     raise WorkflowExecutionError("Codex provider is not configured")
                 await codex.login_api_key(self.api_key)
                 thread = await codex.thread_start(cwd=str(workspace), model=self.model, sandbox=Sandbox.workspace_write, approval_mode=ApprovalMode.deny_all, ephemeral=True)
-                await reporter.emit("agent", "Codex workflow thread is ready")
                 audits: list[TurnAudit] = []
                 response: str | None = None
                 pending = list(turns)
                 while pending:
                     turn_request = pending.pop(0)
-                    turn_stage = turn_request.kind if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", turn_request.kind) else "working"
-                    await reporter.emit(turn_stage, f"Codex {turn_request.kind} turn is running")
+                    turn_phase = _turn_phase(turn_request.kind)
+                    await reporter.emit(
+                        turn_phase.value,
+                        f"Agent {turn_request.kind} step is running.",
+                        phase=turn_phase,
+                    )
                     inputs: list[Any] = [SkillInput(name=name, path=str(workspace / ".agents" / "skills" / name / "SKILL.md")) for name in skill_names]
                     inputs.append(TextInput(turn_request.prompt))
                     # New SDKs accept per-turn sandbox/output schema.  The
@@ -283,19 +319,18 @@ class CodexRunner:
                                 pending.extend(follow_up)
                 result = CodexRunResult(thread_id=str(getattr(thread, "id", "unknown")), audits=audits, response=response)
                 await self._persist_audits(audit_path, result.thread_id, audits)
-                await reporter.emit("completed", "Codex workflow artifacts are ready")
                 return result
 
         try:
             return await asyncio.wait_for(execute(), timeout=self.timeout_seconds)
         except TimeoutError as exc:
-            await reporter.emit("failed", "Workflow timed out")
+            await reporter.emit(AgentPhase.FAILED.value, "Workflow timed out.", phase=AgentPhase.FAILED)
             raise WorkflowTimeoutError("Workflow timed out.") from exc
         except WorkflowExecutionError:
-            await reporter.emit("failed", "Workflow execution failed")
+            await reporter.emit(AgentPhase.FAILED.value, "Workflow execution failed.", phase=AgentPhase.FAILED)
             raise
         except Exception as exc:
-            await reporter.emit("failed", "Workflow execution failed")
+            await reporter.emit(AgentPhase.FAILED.value, "Workflow execution failed.", phase=AgentPhase.FAILED)
             raise WorkflowExecutionError("Workflow execution failed.") from exc
         finally:
             stop_heartbeat.set()
@@ -317,12 +352,18 @@ class CodexRunner:
         items: list[Any] = []
         usage = None
         completed = None
+        turn_phase = _turn_phase(kind)
         async for event in handle.stream():
             method = str(getattr(event, "method", "unknown"))
             payload = getattr(event, "payload", None)
             progress = _safe_progress(method, payload)
             if progress:
-                await reporter.emit(progress[0], progress[1], sdk_event=method)
+                await reporter.emit(
+                    turn_phase.value,
+                    progress[1],
+                    phase=turn_phase,
+                    sdk_event=method,
+                )
             event_turn_id = getattr(payload, "turn_id", None)
             if method == "item/completed" and (event_turn_id is None or event_turn_id == getattr(handle, "id", None)):
                 item = getattr(payload, "item", None)

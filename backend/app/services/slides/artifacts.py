@@ -14,7 +14,7 @@ from typing import Any
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
-from app.models.slides import DEFAULT_MAX_DOCUMENTS
+from app.models.slides import DEFAULT_MAX_DOCUMENTS, SUPPORTED_SLIDE_SOURCE_EXTENSIONS
 
 from .contracts import JobError
 
@@ -27,7 +27,9 @@ WINDOWS_FONTS_DIR = Path("/mnt/c/Windows/Fonts")
 SOURCE_SKILL = "source-document-extraction"
 PPTX_SKILL = "pptx-nhi-tw"
 REQUIRED_SKILLS = (SOURCE_SKILL, PPTX_SKILL)
-SUPPORTED_SOURCE_EXTENSIONS = frozenset({".pdf", ".docx", ".txt", ".md", ".rtf", ".csv", ".xlsx"})
+# Backwards-compatible import surface for callers that used this module's old
+# constant. The canonical set is shared with the API and worker resolver.
+SUPPORTED_SOURCE_EXTENSIONS = SUPPORTED_SLIDE_SOURCE_EXTENSIONS
 REQUIRED_PYTHON_AGENT_PACKAGES = {"PIL": "Pillow", "lxml": "lxml", "defusedxml": "defusedxml"}
 REQUIRED_PDF_AGENT_PACKAGES = {
     "pdfplumber": "pdfplumber",

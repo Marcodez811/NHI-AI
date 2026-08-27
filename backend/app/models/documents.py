@@ -30,6 +30,7 @@ class DocumentStatus(StrEnum):
     READY = "ready"
     FAILED = "failed"
     DELETING = "deleting"
+    DELETE_FAILED = "delete_failed"
 
 
 SUPPORTED_DOCUMENT_EXTENSIONS = frozenset({".pdf", ".docx", ".md", ".markdown", ".txt"})
@@ -191,6 +192,20 @@ class DocumentTaskPayload(BaseModel):
     ingestion_job_id: UUID
     category: DocumentCategory
     attempt: int = PydanticField(default=0, ge=0)
+
+
+class DocumentDeleteTaskPayload(BaseModel):
+    """Opaque, retry-safe input for asynchronous document deletion.
+
+    The remote IDs are captured when the API accepts the deletion.  Keeping
+    them on the task boundary lets cleanup continue even if a later catalog
+    read changes or removes provider metadata, while the worker still falls
+    back to the current row for older/manual payloads.
+    """
+
+    document_id: UUID
+    remote_file_id: str | None = None
+    remote_vector_store_id: str | None = None
 
 
 def as_document_read(document: Document) -> DocumentRead:

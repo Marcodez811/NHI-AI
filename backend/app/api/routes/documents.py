@@ -13,6 +13,7 @@ from app.config import settings
 from app.models.documents import (
     Document,
     DocumentCategory,
+    DocumentDeleteTaskPayload,
     DocumentListResponse,
     DocumentRead,
     DocumentStatus,
@@ -42,7 +43,7 @@ from app.services.documents.storage import (
     LocalDocumentStorage,
     UnsupportedDocumentError,
 )
-from app.tasks.documents import ingest_document_task
+from app.tasks.documents import delete_document_task, ingest_document_task
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -61,6 +62,10 @@ def get_document_storage() -> DocumentStorage:
 
 def get_ingestion_task() -> Any:
     return ingest_document_task
+
+
+def get_document_delete_task() -> Any:
+    return delete_document_task
 
 
 def _not_found(message: str = "Document was not found.") -> HTTPException:
@@ -228,6 +233,10 @@ async def update_document(
     if not document:
         raise _not_found()
     changes = request.model_dump(exclude_unset=True)
+    if "folder_id" in changes and changes["folder_id"] is not None:
+        folder = await repo.get_folder(changes["folder_id"])
+        if folder is None:
+            raise _not_found("Folder was not found.")
     category_changed = "category" in changes and changes["category"] is not None and changes["category"].value != document.category
     if "category" in changes and changes["category"] is not None:
         changes["category"] = changes["category"].value
@@ -248,22 +257,67 @@ async def update_document(
     return as_document_read(document)
 
 
-@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{document_id}", status_code=status.HTTP_202_ACCEPTED, response_model=DocumentRead)
 async def delete_document(
     document_id: UUID,
     repo: Annotated[DocumentRepository, Depends(get_document_repository)] = None,
     storage: Annotated[DocumentStorage, Depends(get_document_storage)] = None,
-) -> None:
+    task: Annotated[Any, Depends(get_document_delete_task)] = None,
+) -> DocumentRead:
     document = await repo.get_document(document_id)
     if not document:
         raise _not_found()
+
+    # Ingestion owns the source and provider attachment while a document is
+    # queued/indexing.  Refuse deletion during that window instead of racing
+    # the ingestion worker and potentially leaving an orphaned remote file.
+    if document.status in {DocumentStatus.QUEUED.value, DocumentStatus.INDEXING.value}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document indexing is still in progress.",
+        )
+    if document.status not in {
+        DocumentStatus.READY.value,
+        DocumentStatus.FAILED.value,
+        DocumentStatus.DELETING.value,
+        DocumentStatus.DELETE_FAILED.value,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is not available for deletion.",
+        )
+
+    document.retrieval_enabled = False
     document.status = DocumentStatus.DELETING.value
-    document.stage = "deleting"
-    await repo.update_document(document)
+    document.stage = "deletion_queued"
+    document.error = None
     try:
-        await storage.delete(document_id)
-    except DocumentStorageError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        await repo.update_document(document)
+        await task.kicker().with_task_id(str(document.id)).kiq(
+            DocumentDeleteTaskPayload(
+                document_id=document.id,
+                remote_file_id=document.remote_file_id,
+                remote_vector_store_id=document.remote_vector_store_id,
+            )
+        )
+    except Exception as exc:
+        # The row remains available for an explicit retry.  Do not expose
+        # queue/provider exception details through the public API.
+        document.status = DocumentStatus.DELETE_FAILED.value
+        document.stage = "deletion_failed"
+        document.error = "Document deletion could not be queued."
+        document.retrieval_enabled = False
+        try:
+            await repo.update_document(document)
+        except Exception:
+            pass
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Document deletion is temporarily unavailable.",
+        ) from exc
+    return as_document_read(document)
 
 
 @router.get("/{document_id}/download")

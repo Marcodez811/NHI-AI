@@ -19,10 +19,12 @@ def test_brokers_are_isolated_and_results_are_retained_for_one_hour():
 def test_task_bindings_use_the_expected_broker_boundaries():
     from app.broker import documents_broker, tasks_broker
     from app.tasks.agents import run
-    from app.tasks.documents import ingest_document_task
+    from app.tasks.documents import delete_document_task, ingest_document_task
     from app.tasks.slides import generate_slides_task
 
     assert ingest_document_task.task_name == "documents.ingest"
+    assert delete_document_task.task_name == "documents.delete"
+    assert delete_document_task.broker is documents_broker
     assert run.task_name == "agents.run"
     assert ingest_document_task.broker is documents_broker
     assert run.broker is tasks_broker

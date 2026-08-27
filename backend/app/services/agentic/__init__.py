@@ -3,6 +3,7 @@
 from .contracts import (
     AgentTaskPayload,
     AgentTaskResult,
+    AgentPhase,
     BaseWorkflowAdapter,
     DeterministicValidationError,
     TurnAudit,
@@ -45,7 +46,7 @@ def __getattr__(name: str):
     raise AttributeError(name)
 
 __all__ = [
-    "AgentTaskPayload", "AgentTaskResult", "BaseWorkflowAdapter", "DeterministicValidationError", "TurnAudit",
+    "AgentPhase", "AgentTaskPayload", "AgentTaskResult", "BaseWorkflowAdapter", "DeterministicValidationError", "TurnAudit",
     "TurnRequest", "WorkflowAdapter", "WorkflowStatus", "WorkflowRegistry",
     "WorkflowRegistryError", "UnknownWorkflowError", "default_registry",
     "workflow_registry", "register_workflow", "SkillStagingError",

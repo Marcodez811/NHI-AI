@@ -76,6 +76,8 @@ class DocumentRepository(Protocol):
 
     async def delete_document(self, document_id: UUID) -> None: ...
 
+    async def hard_delete_document(self, document_id: UUID) -> None: ...
+
     async def create_ingestion_job(self, job: IngestionJob) -> IngestionJob: ...
 
     async def get_ingestion_job(self, job_id: UUID) -> IngestionJob | None: ...
@@ -170,6 +172,8 @@ class InMemoryDocumentRepository:
         if document.id not in self.documents:
             raise DocumentNotFoundError(str(document.id))
         _validate_document(document)
+        if document.folder_id is not None and document.folder_id not in self.folders:
+            raise FolderNotFoundError(str(document.folder_id))
         document.updated_at = _now()
         self.documents[document.id] = document
         return document
@@ -179,6 +183,18 @@ class InMemoryDocumentRepository:
             raise DocumentNotFoundError(str(document_id))
         self.documents[document_id].status = DocumentStatus.DELETING.value
         self.documents[document_id].updated_at = _now()
+
+    async def hard_delete_document(self, document_id: UUID) -> None:
+        """Remove a document and its ingestion history from the catalog."""
+
+        if document_id not in self.documents:
+            return
+        self.ingestion_jobs = {
+            job_id: job
+            for job_id, job in self.ingestion_jobs.items()
+            if job.document_id != document_id
+        }
+        del self.documents[document_id]
 
     async def create_ingestion_job(self, job: IngestionJob) -> IngestionJob:
         self.ingestion_jobs[job.id] = job
@@ -277,6 +293,8 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
         if not self.session.get(Document, document.id):
             raise DocumentNotFoundError(str(document.id))
         _validate_document(document)
+        if document.folder_id is not None and not self.session.get(Folder, document.folder_id):
+            raise FolderNotFoundError(str(document.folder_id))
         document.updated_at = _now()
         self.session.add(document)
         self.session.commit()
@@ -290,6 +308,25 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
         document.status = DocumentStatus.DELETING.value
         document.updated_at = _now()
         self.session.add(document)
+        self.session.commit()
+
+    async def hard_delete_document(self, document_id: UUID) -> None:
+        """Delete ingestion rows before the catalog row.
+
+        This is deliberately separate from ``delete_document``: the latter
+        remains the lightweight status transition used by older callers,
+        while workers call this only after remote and local cleanup succeeds.
+        """
+
+        document = self.session.get(Document, document_id)
+        if not document:
+            return
+        jobs = self.session.exec(
+            select(IngestionJob).where(IngestionJob.document_id == document_id)
+        ).all()
+        for job in jobs:
+            self.session.delete(job)
+        self.session.delete(document)
         self.session.commit()
 
     async def create_ingestion_job(self, job: IngestionJob) -> IngestionJob:

@@ -4,11 +4,18 @@ from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.services.agentic.contracts import AgentPhase
 
 DEFAULT_MAX_DOCUMENTS = 20
 HARD_UPLOAD_CEILING = 25
 DEFAULT_TIMEOUT_MINUTES = 45
+# The worker, artifact preflight, and API boundary must agree on which
+# document sources can be turned into a presentation. Keep this contract in
+# the slides model so it crosses the HTTP and generic-agent task boundaries
+# without each implementation maintaining its own list.
+SUPPORTED_SLIDE_SOURCE_EXTENSIONS = frozenset({".pdf", ".docx", ".md", ".markdown", ".txt"})
 
 
 class JobStatus(StrEnum):
@@ -48,6 +55,7 @@ class CreateSlidesJobResponse(BaseModel):
 
     job_id: UUID
     status: JobStatus
+    phase: AgentPhase = AgentPhase.QUEUED
 
 
 class SlidesJobStatusResponse(BaseModel):
@@ -55,6 +63,7 @@ class SlidesJobStatusResponse(BaseModel):
 
     job_id: UUID
     status: JobStatus
+    phase: AgentPhase
     stage: str | None = None
     message: str | None = None
     started_at: datetime | None = None
@@ -87,11 +96,27 @@ class SlidesTaskResult(BaseModel):
 
     job_id: UUID
     status: JobStatus
+    phase: AgentPhase | None = None
     artifact_key: str | None = None
     download_filename: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
+
+    @model_validator(mode="after")
+    def default_terminal_phase(self) -> "SlidesTaskResult":
+        """Make legacy worker results explicit at the public boundary."""
+
+        if self.status is JobStatus.COMPLETED:
+            self.phase = AgentPhase.COMPLETED
+        elif self.status is JobStatus.FAILED:
+            self.phase = AgentPhase.FAILED
+        elif self.phase is None:
+            self.phase = {
+                JobStatus.QUEUED: AgentPhase.QUEUED,
+                JobStatus.RUNNING: AgentPhase.PREPARING,
+            }[self.status]
+        return self
 
 
 @runtime_checkable

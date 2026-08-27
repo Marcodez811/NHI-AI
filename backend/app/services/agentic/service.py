@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel
 from openai_codex import Sandbox
 
-from .contracts import AgentTaskPayload, AgentTaskResult, DeterministicValidationError, TurnRequest, WorkflowStatus
+from .contracts import AgentPhase, AgentTaskPayload, AgentTaskResult, DeterministicValidationError, TurnRequest, WorkflowStatus
 from .registry import WorkflowRegistry, workflow_registry
 from .runner import CodexRunResult, CodexRunner, WorkflowExecutionError, WorkflowTimeoutError
 from .staging import stage_declared_skills
@@ -24,6 +24,41 @@ async def _call(value: Any, *args: Any, **kwargs: Any) -> Any:
     if inspect.iscoroutinefunction(value) or inspect.iscoroutinefunction(callable_value):
         return await value(*args, **kwargs)
     return await asyncio.to_thread(value, *args, **kwargs)
+
+
+_PHASE_MESSAGES = {
+    AgentPhase.QUEUED: "Agent workflow is queued.",
+    AgentPhase.PREPARING: "Preparing the agent workflow.",
+    AgentPhase.DRAFTING: "Drafting the presentation.",
+    AgentPhase.VALIDATING: "Validating the generated presentation.",
+    AgentPhase.REVIEWING: "Reviewing the generated presentation.",
+    AgentPhase.REVISING: "Revising the presentation based on review findings.",
+    AgentPhase.PUBLISHING: "Publishing the presentation.",
+    AgentPhase.COMPLETED: "The presentation is ready.",
+    AgentPhase.FAILED: "Agent workflow failed.",
+}
+
+
+async def _emit_phase(progress_callback: Any, phase: AgentPhase, message: str | None = None) -> None:
+    """Send only stable phase data through the public progress callback."""
+
+    if progress_callback is None:
+        return
+    event = {
+        # Keep stage phase-valued as a compatibility bridge for older worker
+        # progress writers that forward stage/message but predate ``phase``.
+        "stage": phase.value,
+        "phase": phase.value,
+        "message": message or _PHASE_MESSAGES[phase],
+        "heartbeat": False,
+    }
+    try:
+        result = progress_callback(event)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        # Progress is advisory and must not alter the workflow outcome.
+        return None
 
 
 def _validate_output(adapter: Any, output: Any) -> Any:
@@ -59,6 +94,7 @@ async def _execute_workflow(
     success = False
     try:
         payload = payload if isinstance(payload, AgentTaskPayload) else AgentTaskPayload.model_validate(payload)
+        await _emit_phase(progress_callback, AgentPhase.PREPARING)
         adapter = registry.resolve(payload.workflow)
         value = await _call(adapter.validate_input, payload.input)
         workspace_root = Path(workspace_root).resolve()
@@ -106,6 +142,7 @@ async def _execute_workflow(
                     raise WorkflowExecutionError("maximum review rounds exceeded")
                 review_round += 1
                 pending_feedback = str(feedback)[:12000]
+                await _emit_phase(progress_callback, AgentPhase.REVISING)
                 revision_prompt = await _call(
                     adapter.build_prompt,
                     value,
@@ -121,6 +158,7 @@ async def _execute_workflow(
 
             async def next_turn(audit: Any, response: str | None) -> TurnRequest | None:
                 if audit.kind in {"initial", "correction"}:
+                    await _emit_phase(progress_callback, AgentPhase.VALIDATING)
                     validate_generated = getattr(adapter, "validate_generated", None)
                     if validate_generated is not None:
                         try:
@@ -149,6 +187,7 @@ async def _execute_workflow(
                             # a user-correctable finding; fail closed without
                             # attempting another model turn.
                             raise WorkflowExecutionError("deterministic validator failed") from exc
+                    await _emit_phase(progress_callback, AgentPhase.REVIEWING)
                     review_prompt = await _call(build_review, value, workspace, audit, review_context)
                     schema = getattr(adapter, "review_output_schema", None)
                     return TurnRequest(kind="review", prompt=str(review_prompt), sandbox=Sandbox.read_only, output_schema=schema)
@@ -171,18 +210,24 @@ async def _execute_workflow(
                 feedback = await _call(feedback_hook, value, review, audit) if feedback_hook is not None else str(review)
                 return await correction(str(feedback))
 
+            await _emit_phase(progress_callback, AgentPhase.DRAFTING)
             run = await execution_runner.run(workspace, turns, skill_names=staged, progress_callback=progress_callback, audit_path=workspace / "work" / "codex_result.json", turn_callback=next_turn)
         else:
+            await _emit_phase(progress_callback, AgentPhase.DRAFTING)
             run = await (runner or CodexRunner()).run(workspace, turns, skill_names=staged, progress_callback=progress_callback, audit_path=workspace / "work" / "codex_result.json")
+        await _emit_phase(progress_callback, AgentPhase.PUBLISHING)
         output = await _call(adapter.publish, value, run, workspace)
         output = await asyncio.to_thread(_validate_output, adapter, output)
         success = True
-        return AgentTaskResult(job_id=payload.job_id, workflow=payload.workflow, status=WorkflowStatus.COMPLETED, output=_result_output(output), started_at=started, finished_at=datetime.now(timezone.utc), error=None)
+        await _emit_phase(progress_callback, AgentPhase.COMPLETED)
+        return AgentTaskResult(job_id=payload.job_id, workflow=payload.workflow, status=WorkflowStatus.COMPLETED, phase=AgentPhase.COMPLETED, output=_result_output(output), started_at=started, finished_at=datetime.now(timezone.utc), error=None)
     except WorkflowTimeoutError:
-        return AgentTaskResult(job_id=getattr(payload, "job_id", "unknown"), workflow=getattr(payload, "workflow", "unknown"), status=WorkflowStatus.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error="Workflow timed out.")
+        await _emit_phase(progress_callback, AgentPhase.FAILED, "Agent workflow timed out.")
+        return AgentTaskResult(job_id=getattr(payload, "job_id", "unknown"), workflow=getattr(payload, "workflow", "unknown"), status=WorkflowStatus.FAILED, phase=AgentPhase.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error="Workflow timed out.")
     except Exception:
         # Details are logged server-side only; callers get a stable sentence.
-        return AgentTaskResult(job_id=getattr(payload, "job_id", "unknown"), workflow=getattr(payload, "workflow", "unknown"), status=WorkflowStatus.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error="Workflow execution failed.")
+        await _emit_phase(progress_callback, AgentPhase.FAILED)
+        return AgentTaskResult(job_id=getattr(payload, "job_id", "unknown"), workflow=getattr(payload, "workflow", "unknown"), status=WorkflowStatus.FAILED, phase=AgentPhase.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error="Workflow execution failed.")
     finally:
         if adapter is not None and workspace is not None:
             try:
@@ -220,7 +265,8 @@ async def execute_workflow(
                 parsed = AgentTaskPayload.model_validate(payload)
             except Exception:
                 parsed = None
-        return AgentTaskResult(job_id=parsed.job_id if parsed else "unknown", workflow=parsed.workflow if parsed else "unknown", status=WorkflowStatus.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error="Workflow timed out.")
+        await _emit_phase(progress_callback, AgentPhase.FAILED, "Agent workflow timed out.")
+        return AgentTaskResult(job_id=parsed.job_id if parsed else "unknown", workflow=parsed.workflow if parsed else "unknown", status=WorkflowStatus.FAILED, phase=AgentPhase.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error="Workflow timed out.")
 
 
 __all__ = ["execute_workflow"]

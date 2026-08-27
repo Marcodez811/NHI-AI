@@ -20,11 +20,15 @@ from app.models.slides import (
     CreateSlidesJobResponse,
     GenerateSlidesRequest,
     JobStatus,
+    SUPPORTED_SLIDE_SOURCE_EXTENSIONS,
     SlidesJobStatusResponse,
     SlidesTaskPayload,
     SlidesTaskResult,
 )
-from app.services.agentic import AgentTaskPayload
+from app.services.agentic import AgentPhase, AgentTaskPayload
+from app.services.documents.repository import DocumentRepository
+from app.models.documents import DocumentStatus
+from app.api.routes.documents import get_document_repository
 from app.tasks.agents import run as agents_run
 
 router = APIRouter(prefix="/slides", tags=["slides"])
@@ -47,6 +51,42 @@ def get_generate_slides_task() -> Any:
 def _safe_stage(value: object, *, fallback: str = "processing") -> str:
     stage = str(value or "").strip().lower()
     return stage if _SAFE_STAGE.fullmatch(stage) else fallback
+
+
+_PHASE_BY_STAGE = {
+    "starting": AgentPhase.PREPARING,
+    "preparing": AgentPhase.PREPARING,
+    "initial": AgentPhase.DRAFTING,
+    "drafting": AgentPhase.DRAFTING,
+    "validation": AgentPhase.VALIDATING,
+    "validating": AgentPhase.VALIDATING,
+    "review": AgentPhase.REVIEWING,
+    "reviewing": AgentPhase.REVIEWING,
+    "correction": AgentPhase.REVISING,
+    "revision": AgentPhase.REVISING,
+    "revising": AgentPhase.REVISING,
+    "publishing": AgentPhase.PUBLISHING,
+    "completed": AgentPhase.COMPLETED,
+    "failed": AgentPhase.FAILED,
+}
+
+
+def _phase_for_status(job_status: JobStatus) -> AgentPhase:
+    return {
+        JobStatus.QUEUED: AgentPhase.QUEUED,
+        JobStatus.RUNNING: AgentPhase.PREPARING,
+        JobStatus.COMPLETED: AgentPhase.COMPLETED,
+        JobStatus.FAILED: AgentPhase.FAILED,
+    }[job_status]
+
+
+def _safe_phase(value: object, *, status: JobStatus, stage: object = None) -> AgentPhase:
+    candidate = getattr(value, "value", value)
+    try:
+        return AgentPhase(str(candidate or "").strip().lower())
+    except ValueError:
+        stage_value = str(stage or "").strip().lower()
+        return _PHASE_BY_STAGE.get(stage_value, _phase_for_status(status))
 
 
 def _safe_message(value: object, *, fallback: str) -> str:
@@ -80,6 +120,7 @@ async def _write_progress(
     status_value: JobStatus,
     stage: str,
     message: str,
+    phase: AgentPhase | None = None,
     started_at: datetime | None = None,
     finished_at: datetime | None = None,
 ) -> None:
@@ -89,6 +130,7 @@ async def _write_progress(
             state=status_value.value,
             meta={
                 "status": status_value.value,
+                "phase": (phase or _phase_for_status(status_value)).value,
                 "stage": _safe_stage(stage),
                 "message": _safe_message(message, fallback="Presentation job is queued."),
                 "started_at": started_at.isoformat() if started_at else None,
@@ -119,10 +161,14 @@ async def _read_result(backend: Any, job_id: UUID) -> SlidesTaskResult | None:
     wrapped_workflow = value.get("workflow") if isinstance(value, dict) else getattr(value, "workflow", None)
     wrapped_status = value.get("status") if isinstance(value, dict) else getattr(value, "status", None)
     wrapped_output = value.get("output") if isinstance(value, dict) else getattr(value, "output", None)
+    wrapped_phase = value.get("phase") if isinstance(value, dict) else getattr(value, "phase", None)
     if wrapped_workflow is not None and wrapped_output is not None:
-        if wrapped_workflow != "slides" or str(wrapped_status) != "completed":
+        wrapped_status_value = getattr(wrapped_status, "value", wrapped_status)
+        if wrapped_workflow != "slides" or str(wrapped_status_value).lower() != "completed":
             return SlidesTaskResult(job_id=job_id, status=JobStatus.FAILED, error="Presentation generation failed.")
         value = wrapped_output
+        if wrapped_phase is not None and isinstance(value, dict) and "phase" not in value:
+            value = {**value, "phase": wrapped_phase}
     try:
         result = SlidesTaskResult.model_validate(value)
     except Exception:
@@ -148,6 +194,9 @@ def _progress_response(job_id: UUID, progress: TaskProgress[Any]) -> SlidesJobSt
     if status_value in {JobStatus.QUEUED.value}:
         job_status = JobStatus.QUEUED
         fallback = "Presentation job is queued."
+    elif status_value in {JobStatus.COMPLETED.value}:
+        job_status = JobStatus.COMPLETED
+        fallback = "Presentation is ready for download."
     elif status_value in {JobStatus.FAILED.value, "failure"}:
         job_status = JobStatus.FAILED
         fallback = "Presentation generation failed."
@@ -157,7 +206,15 @@ def _progress_response(job_id: UUID, progress: TaskProgress[Any]) -> SlidesJobSt
     return SlidesJobStatusResponse(
         job_id=job_id,
         status=job_status,
-        stage=_safe_stage(meta.get("stage"), fallback="queued" if job_status is JobStatus.QUEUED else "processing"),
+        phase=_safe_phase(meta.get("phase"), status=job_status, stage=meta.get("stage")),
+        stage=_safe_stage(
+            meta.get("stage"),
+            fallback={
+                JobStatus.QUEUED: "queued",
+                JobStatus.COMPLETED: "completed",
+                JobStatus.FAILED: "failed",
+            }.get(job_status, "processing"),
+        ),
         message=_safe_message(meta.get("message"), fallback=fallback),
         started_at=_parse_datetime(meta.get("started_at")),
         finished_at=_parse_datetime(meta.get("finished_at")),
@@ -170,6 +227,7 @@ def _terminal_response(result: SlidesTaskResult) -> SlidesJobStatusResponse:
     return SlidesJobStatusResponse(
         job_id=result.job_id,
         status=JobStatus.COMPLETED if is_completed else JobStatus.FAILED,
+        phase=result.phase or (AgentPhase.COMPLETED if is_completed else AgentPhase.FAILED),
         stage="completed" if is_completed else "failed",
         message="Presentation is ready for download." if is_completed else "Presentation generation failed.",
         started_at=result.started_at,
@@ -189,12 +247,50 @@ async def _lookup_job(backend: Any, job_id: UUID) -> tuple[SlidesTaskResult | No
     return result, progress
 
 
+async def _validate_slide_documents(
+    document_ids: list[UUID],
+    repository: DocumentRepository | None,
+) -> None:
+    """Validate document-backed slide inputs before creating a queued job.
+
+    ``repository`` is optional only to preserve direct, dependency-free calls
+    to this route helper. FastAPI always supplies it through the existing
+    document repository dependency, so HTTP requests are fail-closed before
+    any progress record or task is created.
+    """
+
+    if repository is None:
+        return
+    for document_id in document_ids:
+        document = await repository.get_document(document_id)
+        if document is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document was not found.",
+            )
+        document_status = getattr(document.status, "value", document.status)
+        if document_status != DocumentStatus.READY.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Document is not ready for slide generation.",
+            )
+        extension = str(document.extension or "").strip().lower()
+        if extension not in SUPPORTED_SLIDE_SOURCE_EXTENSIONS:
+            supported = ", ".join(sorted(SUPPORTED_SLIDE_SOURCE_EXTENSIONS))
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"Document source type is not supported for slide generation. Supported extensions: {supported}.",
+            )
+
+
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED, response_model=CreateSlidesJobResponse)
 async def create_slides_job(
     request: GenerateSlidesRequest,
     backend: Annotated[Any, Depends(get_result_backend)],
     task: Annotated[Any, Depends(get_generate_slides_task)],
+    repository: Annotated[DocumentRepository, Depends(get_document_repository)] = None,
 ) -> CreateSlidesJobResponse:
+    await _validate_slide_documents(request.document_ids, repository)
     job_id = uuid4()
     queued_at = datetime.now(timezone.utc)
     try:
@@ -233,7 +329,7 @@ async def create_slides_job(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Slide jobs are temporarily unavailable.",
         ) from exc
-    return CreateSlidesJobResponse(job_id=job_id, status=JobStatus.QUEUED)
+    return CreateSlidesJobResponse(job_id=job_id, status=JobStatus.QUEUED, phase=AgentPhase.QUEUED)
 
 
 @router.get("/jobs/{job_id}", response_model=SlidesJobStatusResponse)

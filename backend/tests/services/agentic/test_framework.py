@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.agentic import (
+    AgentPhase,
     AgentTaskPayload,
     BaseWorkflowAdapter,
     DeterministicValidationError,
@@ -107,6 +108,7 @@ async def test_runner_collects_turn_audit_and_sanitizes_progress(tmp_path):
     assert result.response == "done"
     assert result.audits[0].model_dump()["turn_id"] == "turn-1"
     assert result.audits[0].kind == "initial"
+    assert AgentPhase.DRAFTING.value in [event["phase"] for event in progress]
     assert all("key" not in event["message"] for event in progress)
 
 
@@ -225,14 +227,21 @@ class ScriptedRunner:
 async def test_execute_workflow_deterministic_failure_corrects_before_review(tmp_path):
     adapter = LoopAdapter(validation_failures=1)
     runner = ScriptedRunner()
+    progress = []
     result = await execute_workflow(
         AgentTaskPayload(job_id="loop-job", workflow="loop", input={}),
         registry=WorkflowRegistry({"loop": adapter}),
         runner=runner,
         workspace_root=tmp_path,
+        progress_callback=progress.append,
     )
     assert result.status == WorkflowStatus.COMPLETED
+    assert result.phase is AgentPhase.COMPLETED
     assert [turn.kind for turn in runner.turns] == ["initial", "correction", "review"]
+    phases = [event["phase"] for event in progress]
+    assert phases.index(AgentPhase.DRAFTING.value) < phases.index(AgentPhase.VALIDATING.value)
+    assert AgentPhase.REVISING.value in phases
+    assert AgentPhase.PUBLISHING.value in phases
     assert adapter.published
 
 
@@ -240,14 +249,20 @@ async def test_execute_workflow_deterministic_failure_corrects_before_review(tmp
 async def test_execute_workflow_semantic_revision_is_bounded_and_publishes_after_pass(tmp_path):
     adapter = LoopAdapter(blocking_reviews=1)
     runner = ScriptedRunner()
+    progress = []
     result = await execute_workflow(
         AgentTaskPayload(job_id="semantic-job", workflow="loop", input={}),
         registry=WorkflowRegistry({"loop": adapter}),
         runner=runner,
         workspace_root=tmp_path,
+        progress_callback=progress.append,
     )
     assert result.status == WorkflowStatus.COMPLETED
+    assert result.phase is AgentPhase.COMPLETED
     assert [turn.kind for turn in runner.turns] == ["initial", "review", "correction", "review"]
+    phases = [event["phase"] for event in progress]
+    assert phases.index(AgentPhase.REVIEWING.value) < phases.index(AgentPhase.REVISING.value)
+    assert phases.index(AgentPhase.REVISING.value) < phases.index(AgentPhase.PUBLISHING.value)
     assert adapter.published
 
 
@@ -263,6 +278,7 @@ async def test_execute_workflow_round_exhaustion_does_not_publish(tmp_path):
         workspace_root=tmp_path,
     )
     assert result.status == WorkflowStatus.FAILED
+    assert result.phase is AgentPhase.FAILED
     assert not adapter.published
     assert [turn.kind for turn in runner.turns] == ["initial", "review", "correction", "review"]
 
@@ -283,5 +299,6 @@ async def test_unexpected_validator_exception_fails_closed(tmp_path):
         workspace_root=tmp_path,
     )
     assert result.status == WorkflowStatus.FAILED
+    assert result.phase is AgentPhase.FAILED
     assert not adapter.published
     assert [turn.kind for turn in runner.turns] == ["initial"]

@@ -1,3 +1,5 @@
 allowBuilds:
-    msw: false
-    confirmModulesPurge: false
+  msw: false
+  esbuild: true
+
+confirmModulesPurge: false

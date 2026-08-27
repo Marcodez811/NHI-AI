@@ -7,11 +7,11 @@ import stat
 from pathlib import Path
 from uuid import UUID
 
-from app.models.slides import DocumentResolver
+from app.models.slides import DocumentResolver, SUPPORTED_SLIDE_SOURCE_EXTENSIONS
 
-SUPPORTED_SOURCE_EXTENSIONS = frozenset(
-    {".pdf", ".docx", ".txt", ".md", ".rtf", ".csv", ".xlsx"}
-)
+# Backwards-compatible import surface for callers that used the resolver's
+# old module-level constant. The value itself is owned by models.slides.
+SUPPORTED_SOURCE_EXTENSIONS = SUPPORTED_SLIDE_SOURCE_EXTENSIONS
 
 
 class DocumentResolutionError(RuntimeError):
