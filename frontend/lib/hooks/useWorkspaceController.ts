@@ -1,21 +1,21 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { ApiError } from "../api/client";
 import {
-    ApiError,
     Category,
     CATEGORY_VALUES,
     DocumentRead,
     MAX_DOCUMENTS,
     QaModeInfo,
-    fetchQaModes,
     getDocumentDownloadUrl,
-    streamChat,
-    supportsSlideGeneration,
-} from "../api";
+} from "../api/documents";
+import { fetchQaModes, streamChat } from "../api/chat";
+import { supportsSlideGeneration } from "../api/slides";
 import { useDocuments } from "./useDocuments";
+import { useRetrievalStatus } from "./useRetrievalStatus";
 import { useSlideJob } from "./useSlideJob";
-import type { ChatMessage, Tone, View } from "../workspace/types";
+import { useWorkspaceSession } from "./useWorkspaceSession";
 
 const fallbackModes: QaModeInfo[] = CATEGORY_VALUES.map((mode) => ({
     mode,
@@ -41,30 +41,50 @@ function errorText(error: unknown): string {
  */
 export function useWorkspaceController() {
     const catalog = useDocuments();
+    const retrieval = useRetrievalStatus();
     const slideJob = useSlideJob();
-    const [view, setView] = useState<View>("chat");
-    const [collapsed, setCollapsed] = useState(false);
-    const [selected, setSelected] = useState<string[]>([]);
-    const [folderId, setFolderId] = useState<string | null>(null);
-    const [query, setQuery] = useState("");
-    const [uploadOpen, setUploadOpen] = useState(false);
-    const [pending, setPending] = useState<File[]>([]);
-    const [uploadCategory, setUploadCategory] = useState<Category>("bei_can");
-    const [uploadFolderId, setUploadFolderId] = useState<string | null>(null);
+    const session = useWorkspaceSession();
+    const {
+        view,
+        setView,
+        collapsed,
+        setCollapsed,
+        selected,
+        setSelected,
+        folderId,
+        setFolderId,
+        query,
+        setQuery,
+        uploadOpen,
+        setUploadOpen,
+        pending,
+        setPending,
+        uploadCategory,
+        setUploadCategory,
+        uploadFolderId,
+        setUploadFolderId,
+        scope,
+        setScope,
+        chat,
+        setChat,
+        draft,
+        setDraft,
+        slideTitle,
+        setSlideTitle,
+        slideCount,
+        setSlideCount,
+        guidance,
+        setGuidance,
+        tone,
+        setTone,
+    } = session;
     const [uploading, setUploading] = useState(false);
     const [qaModes, setQaModes] = useState<QaModeInfo[]>([]);
     const [qaError, setQaError] = useState<string | null>(null);
-    const [scope, setScope] = useState<Category>("legislative_qa");
-    const [chat, setChat] = useState<ChatMessage[]>([]);
-    const [draft, setDraft] = useState("");
     const [chatBusy, setChatBusy] = useState(false);
     const [chatError, setChatError] = useState<string | null>(null);
     const [eligibilityError, setEligibilityError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
-    const [slideTitle, setSlideTitle] = useState("2026 健保政策重點整理");
-    const [slideCount, setSlideCount] = useState(10);
-    const [guidance, setGuidance] = useState("");
-    const [tone, setTone] = useState<Tone>("formal");
 
     const loadModes = async () => {
         try {
@@ -107,6 +127,22 @@ export function useWorkspaceController() {
         () => selectedDocs.filter((doc) => !chatEligible.some((eligible) => eligible.id === doc.id)),
         [chatEligible, selectedDocs],
     );
+    const readyDocuments = useMemo(
+        () => catalog.documents.filter((doc) => doc.status === "ready" && doc.retrieval_enabled),
+        [catalog.documents],
+    );
+    const categoryReadyDocuments = useMemo(
+        () => readyDocuments.filter((doc) => doc.category === scope),
+        [readyDocuments, scope],
+    );
+    const hasPendingDocuments = useMemo(
+        () => catalog.documents.some((doc) => ["queued", "indexing"].includes(doc.status)),
+        [catalog.documents],
+    );
+    const hasAnyReadyDocuments =
+        readyDocuments.length > 0 ||
+        (retrieval.status?.ready_document_count ?? 0) > 0;
+    const hasCategoryReadyDocuments = categoryReadyDocuments.length > 0;
 
     const toggleSelected = (id: string) => {
         setEligibilityError(null);
@@ -125,9 +161,25 @@ export function useWorkspaceController() {
         setEligibilityError(null);
     };
 
+    const openUpload = () => {
+        setUploadCategory(scope);
+        setUploadOpen(true);
+    };
+
     const send = async () => {
         const question = draft.trim();
         if (!question || chatBusy || question.length > 20_000) return;
+        if (!retrieval.status?.can_retrieve) {
+            setEligibilityError(
+                retrieval.error?.message ||
+                    "知識庫正在準備中，完成後才能提問。",
+            );
+            return;
+        }
+        if (!hasCategoryReadyDocuments) {
+            setEligibilityError("目前搜尋範圍尚無可用文件，請先上傳文件或切換分類。");
+            return;
+        }
         if (selectedDocs.length && blockedDocuments.length) {
             const names = blockedDocuments.map((doc) => doc.display_name).join("、");
             setEligibilityError("請先處理未符合目前搜尋條件的選取文件：" + names);
@@ -220,6 +272,7 @@ export function useWorkspaceController() {
             setPending([]);
             setUploadOpen(false);
             await catalog.reloadDocuments();
+            await retrieval.reload();
         } catch (error) {
             setActionError(errorText(error));
         } finally {
@@ -267,6 +320,7 @@ export function useWorkspaceController() {
         uploadFolderId,
         setUploadFolderId,
         uploading,
+        openUpload,
         modes,
         qaError,
         loadModes,
@@ -280,6 +334,14 @@ export function useWorkspaceController() {
         chatError,
         eligibilityError,
         actionError,
+        retrievalStatus: retrieval.status,
+        retrievalLoading: retrieval.loading,
+        retrievalError: retrieval.error?.message || null,
+        reloadRetrieval: retrieval.reload,
+        catalogLoading: catalog.loadingDocuments,
+        hasPendingDocuments,
+        hasAnyReadyDocuments,
+        hasCategoryReadyDocuments,
         toggleSelected,
         mutateDocument,
         deleteDocument,

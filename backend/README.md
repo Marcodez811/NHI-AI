@@ -5,7 +5,7 @@ The backend is a FastAPI application with two independently tunable Taskiq pipel
 - document ingestion into an OpenAI vector store for source-grounded Q&A;
 - generic Codex-backed agent workflows, whose first registered workflow is evidence-first PowerPoint generation from previously uploaded documents.
 
-The generic worker has one stable task entrypoint, `agents.run`. It accepts only a typed job ID, an explicit workflow name, and workflow input. A registry maps that name to an adapter; the current adapter is `slides`. PostgreSQL stores document, folder, and ingestion metadata. Uploaded source files and generated PowerPoint files live on a shared filesystem volume. Redis Streams carries asynchronous tasks and stores short-lived progress/results for agent jobs. News ingestion and news generation are intentionally outside the current scope.
+The generic worker has one stable task entrypoint, `agents.run`. It accepts only a typed job ID, an explicit workflow name, and workflow input. A registry maps that name to an adapter; the current adapter is `slides`. PostgreSQL stores document, folder, ingestion, and primary retrieval-index state. Uploaded source files and generated PowerPoint files live on a shared filesystem volume. Redis Streams carries asynchronous tasks, short-lived job progress/results, and sanitized development telemetry. News ingestion and news generation are intentionally outside the current scope.
 
 The repository-level setup guide is in [../README.md](../README.md). This document describes the backend package as it exists now.
 
@@ -15,33 +15,39 @@ The repository-level setup guide is in [../README.md](../README.md). This docume
 flowchart LR
     UI[Next.js frontend] -->|HTTP /api/v1| API[FastAPI API]
     API -->|catalog metadata| DB[(PostgreSQL)]
+    API -->|bootstrap/status| RI[Retrieval index registry]
+    RI --> DB
+    RI -->|adopt/create/validate| VS[OpenAI vector store]
     API -->|source uploads and downloads| VOL[(Shared slides-data volume)]
-    API -->|documents.ingest| DQ[(Redis documents stream)]
+    API -->|documents.ingest/delete| DQ[(Redis documents stream)]
     API -->|agents.run| TQ[(Redis tasks stream)]
     DQ --> DW[documents-worker]
     TQ --> TW[tasks-worker]
     DW --> DB
     DW --> VOL
-    DW -->|document upload/index| VS[OpenAI vector store]
+    DW -->|document upload/index/cleanup| VS
     API -->|Responses API + file_search| VS
-    TW --> ADAPTER[Allowlisted workflow adapter]
-    ADAPTER -->|isolated, reviewed turns| CODEX[OpenAI Codex SDK]
+    TW --> COORD[Workflow coordinator]
+    COORD --> ADAPTER[Allowlisted workflow adapter]
+    ADAPTER -->|isolated author/reviewer sessions| CODEX[OpenAI Codex SDK]
     CODEX -->|PPTX + evidence + QA artifacts| VOL
     TW --> RB[(tasks:result, 1 hour)]
     API -->|poll progress/result| RB
+    TW --> AT[(Sanitized agent telemetry)]
+    API -. gated dev routes .-> AT
 ```
 
 ### Runtime responsibilities
 
 | Component                   | Current responsibility                                                                                                                                              |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| FastAPI process             | Validates requests, manages document/folder records, saves uploads, enqueues jobs, reports job state, serves downloads, and handles grounded chat requests.         |
-| PostgreSQL                  | Stores `Document`, `Folder`, and `IngestionJob` rows. It stores metadata and opaque OpenAI IDs, not document binary content.                                        |
+| FastAPI process             | Validates requests, initializes schema, bootstraps retrieval state, manages document/folder records, enqueues jobs, reports status, serves downloads, and handles grounded chat. |
+| PostgreSQL                  | Stores `Document`, `Folder`, `IngestionJob`, and singleton `RetrievalIndex` rows. It stores metadata and opaque OpenAI IDs, not document binary content.            |
 | Shared `slides-data` volume | Stores original documents, temporary agent workspaces, and published artifacts. API and both workers mount the same volume.                                      |
-| Redis                       | Provides separate `documents` and `tasks` Taskiq Redis Streams. Agent task progress/results use `tasks:result` and expire after one hour.                        |
-| Taskiq workers              | `documents-worker` handles `documents.ingest` (1 process/4 async tasks); `tasks-worker` handles the generic `agents.run` entrypoint (2 processes/2 async tasks). |
+| Redis                       | Provides separate `documents` and `tasks` Taskiq Redis Streams. Agent progress/results expire after one hour; sanitized development telemetry expires separately.  |
+| Taskiq workers              | `documents-worker` handles `documents.ingest` and `documents.delete` (1 process/4 async tasks); `tasks-worker` handles `agents.run` (2 processes/2 async tasks).     |
 | OpenAI vector store         | Holds indexed copies of uploaded documents used by `file_search`. Every indexed source is tagged with its application document ID and non-news metadata.            |
-| Codex agent runtime         | Resolves only registered adapters. The current `slides` adapter runs generation/correction in workspace-write mode, semantic review read-only, and publishes only after deterministic and semantic gates pass. |
+| Agent runtime               | Resolves only allowlisted workflows/runners. The `slides` adapter coordinates isolated author and reviewer sessions and publishes only after deterministic and semantic gates pass. |
 
 ## Data ownership
 
@@ -50,13 +56,15 @@ The system deliberately keeps different data in different stores:
 ```text
 PostgreSQL
   document identity, filename, checksum, category, status, storage key,
-  folder relationship, retrieval flags, and opaque provider IDs
+  folder relationship, retrieval flags, opaque provider IDs, and the durable
+  primary retrieval-index lifecycle record
 
 /data/documents/<document UUID>/<safe filename>
   the original uploaded file bytes
 
 Redis
-  serialized Taskiq payloads, sanitized progress, and terminal task results
+  serialized Taskiq payloads, sanitized progress, terminal task results, and
+  optional expiring agent-run snapshots/events
 
 /data/jobs/<agent job UUID>/
   temporary workflow inputs, staged skills, audit files, and workflow artifacts
@@ -67,27 +75,22 @@ Redis
 
 Queue payloads contain opaque identifiers and typed, path-free workflow input. Absolute source paths are resolved by workers from the shared volume, and absolute artifact paths are never returned to the client.
 
-## Complete backend file tree
+## Backend layout
 
-The tree below includes the backend's source, tests, configuration, bundled agent skills, and runtime assets. Generated or sensitive paths are intentionally excluded: `.env`, `.venv/`, `node_modules/`, `graphify-out/`, `.pytest_cache/`, and `__pycache__/`.
+The maintained package boundaries are:
 
 ```text
 backend/
 ├── .env.example
-├── .gitignore
-├── .python-version
 ├── Dockerfile
 ├── README.md
-├── package.json
-├── package-lock.json
-├── pyproject.toml
-├── uv.lock
+├── package.json                         # PPTX-generation Node dependencies
+├── pyproject.toml                       # Python 3.13 application/test dependencies
 ├── .agents/
-│   └── skills/                         # backend-global allowlisted skills
+│   └── skills/                          # versioned, allowlisted workflow skills
 │       ├── source-document-extraction/
 │       └── pptx-nhi-tw/
 ├── app/
-│   ├── __init__.py
 │   ├── main.py                         # FastAPI assembly, lifecycle, DI, health routes
 │   ├── config.py                       # Environment-backed settings
 │   ├── db.py                           # SQLModel engine, tables, request sessions
@@ -95,93 +98,56 @@ backend/
 │   ├── worker.py                       # Settings-driven documents/tasks worker launcher
 │   ├── api/
 │   │   └── routes/
-│   │       ├── __init__.py
 │   │       ├── chat.py                 # Grounded chat and SSE endpoints
 │   │       ├── documents.py            # Document/folder CRUD and ingestion status
-│   │       └── slides.py               # Slide create, poll, and download endpoints
+│   │       ├── retrieval.py             # Safe vector-store/document readiness status
+│   │       ├── slides.py                # Slide create, poll, and download endpoints
+│   │       └── dev_agents.py            # Gated sanitized agent telemetry endpoints
 │   ├── models/
-│   │   ├── __init__.py
 │   │   ├── chat.py                     # Chat request/response contracts
 │   │   ├── documents.py                # SQLModel tables and document API contracts
+│   │   ├── retrieval.py                # Durable singleton retrieval-index state
 │   │   ├── slides.py                   # Public and queue-level slide contracts
 │   │   └── virtual_fs.py               # Virtual-filesystem contracts
 │   ├── tasks/
-│   │   ├── __init__.py
-│   │   ├── documents.py                # documents.ingest Taskiq task
+│   │   ├── documents.py                # documents.ingest/delete Taskiq tasks
 │   │   ├── slides.py                   # deprecated in-process compatibility helper
 │   │   └── agents.py                   # stable agents.run worker import boundary
 │   └── services/
 │       ├── agentic/
-│       │   ├── __init__.py
-│       │   ├── contracts.py             # generic task/turn/adapter contracts
-│       │   ├── models.py                # compatibility exports for boundary models
-│       │   ├── registry.py              # explicit workflow allowlist
-│       │   ├── runner.py                # Codex turns, progress, heartbeat, audits
-│       │   ├── service.py               # lifecycle and bounded review loop
-│       │   └── staging.py               # declared-skill staging
-│       ├── __init__.py
+│       │   ├── contracts.py            # provider-neutral task/runner/adapter contracts
+│       │   ├── coordinator.py          # public workflow coordinator facade
+│       │   ├── events.py               # Redis-backed sanitized run telemetry
+│       │   ├── registry.py             # explicit workflow allowlist
+│       │   ├── runner.py               # runner allowlist and Codex implementation
+│       │   ├── runners/                # provider/registry compatibility exports
+│       │   ├── service.py              # bounded author/validator/reviewer lifecycle
+│       │   └── staging.py              # declared-skill staging
 │       ├── chat/
-│       │   ├── __init__.py
 │       │   ├── citations.py            # Provider citation normalization
 │       │   ├── responder.py            # OpenAI Responses API adapter
 │       │   └── retrieval.py            # file_search tool and metadata filters
 │       ├── documents/
-│       │   ├── __init__.py
 │       │   ├── repository.py           # Repository protocol, SQLModel and test implementations
 │       │   └── storage.py              # Secure shared-volume upload storage
+│       ├── retrieval/
+│       │   └── registry.py              # Cross-process vector-store adoption/provisioning
 │       ├── virtual_fs/
-│       │   ├── __init__.py
 │       │   └── local.py                 # UUID-to-source-path worker resolver
 │       └── slides/
-│           ├── __init__.py
+│           ├── adapter.py               # Registered slides WorkflowAdapter
 │           ├── agent.py                 # legacy in-process compatibility facade
 │           ├── artifacts.py             # Workspaces, staging, preflight, validation, publish
 │           ├── contracts.py             # JobError and progress callback contracts
 │           ├── runtime.py               # legacy prompt/runtime compatibility helpers
-│           ├── adapter.py                # Registered slides WorkflowAdapter
-│           └── fonts/
-│           │   ├── NotoSansTC-Black.ttf
-│           │   ├── NotoSansTC-Bold.ttf
-│           │   ├── NotoSansTC-ExtraBold.ttf
-│           │   ├── NotoSansTC-ExtraLight.ttf
-│           │   ├── NotoSansTC-Light.ttf
-│           │   ├── NotoSansTC-Medium.ttf
-│           │   ├── NotoSansTC-Regular.ttf
-│           │   ├── NotoSansTC-SemiBold.ttf
-│           │   ├── NotoSansTC-Thin.ttf
-│           │   ├── NotoSansTC-VariableFont_wght.ttf
-│           │   ├── NotoSerifTC-Black.ttf
-│           │   ├── NotoSerifTC-Bold.ttf
-│           │   ├── NotoSerifTC-ExtraBold.ttf
-│           │   ├── NotoSerifTC-ExtraLight.ttf
-│           │   ├── NotoSerifTC-Light.ttf
-│           │   ├── NotoSerifTC-Medium.ttf
-│           │   ├── NotoSerifTC-Regular.ttf
-│           │   ├── NotoSerifTC-SemiBold.ttf
-│           │   └── NotoSerifTC-VariableFont_wght.ttf
-│           └── (fonts and slide-specific helpers)
+│           └── fonts/                   # bundled Traditional-Chinese font assets
 ├── scripts/
 │   └── migrate_nhiqa.py                # Legacy NHI-QA metadata migration utility
 └── tests/
-    ├── api/
-    │   └── test_slides.py
-    ├── infrastructure/
-    │   └── test_workers.py
-    ├── services/
-    │   ├── agentic/
-    │   │   └── test_framework.py
-    │   ├── chat/
-    │   │   ├── test_chat.py
-    │   │   └── test_stream.py
-    │   ├── documents/
-    │   │   ├── test_repository.py
-    │   │   └── test_storage.py
-    │   ├── slides/
-    │   │   └── test_main.py
-    │   └── virtual_fs/
-    │       └── test_local.py
-    └── tasks/
-        └── test_slides.py
+    ├── api/                             # slide, retrieval, and dev-route contracts
+    ├── infrastructure/                  # worker topology
+    ├── services/                        # agentic/chat/document/retrieval/slide/VFS tests
+    └── tasks/                           # document and agent task behavior
 ```
 
 ## How the backend starts
@@ -189,14 +155,15 @@ backend/
 `app.main` constructs the application and installs production dependency overrides:
 
 1. The lifespan handler calls `SQLModel.metadata.create_all()` through `init_db()`.
-2. The API process starts the Taskiq broker client. A Taskiq worker manages its own broker lifecycle.
-3. Document and chat routes receive a request-scoped `SQLModelDocumentRepository` backed by PostgreSQL or the configured SQLite database.
-4. The chat service receives the configured OpenAI model, vector-store ID, and a mapper from OpenAI file IDs back to local document UUIDs.
-5. Chat, document, and slide routers are mounted under `/api/v1`.
-6. Shutdown closes Redis and both API-owned producer broker connections, including
+2. The API performs a best-effort validation of the database-backed primary OpenAI vector store. Provider failure is recorded as a safe retrieval state and does not stop the process from serving catalog/status requests.
+3. The API process starts both Taskiq producer brokers. A Taskiq worker manages its own broker lifecycle.
+4. Document, chat, and retrieval routes receive request-scoped SQLModel-backed dependencies.
+5. The chat service resolves the vector-store ID from the durable registry and maps OpenAI file IDs back to local document UUIDs.
+6. Chat, document, retrieval, and slide routers are mounted under `/api/v1`; development agent routes are mounted only when `ENABLE_AGENT_DEV_ROUTES=true`.
+7. Shutdown closes Redis and both API-owned producer broker connections, including
    partial-startup cleanup if the second broker cannot start.
 
-`GET /health/live` proves that the process is alive. `GET /health` also checks Redis and the database and returns `503` if either dependency is unavailable.
+`GET /health/live` proves that the process is alive. `GET /health` also checks Redis and the database and returns `503` if either dependency is unavailable. Retrieval/provider readiness is separate and is reported by `GET /api/v1/retrieval/status`.
 
 The current schema bootstrap uses `create_all`, not a versioned migration framework. Existing-table migrations therefore require an explicit migration step or script.
 
@@ -207,8 +174,10 @@ The current schema bootstrap uses `create_all`, not a versioned migration framew
 1. `POST /api/v1/documents` validates the extension/MIME type and streams the upload to a temporary file in the shared document volume.
 2. Storage enforces the size limit, computes a SHA-256 checksum, sanitizes the filename, and atomically moves the file to `<documents-root>/<document-id>/<filename>`.
 3. The API creates the `Document` and `IngestionJob` rows and enqueues `documents.ingest` with opaque IDs and a category.
-4. The worker resolves the local source, uploads it to OpenAI Files, and attaches it to the configured vector store with `document_id`, `qa_set`, `content_type`, and `is_news_source=false` attributes.
+4. The worker ensures the database-backed vector store exists, resolves the local source, uploads it to OpenAI Files, and attaches it with `document_id`, `qa_set`, `content_type`, and `is_news_source=false` attributes.
 5. PostgreSQL is updated to `ready` with the opaque provider IDs. Failures mark both rows as `failed` with a safe error.
+
+`DELETE /api/v1/documents/{document_id}` is also asynchronous. It immediately disables retrieval, marks the row `deleting`, and queues `documents.delete`. The worker detaches/deletes provider resources, removes the local source, then removes ingestion and document rows. A provider or storage failure leaves a `delete_failed` row that can be retried with the same endpoint. Deletion is rejected while ingestion is queued or running to avoid remote-resource races.
 
 Supported upload extensions are currently `.pdf`, `.docx`, `.md`, `.markdown`, and `.txt`. Valid categories are `legislative_qa`, `public_opinion`, and `bei_can`; there is no news category.
 
@@ -216,23 +185,23 @@ Supported upload extensions are currently `.pdf`, `.docx`, `.md`, `.markdown`, a
 
 1. `POST /api/v1/chat` or `/chat/stream` validates every explicitly selected document against PostgreSQL.
 2. Selected documents must match the requested category, be `ready`, and have retrieval enabled.
-3. `ResponseService` calls the OpenAI Responses API with a `file_search` tool constrained to the configured vector store, category, optional document IDs, and `is_news_source=false`.
+3. `ResponseService` calls the OpenAI Responses API with a `file_search` tool constrained to the database-backed vector store, category, optional document IDs, and `is_news_source=false`. Requests with no retrieval-ready documents return a stable empty-corpus conflict before contacting OpenAI.
 4. Provider citations are normalized and remote file IDs are mapped back to local document UUIDs.
 5. If the final answer has no source citation, the backend replaces it with `無法回答，因為無相關資料`. The streaming route buffers answer deltas until final citations are known, preventing ungrounded text from being emitted.
 
 ## Generic agent workflow
 
-All Codex-backed work crosses one Taskiq boundary: `agents.run`. It accepts an `AgentTaskPayload` containing only `job_id`, `workflow`, and `input`. The payload is strict and rejects extra fields; it cannot name a Python import, command, skill directory, or source path. `WorkflowRegistry` resolves `workflow` from an explicit in-process allowlist, so an unknown workflow fails safely before a workspace or SDK session is created.
+All Codex-backed work crosses one Taskiq boundary: `agents.run`. It accepts an `AgentTaskPayload` containing only `job_id`, `workflow`, and `input`. The payload is strict and rejects extra fields; it cannot name a Python import, command, skill directory, runner, or source path. `WorkflowRegistry` resolves `workflow` from an explicit in-process allowlist, so an unknown workflow fails safely before a workspace or SDK session is created. Runner selection is server-side and resolved from a separate allowlist; `codex` is currently the only registered runner.
 
 An adapter owns its domain policy: typed input/output, preparation, declared skills, prompt construction, deterministic validation, optional semantic review, publication, and cleanup. The generic service owns the operational lifecycle:
 
 1. Validate the typed input, create a UUID-contained workspace, prepare inputs, and stage only the adapter's declared skills from `backend/.agents/skills`.
-2. Start one ephemeral `AsyncCodex` thread rooted at that workspace, with denied approvals and safe streamed progress/heartbeats.
-3. Run an initial write-capable turn. After every write-capable turn, run the adapter's deterministic validator.
-4. If the candidate is valid, run an optional structured semantic-review turn in a read-only sandbox. Deterministic findings or blocking review findings create a write-capable correction turn on the same thread.
-5. Stop after the adapter's bounded review limit; publish only a fully accepted result. The job records `work/codex_result.json` and `work/progress.jsonl`; failed workspaces are retained or removed according to `AGENT_KEEP_WORKSPACE_ON_FAILURE`.
+2. Create an author activation in a workspace-write sandbox with denied approvals and safe streamed progress/heartbeats.
+3. Run the adapter's deterministic validator after each author attempt. Correctable findings build a new revision prompt and start a fresh author activation.
+4. If the candidate is valid, create an independent reviewer activation in a read-only sandbox with a structured output schema. Blocking findings become feedback for another fresh author activation.
+5. Stop after the adapter's bounded review limit; publish only a fully accepted result. Per-attempt audits live under `work/agents/<node>/attempt-<n>.json`; failed workspaces are retained or removed according to `AGENT_KEEP_WORKSPACE_ON_FAILURE`.
 
-The current `slides` adapter supplies the review hooks, making the review loop active. A workflow without review hooks still uses the same isolated runner, staging, timeout, and safe result boundary.
+The current `slides` adapter supplies the review hooks, making the author/validator/reviewer loop active. Each activation receives an independent ephemeral provider session: reviewers cannot mutate author state, and later author attempts do not inherit hidden conversational state. A workflow without review hooks still uses the same isolated runner, staging, timeout, and safe result boundary.
 
 ### Adding an allowlisted workflow
 
@@ -254,13 +223,13 @@ flowchart TD
     F --> G[Create isolated job workspace]
     G --> H[Preflight dependencies and CJK fonts]
     H --> I[Stage sources and required skills]
-    I --> J[Build prompt and start Codex thread]
-    J --> K[Initial or correction write turn]
+    I --> J[Build prompt and start author session]
+    J --> K[Author workspace-write activation]
     K --> L{Deterministic validation passes?}
     L -->|No| M{Review rounds remain?}
-    M -->|Yes| K
+    M -->|Yes| J
     M -->|No| X[Return sanitized failed result]
-    L -->|Yes| N[Read-only structured semantic review]
+    L -->|Yes| N[Independent read-only reviewer session]
     N --> O{Blocking findings?}
     O -->|Yes| M
     O -->|No| P[Publish job-id.pptx]
@@ -318,9 +287,10 @@ The slides adapter creates this job-local structure:
 │   └── presentation.pptx              # Required candidate deck
 └── work/
     ├── prompt.md
-    ├── codex_result.json               # Job-local SDK audit
     ├── final_message.txt
-    ├── progress.jsonl
+    ├── agents/
+    │   ├── author/attempt-<n>.json      # Per-session provider audits
+    │   └── reviewer/attempt-<n>.json
     ├── extracted/
     │   └── manifest.json               # Required for PDF/DOCX
     ├── images/
@@ -346,9 +316,9 @@ Filesystem traversal, skill/source staging, preflight subprocesses, deterministi
 validators, publication, cleanup, and document-provider I/O run in worker threads
 so the configured async-task concurrency is not serialized by blocking calls.
 
-### 4. Codex generation and review loop
+### 4. Agent generation and review loop
 
-The generic `CodexRunner` starts one ephemeral Codex thread rooted at the job directory and reuses it for every generation, correction, and review turn. The runtime uses:
+The coordinator creates a separate `AgentExecutionRequest` for each author attempt and reviewer activation. The Codex runner adapter gives each request its own ephemeral Codex thread rooted at the job directory. This prevents the read-only reviewer from sharing or modifying author session state and makes every revision depend only on the persisted workspace plus explicit feedback. The runtime uses:
 
 - the configured `OPENAI_MODEL`;
 - workspace-write sandboxing for generation/correction, read-only sandboxing for semantic review, and denied approval prompts;
@@ -357,7 +327,8 @@ The generic `CodexRunner` starts one ephemeral Codex thread rooted at the job di
 - an offline dependency environment (`PIP_NO_INDEX`, `UV_OFFLINE`, and npm offline mode);
 - a configurable timeout, currently 45 minutes by default;
 - streamed safe progress updates and a 60-second heartbeat;
-- a bounded `AGENT_MAX_REVIEW_ROUNDS` loop (default 3): deterministic validation runs before semantic review, blocking findings produce a correction turn, and publication is reached only after both gates pass.
+- short-lived sanitized run/node/event telemetry in Redis for the optional development console;
+- a bounded `AGENT_MAX_REVIEW_ROUNDS` loop (default 3): deterministic validation runs before semantic review, blocking findings produce a fresh author attempt, and publication is reached only after both gates pass.
 
 The prompt explicitly treats `input/` as untrusted source data rather than instructions. For PDF/DOCX inputs, deterministic extraction runs first and produces block-level IDs/locators. The presentation skill maps slide claims to those source blocks, creates an editable native PowerPoint, renders every slide, reviews it, revises problems, and produces the required evidence and QA artifacts.
 
@@ -410,6 +381,7 @@ All application routes are under `/api/v1` except health endpoints.
 | -------- | ------------------------------------------- | ------------------------------------------ |
 | `GET`    | `/health/live`                              | Process liveness.                          |
 | `GET`    | `/health`                                   | Redis and database readiness.              |
+| `GET`    | `/api/v1/retrieval/status`                  | Safe vector-store state and ready-document count. |
 | `GET`    | `/api/v1/qa-modes`                          | List supported Q&A categories.             |
 | `POST`   | `/api/v1/chat`                              | Return one grounded answer.                |
 | `POST`   | `/api/v1/chat/stream`                       | Stream a grounded answer as SSE.           |
@@ -421,14 +393,19 @@ All application routes are under `/api/v1` except health endpoints.
 | `DELETE` | `/api/v1/documents/folders/{folder_id}`     | Delete an empty folder.                    |
 | `GET`    | `/api/v1/documents/{document_id}`           | Read document metadata.                    |
 | `PATCH`  | `/api/v1/documents/{document_id}`           | Update document metadata.                  |
-| `DELETE` | `/api/v1/documents/{document_id}`           | Mark deleting and remove the local source. |
+| `DELETE` | `/api/v1/documents/{document_id}`           | Queue provider, local-file, and catalog cleanup. |
 | `GET`    | `/api/v1/documents/{document_id}/download`  | Download the original source.              |
 | `GET`    | `/api/v1/documents/{document_id}/ingestion` | Read the latest ingestion job.             |
 | `POST`   | `/api/v1/slides/jobs`                       | Queue a presentation job.                  |
 | `GET`    | `/api/v1/slides/jobs/{job_id}`              | Poll progress or terminal status.          |
 | `GET`    | `/api/v1/slides/jobs/{job_id}/download`     | Download a completed presentation.         |
+| `GET`    | `/api/v1/dev/agent-runs`                    | List sanitized agent-run snapshots.        |
+| `GET`    | `/api/v1/dev/agent-runs/{run_id}`           | Read one sanitized run and node snapshot.  |
+| `GET`    | `/api/v1/dev/agent-runs/{run_id}/events`    | Page through the run's sanitized events.   |
 
 FastAPI's interactive OpenAPI UI is available at `http://localhost:8000/docs` while the API is running.
+
+The `/api/v1/dev/*` routes are not registered unless `ENABLE_AGENT_DEV_ROUTES=true`. They have no application authentication and are intended only for loopback-bound or otherwise trusted development environments. Prompts, provider responses, paths, commands, and secrets are excluded from their Redis-backed telemetry.
 
 ## Configuration
 
@@ -444,15 +421,19 @@ cp backend/.env.example backend/.env
 | `OPENAI_API_KEY`                   | OpenAI Files/vector store, Responses API, and Codex SDK credential. | Required                                      |
 | `OPENAI_MODEL`                     | Slide-generation Codex model.                                       | `gpt-5.6-luna`                                |
 | `OPENAI_CHAT_MODEL`                | Grounded chat model.                                                | `gpt-5.6-luna`                                |
-| `OPENAI_VECTOR_STORE_ID`           | Shared non-news retrieval index.                                    | Optional setting, required for ingestion/chat |
+| `OPENAI_VECTOR_STORE_ID`           | Optional first-run seed for the shared non-news index.              | Omitted: created and persisted automatically  |
+| `OPENAI_VECTOR_STORE_NAME`         | Name for an automatically created vector store.                    | `NHI-AI Knowledge Base`                       |
+| `OPENAI_VECTOR_STORE_BOOTSTRAP_TIMEOUT_SECONDS` | Provider timeout for store bootstrap.          | `10`                                          |
 | `DATABASE_URL`                     | SQLModel database connection.                                       | `sqlite:///./nhi_ai.db`                       |
 | `DOCUMENTS_ROOT`                   | Original shared document storage.                                   | `/tmp/documents`                              |
 | `AGENT_JOBS_ROOT`                  | Temporary agent job workspaces.                                     | `/tmp/agents/jobs`                             |
 | `AGENT_OUTPUT_ROOT`                | Published agent artifacts (including PPTX).                         | `/tmp/agents/output`                           |
 | `AGENT_TIMEOUT_MINUTES`            | Total deadline for one agent workflow, including reviews.           | `45`                                          |
 | `AGENT_KEEP_WORKSPACE_ON_FAILURE`  | Retain failed workspaces for diagnosis.                             | `true`                                        |
-| `AGENT_MAX_REVIEW_ROUNDS`          | Maximum same-thread semantic review/correction rounds.               | `3`                                           |
-| `DOCUMENTS_QUEUE_NAME`             | Redis Stream for document ingestion.                                | `documents`                                   |
+| `AGENT_MAX_REVIEW_ROUNDS`          | Maximum independent author validation/review attempts.              | `3`                                           |
+| `AGENT_EVENT_RETENTION_SECONDS`    | TTL for sanitized developer run snapshots/events.                   | `86400` (one day)                             |
+| `ENABLE_AGENT_DEV_ROUTES`          | Register unauthenticated development telemetry routes.              | `false`                                       |
+| `DOCUMENTS_QUEUE_NAME`             | Redis Stream for document ingestion/deletion.                       | `documents`                                   |
 | `TASKS_QUEUE_NAME`                 | Redis Stream for agent jobs.                                         | `tasks`                                       |
 | `DOCUMENTS_WORKER_PROCESSES`       | Document worker process count.                                      | `1`                                           |
 | `DOCUMENTS_WORKER_MAX_ASYNC_TASKS` | Document async task limit per process.                              | `4`                                           |
@@ -466,6 +447,8 @@ the settings and restart the affected worker to apply them. There is no dynamic
 autoscaling.
 
 Do not commit `.env`; it contains the API key.
+
+`OPENAI_VECTOR_STORE_ID` is optional and only seeds an uninitialized database. If omitted, the API or document worker creates a store named by `OPENAI_VECTOR_STORE_NAME`. Once a store ID is persisted, it remains authoritative; changing the environment value produces a status warning instead of switching corpora. A seed from another OpenAI project/account is usable only when `OPENAI_API_KEY` is authorized to retrieve it. Bootstrap errors are exposed only as stable codes through `/api/v1/retrieval/status` and do not fail `/health/live`.
 
 ## Run with Docker Compose
 
@@ -482,6 +465,8 @@ curl http://localhost:8000/health/live
 curl http://localhost:8000/health
 docker compose logs -f backend documents-worker tasks-worker
 ```
+
+The published frontend/backend ports bind to `127.0.0.1` by default. To use the developer agent console, set `ENABLE_AGENT_DEV_ROUTES=true` in the repository-root `.env`, restart the stack, and open `http://localhost:3000/dev/agents`. Keep the ports private because these diagnostic routes are intentionally unauthenticated.
 
 ## Run locally
 
@@ -514,4 +499,4 @@ From `backend/`:
 uv run pytest
 ```
 
-The suite covers generic agent workflow contracts and review-loop behavior, slide API contracts, safe job progress/results, worker resolution/failure handling, chat grounding/streaming, document repository/storage behavior, and shared-volume path safety.
+The suite covers retrieval-index provisioning/coordination, document ingestion and provider cleanup, grounded chat/citations/streaming, provider-neutral agent contracts, isolated author/reviewer behavior, sanitized telemetry, slide APIs and validation, worker separation, and shared-volume path safety.

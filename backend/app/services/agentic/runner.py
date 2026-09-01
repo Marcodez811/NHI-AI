@@ -21,7 +21,15 @@ from typing import Any
 from loguru import logger
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox, SkillInput, TextInput
 
-from .contracts import AgentPhase, ProgressCallback, TurnAudit, TurnRequest
+from .contracts import (
+    AgentExecutionRequest,
+    AgentExecutionResult,
+    AgentPhase,
+    AgentRunner,
+    ProgressCallback,
+    TurnAudit,
+    TurnRequest,
+)
 
 
 class WorkflowExecutionError(RuntimeError):
@@ -242,7 +250,11 @@ class CodexRunner:
                 if not self.api_key:
                     raise WorkflowExecutionError("Codex provider is not configured")
                 await codex.login_api_key(self.api_key)
-                thread = await codex.thread_start(cwd=str(workspace), model=self.model, sandbox=Sandbox.workspace_write, approval_mode=ApprovalMode.deny_all, ephemeral=True)
+                # The first turn determines the session's baseline capability.
+                # Reviewer requests therefore start read-only sessions instead
+                # of relying only on a per-turn hint.
+                session_sandbox = turns[0].sandbox or Sandbox.workspace_write
+                thread = await codex.thread_start(cwd=str(workspace), model=self.model, sandbox=session_sandbox, approval_mode=ApprovalMode.deny_all, ephemeral=True)
                 audits: list[TurnAudit] = []
                 response: str | None = None
                 pending = list(turns)
@@ -384,10 +396,112 @@ class CodexRunner:
         return audit, audit.response
 
 
+class CodexAgentRunner:
+    """Provider-neutral runner backed by the existing :class:`CodexRunner`.
+
+    ``CodexRunner`` remains the compatibility/operational primitive and keeps
+    its original ``run(workspace, turns, ...)`` API.  This adapter deliberately
+    creates one Codex thread per ``AgentExecutionRequest`` so logical author,
+    reviewer, and revision activations are independent provider sessions.
+    """
+
+    name = "codex"
+
+    def __init__(self, codex_runner: CodexRunner | None = None, **runner_options: Any):
+        self.codex_runner = codex_runner or CodexRunner(**runner_options)
+
+    @property
+    def timeout_seconds(self) -> float | None:
+        return getattr(self.codex_runner, "timeout_seconds", None)
+
+    async def run(
+        self,
+        request: AgentExecutionRequest,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> AgentExecutionResult:
+        started = asyncio.get_running_loop().time()
+        turn = TurnRequest(
+            kind=request.node_id if request.node_id else request.role,
+            prompt=request.prompt,
+            sandbox=request.sandbox,
+            output_schema=request.output_schema,
+        )
+        result = await self.codex_runner.run(
+            request.workspace,
+            [turn],
+            skill_names=request.skill_names,
+            progress_callback=progress_callback,
+            audit_path=request.audit_path,
+        )
+        duration_ms = round((asyncio.get_running_loop().time() - started) * 1000)
+        usage = result.last_turn.usage if result.last_turn is not None else None
+        return AgentExecutionResult(
+            provider_run_id=result.thread_id,
+            response=result.response,
+            duration_ms=duration_ms,
+            usage=usage,
+            audits=result.audits,
+        )
+
+
+class RunnerRegistryError(ValueError):
+    """Base class for runner allowlist errors."""
+
+
+class UnknownRunnerError(RunnerRegistryError):
+    """Raised when a server-defined plan names an unavailable runner."""
+
+
+class RunnerRegistry:
+    """Explicit allowlist for provider-neutral agent runners."""
+
+    def __init__(self, runners: dict[str, AgentRunner] | None = None):
+        self._runners: dict[str, AgentRunner] = {}
+        for name, runner in (runners or {}).items():
+            self.register(name, runner)
+
+    def register(self, name: str, runner: AgentRunner) -> AgentRunner:
+        if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or "\\" in name:
+            raise RunnerRegistryError("runner names must be simple names")
+        runner_name = getattr(runner, "name", name) or name
+        if runner_name != name:
+            raise RunnerRegistryError("runner name does not match runner name")
+        if not callable(getattr(runner, "run", None)):
+            raise RunnerRegistryError("runner must provide an async run method")
+        if name in self._runners:
+            raise RunnerRegistryError(f"runner is already registered: {name}")
+        self._runners[name] = runner
+        return runner
+
+    def resolve(self, name: str) -> AgentRunner:
+        try:
+            return self._runners[name]
+        except KeyError as exc:
+            raise UnknownRunnerError(f"unknown runner: {name}") from exc
+
+    def get(self, name: str) -> AgentRunner:
+        return self.resolve(name)
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._runners))
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._runners
+
+
+runner_registry = RunnerRegistry({"codex": CodexAgentRunner()})
+
+
 async def run_codex_workflow(*args: Any, **kwargs: Any) -> CodexRunResult:
     """Functional convenience wrapper around :class:`CodexRunner`."""
 
     return await CodexRunner(**kwargs.pop("runner_options", {})).run(*args, **kwargs)
 
 
-__all__ = ["CodexRunner", "CodexRunResult", "ProgressReporter", "WorkflowExecutionError", "WorkflowTimeoutError", "safe_error", "run_codex_workflow"]
+__all__ = [
+    "AgentRunner", "CodexAgentRunner", "CodexRunner", "CodexRunResult",
+    "ProgressReporter", "RunnerRegistry", "RunnerRegistryError",
+    "UnknownRunnerError", "runner_registry", "WorkflowExecutionError",
+    "WorkflowTimeoutError", "safe_error", "run_codex_workflow",
+]

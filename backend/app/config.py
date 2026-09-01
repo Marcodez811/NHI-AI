@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5.6-luna"
     openai_chat_model: str = "gpt-5.6-luna"
     openai_vector_store_id: str | None = None
+    openai_vector_store_name: str = "NHI-AI Knowledge Base"
+    openai_vector_store_bootstrap_timeout_seconds: float = Field(default=10.0, gt=0)
     database_url: str = "sqlite:///./nhi_ai.db"
     # Canonical Luna 1 names.  AliasChoices keeps deployments using the old
     # SLIDES_* names working during migration; the new name is intentionally
@@ -36,6 +38,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_KEEP_WORKSPACE_ON_FAILURE", "SLIDES_KEEP_WORKSPACE_ON_FAILURE"),
     )
     agent_max_review_rounds: int = Field(default=3, ge=1, validation_alias=AliasChoices("AGENT_MAX_REVIEW_ROUNDS"))
+    # Agent telemetry is short-lived diagnostic data, not workflow history.
+    agent_event_retention_seconds: int = Field(
+        default=86_400,
+        ge=1,
+        validation_alias=AliasChoices("AGENT_EVENT_RETENTION_SECONDS"),
+    )
+    enable_agent_dev_routes: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("ENABLE_AGENT_DEV_ROUTES"),
+    )
     documents_worker_processes: int = Field(default=1, gt=0)
     documents_worker_max_async_tasks: int = Field(default=4, gt=0)
     tasks_worker_processes: int = Field(default=2, gt=0)

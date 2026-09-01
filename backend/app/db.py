@@ -11,6 +11,7 @@ from app.config import settings
 
 # Import table models so SQLModel.metadata includes them before create_all.
 from app.models.documents import Document, Folder, IngestionJob
+from app.models.retrieval import RetrievalIndex
 
 
 def _engine_kwargs(database_url: str) -> dict[str, object]:

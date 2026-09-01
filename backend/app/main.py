@@ -8,6 +8,12 @@ from sqlmodel import Session, select
 
 from app.api.routes.chat import get_chat_document_repository, get_chat_service, router as chat_router
 from app.api.routes.documents import get_document_repository, router as documents_router
+from app.api.routes.dev_agents import router as dev_agents_router
+from app.api.routes.retrieval import (
+    get_retrieval_document_repository,
+    get_retrieval_registry,
+    router as retrieval_router,
+)
 from app.api.routes.slides import router as slides_router
 from app.broker import documents_broker, tasks_broker
 from app.config import settings
@@ -15,12 +21,30 @@ from app.db import engine, get_session, init_db
 from app.models.documents import Document
 from app.services.documents.repository import SQLModelDocumentRepository
 from app.services.chat.responder import ResponseService
+from app.services.retrieval.registry import RetrievalIndexRegistry
+from app.tasks.documents import set_retrieval_index_registry
 
 redis_client = redis.from_url(settings.redis_url)
+retrieval_registry = RetrievalIndexRegistry()
+set_retrieval_index_registry(retrieval_registry)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await asyncio.to_thread(init_db)
+    # Vector-store bootstrap is deliberately best-effort.  The process can
+    # serve document catalog/status requests while OpenAI is unavailable; the
+    # ingestion worker retries through the same durable registry later.
+    try:
+        # Startup performs one remote validation for a persisted store.  The
+        # normal worker/request paths use ``ensure_ready`` only when they need
+        # to adopt or create an unready store, avoiding an OpenAI round-trip
+        # on every request.
+        await asyncio.to_thread(retrieval_registry.validate_ready)
+    except Exception:
+        # The registry persists a safe error state for expected provider
+        # failures.  Keep this boundary defensive so a provider SDK change
+        # never prevents the API from starting.
+        pass
     brokers = (documents_broker, tasks_broker)
     started: list[object] = []
     try:
@@ -54,6 +78,8 @@ def _document_repository_from_database():
 
 app.dependency_overrides[get_document_repository] = _document_repository_from_database
 app.dependency_overrides[get_chat_document_repository] = _document_repository_from_database
+app.dependency_overrides[get_retrieval_document_repository] = _document_repository_from_database
+app.dependency_overrides[get_retrieval_registry] = lambda: retrieval_registry
 
 
 def _document_id_for_remote_file(file_id: str):
@@ -62,15 +88,39 @@ def _document_id_for_remote_file(file_id: str):
     return document.id if document else None
 
 
+def _runtime_vector_store_id() -> str | None:
+    """Resolve the store from durable state, with a legacy env fallback.
+
+    The fallback keeps existing deployments and unit tests working before the
+    registry table is initialized.  Once bootstrap has persisted a row, the
+    database value is the source of truth.
+    """
+
+    try:
+        # Once the registry table exists, its state is authoritative even if
+        # it is currently provisioning/error.  The environment fallback is
+        # only for legacy databases that predate the table.
+        if retrieval_registry.get_record() is not None:
+            return retrieval_registry.get_ready_id()
+        return settings.openai_vector_store_id
+    except Exception:
+        return settings.openai_vector_store_id
+
+
 app.dependency_overrides[get_chat_service] = lambda: ResponseService(
-    vector_store_id=settings.openai_vector_store_id,
+    vector_store_id_provider=_runtime_vector_store_id,
     model=settings.openai_chat_model,
     document_id_for_file=_document_id_for_remote_file,
 )
 
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
+app.include_router(retrieval_router, prefix="/api/v1")
 app.include_router(slides_router, prefix="/api/v1")
+if settings.enable_agent_dev_routes:
+    # This console has no authentication of its own; only enable it on a
+    # trusted development network through explicit configuration.
+    app.include_router(dev_agents_router, prefix="/api/v1")
 
 @app.get("/health/live")
 async def health_live():

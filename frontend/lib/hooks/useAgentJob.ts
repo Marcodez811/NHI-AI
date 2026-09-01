@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AgentJobPhase, ApiError, getApiErrorMessage } from "../api";
+import type { AgentJobPhase } from "../api/types";
+import { ApiError, getApiErrorMessage } from "../api/client";
 
 export type AgentJobClientPhase =
     | "idle"
@@ -241,6 +242,11 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
         try {
             const next = await getJobRef.current(id, { signal: controller.signal });
             if (!mounted.current || token !== generation.current) return undefined;
+            // A malformed or exhausted transport response must behave like a
+            // transient poll failure, never crash the lifecycle updater.
+            if (!next) {
+                throw new ApiError(0, "Agent job status response was empty.");
+            }
             failureCount.current = 0;
             setConsecutivePollFailures(0);
             setWarning(null);

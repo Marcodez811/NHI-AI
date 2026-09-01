@@ -7,7 +7,8 @@ import {
     LoaderCircle,
     RefreshCw,
 } from "lucide-react";
-import type { AgentJobPhase } from "../../lib/api";
+import { Button } from "../ui/button";
+import type { AgentJobPhase } from "../../lib/api/slides";
 import type { AgentJobClientPhase, AgentJobRecord } from "../../lib/hooks/useAgentJob";
 
 export const AGENT_JOB_PHASES: readonly AgentJobPhase[] = [
@@ -109,14 +110,16 @@ export function AgentJobActivity({
                     </p>
                 </div>
                 {onRefresh && !isTerminal(job) && (
-                    <button
+                    <Button
                         type="button"
                         onClick={onRefresh}
-                        className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0 gap-1.5 text-xs text-muted-foreground"
                     >
                         <RefreshCw size={13} />
                         重新整理
-                    </button>
+                    </Button>
                 )}
             </div>
 
@@ -186,9 +189,9 @@ export function AgentJobActivity({
                         <p className="font-medium">{AGENT_JOB_PHASE_LABELS.failed}</p>
                         <p>{error || job.error || job.message || "工作執行失敗。"}</p>
                         {onRetry && (
-                            <button type="button" onClick={onRetry} className="mt-2 underline underline-offset-2">
+                            <Button type="button" onClick={onRetry} variant="link" size="sm" className="mt-2 h-auto p-0">
                                 再次生成
-                            </button>
+                            </Button>
                         )}
                     </div>
                 </div>
@@ -200,9 +203,9 @@ export function AgentJobActivity({
                     <div className="min-w-0 flex-1">
                         <p>{warning}</p>
                         {onRefresh && (
-                            <button type="button" onClick={onRefresh} className="mt-1.5 font-medium underline underline-offset-2">
+                            <Button type="button" onClick={onRefresh} variant="link" size="sm" className="mt-1.5 h-auto p-0 font-medium">
                                 立即重試
-                            </button>
+                            </Button>
                         )}
                     </div>
                 </div>

@@ -1,4 +1,4 @@
-import type { Citation } from "../api";
+import type { Citation } from "../api/chat";
 
 export type View = "chat" | "files" | "slides";
 

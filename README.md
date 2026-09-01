@@ -1,35 +1,36 @@
 # NHI-AI
 
-NHI-AI is an internal, document-grounded AI workspace for the National Health Insurance Administration. The current product supports category-scoped Q&A, document upload/cataloguing/indexing, and PPTX generation from selected indexed documents. PPTX generation is the first registered workflow on a general Codex-based agent runtime, rather than a special-purpose queue pipeline.
+NHI-AI is an internal, document-grounded AI workspace for the National Health Insurance Administration. The current product supports category-scoped Q&A, document upload/cataloguing/indexing, and PPTX generation from selected documents. The frontend is a modular Next.js workspace built from shadcn/Base UI primitives, and PPTX generation is the first registered workflow on a provider-neutral agent runtime backed by Codex.
 
 News ingestion, news retrieval, news UI, and news generation are intentionally out of scope.
 
 ## Architecture
 
-| Component  | Responsibility                                               | Docker endpoint         |
-| ---------- | ------------------------------------------------------------ | ----------------------- |
-| `frontend` | Next.js chat, knowledge-base, and slides UI                  | `http://localhost:3000` |
-| `backend`  | FastAPI API, document catalog, chat adapter, and agent-job API | `http://localhost:8000` |
-| `documents-worker` | Taskiq consumer for document ingestion                     | none                    |
-| `tasks-worker`     | Taskiq consumer for the generic `agents.run` entrypoint    | none                    |
-| `postgres` | Document, folder, and ingestion metadata                     | `localhost:5432`        |
-| `redis`    | Queue, progress, and short-lived job results                 | `localhost:6379`        |
-| OpenAI     | Managed vector store, `file_search`, and response generation | external                |
+| Component          | Responsibility                                                                   | Docker endpoint         |
+| ------------------ | -------------------------------------------------------------------------------- | ----------------------- |
+| `frontend`         | Next.js chat, knowledge-base, slides, and gated agent-telemetry UI              | `http://localhost:3000` |
+| `backend`          | FastAPI API, retrieval bootstrap, document catalog, grounded chat, and job APIs   | `http://localhost:8000` |
+| `documents-worker` | Taskiq consumer for `documents.ingest` and `documents.delete`                    | none                    |
+| `tasks-worker`     | Taskiq consumer for the generic `agents.run` entrypoint                          | none                    |
+| `postgres`         | Document/folder/ingestion metadata and the durable primary retrieval-index record | `localhost:5432`        |
+| `redis`            | Queues, job progress/results, and short-lived sanitized agent telemetry           | `localhost:6379`        |
+| OpenAI             | Managed vector store, `file_search`, Responses API, and Codex execution           | external                |
 
-PostgreSQL is the source of truth. Uploaded files and generated PPTX artifacts are stored in the shared `slides-data` volume so the API and worker resolve the same UUID-scoped paths. Redis is transport/progress state only.
+PostgreSQL is the source of truth for catalog metadata and the application's primary vector-store ID. Uploaded files and generated PPTX artifacts are stored in the shared `slides-data` volume so the API and workers resolve the same UUID-scoped paths. Redis holds transport/progress data plus optional, expiring development telemetry; it is not the durable catalog.
 
 ### Request/data flow
 
 1. The browser calls the Next.js app; `/api/v1/*` is rewritten to FastAPI.
 2. A document upload writes metadata to PostgreSQL and one secure UUID directory to shared storage, then queues a Taskiq ingestion job in Redis.
-3. `documents-worker` uploads the source to the configured news-free OpenAI vector store and records opaque provider IDs in PostgreSQL.
+3. `documents-worker` adopts or creates the application's news-free OpenAI vector store through the database-backed retrieval registry, uploads the source, and records opaque provider IDs in PostgreSQL.
 4. Chat uses an explicit scope (`legislative_qa`, `public_opinion`, or `bei_can`) and OpenAI `file_search`; responses include citations or the insufficient-evidence fallback.
 5. Agent jobs enter the `tasks` stream as typed `AgentTaskPayload` values. `tasks-worker` resolves an explicitly registered workflow; today that workflow is `slides`, which resolves selected document IDs, generates and validates a PPTX, and publishes it under the shared output volume.
 
-Redis uses separate streams: `documents` carries `documents.ingest`, while `tasks`
-carries `agents.run`. Terminal task results/progress use the `tasks:result` namespace
-and expire after one hour. Worker process and concurrency limits are configured by
-`DOCUMENTS_WORKER_*` and `TASKS_WORKER_*` settings.
+Redis uses separate streams: `documents` carries `documents.ingest` and
+`documents.delete`, while `tasks` carries `agents.run`. Terminal task
+results/progress use the `tasks:result` namespace and expire after one hour.
+Worker process and concurrency limits are configured by `DOCUMENTS_WORKER_*`
+and `TASKS_WORKER_*` settings.
 
 Uploads currently accept PDF, DOCX, Markdown (`.md`/`.markdown`), and TXT sources, with a 250 MiB per-file limit.
 
@@ -37,24 +38,26 @@ Uploads currently accept PDF, DOCX, Markdown (`.md`/`.markdown`), and TXT source
 
 `agents.run` is the only Taskiq entrypoint for Codex-backed work. Its payload contains a job ID, an allowlisted workflow name, and typed workflow input; it never selects a Python module, shell command, skill path, or filesystem path from client data. The workflow registry resolves the name to an adapter, and that adapter declares the skills it needs from `backend/.agents/skills`.
 
-Each job receives an isolated workspace and one ephemeral Codex thread. Write-capable generation and correction turns are followed by deterministic validation; a valid candidate then receives a read-only semantic review. Blocking findings trigger a correction turn on the same thread, bounded by `AGENT_MAX_REVIEW_ROUNDS` (default `3`). Publication happens only after both gates pass. This framework is generic, although `slides` is currently the only registered workflow.
+Each job receives an isolated workspace. The coordinator runs server-defined `author`, deterministic `validator`, and read-only `reviewer` nodes. Every author attempt and reviewer activation gets an independent ephemeral provider session, so reviewers cannot mutate author state and revisions do not inherit hidden conversational context. Blocking deterministic or semantic findings create a fresh author attempt, bounded by `AGENT_MAX_REVIEW_ROUNDS` (default `3`). Publication happens only after both gates pass. This framework is generic, although `slides` is currently the only registered workflow.
 
 ## API surface
 
 Application routes are prefixed with `/api/v1`.
 
-| Route                       | Purpose                                                  |
-| --------------------------- | -------------------------------------------------------- |
-| `GET /health/live`          | Process liveness; does not require dependencies          |
-| `GET /health`               | PostgreSQL and Redis readiness                           |
-| `GET /api/v1/qa-modes`      | Supported retrieval scopes                               |
-| `POST /api/v1/chat`         | Non-streaming grounded answer                            |
-| `POST /api/v1/chat/stream`  | SSE answer stream with citations                         |
-| `/api/v1/documents`         | Upload, list, update, download, delete, ingestion status |
-| `/api/v1/documents/folders` | Folder CRUD                                              |
-| `/api/v1/slides/jobs`       | Queue, poll, and download slide jobs                     |
+| Route                              | Purpose                                                       |
+| ---------------------------------- | ------------------------------------------------------------- |
+| `GET /health/live`                 | Process liveness; does not require dependencies               |
+| `GET /health`                      | PostgreSQL and Redis readiness                                |
+| `GET /api/v1/retrieval/status`     | Vector-store bootstrap state and ready-document count         |
+| `GET /api/v1/qa-modes`             | Supported retrieval scopes                                    |
+| `POST /api/v1/chat`                | Non-streaming grounded answer                                 |
+| `POST /api/v1/chat/stream`         | SSE answer stream with citations                              |
+| `/api/v1/documents`                | Upload, list, update, download, async delete, ingestion status |
+| `/api/v1/documents/folders`        | Folder CRUD                                                   |
+| `/api/v1/slides/jobs`              | Queue, poll, and download slide jobs                          |
+| `/api/v1/dev/agent-runs`           | Gated sanitized run snapshots and event timelines             |
 
-Every retrieval request is filtered by scope and `is_news_source=false`. The configured vector store must contain only approved, non-news sources.
+Every retrieval request is filtered by scope and `is_news_source=false`. On first startup, the backend creates an empty news-free OpenAI vector store when `OPENAI_VECTOR_STORE_ID` is omitted, then persists the ID in PostgreSQL for the API and document workers to share. An explicitly configured ID is adopted and validated on first startup. After that, the persisted ID is authoritative; a different environment value produces a warning instead of silently switching corpora. The supplied API key must have access to the seeded store, and the store must contain only approved, non-news sources.
 
 ## Configuration
 
@@ -69,11 +72,14 @@ REDIS_URL=redis://localhost:6379/0
 OPENAI_API_KEY=replace-me
 OPENAI_MODEL=gpt-5.6-luna
 OPENAI_CHAT_MODEL=gpt-5.6-luna
-OPENAI_VECTOR_STORE_ID=vs_news_free_index
+# Optional: seed an existing dedicated news-free store on first startup.
+# OPENAI_VECTOR_STORE_ID=vs_news_free_index
+OPENAI_VECTOR_STORE_NAME=NHI-AI Knowledge Base
+OPENAI_VECTOR_STORE_BOOTSTRAP_TIMEOUT_SECONDS=10
 DATABASE_URL=postgresql+psycopg://nhi_ai:nhi_ai_local@localhost:5432/nhi_ai
 ```
 
-`OPENAI_VECTOR_STORE_ID` must identify a dedicated news-free index. Never commit `backend/.env` or provider keys. The default database is SQLite (`sqlite:///./nhi_ai.db`) for a lightweight local run; Compose overrides it with PostgreSQL. The current bootstrap uses SQLModel `create_all`, so add versioned migrations before changing a long-lived production schema.
+When supplied, `OPENAI_VECTOR_STORE_ID` must identify a dedicated news-free index in the OpenAI project visible to `OPENAI_API_KEY`; it is a first-run seed and the persisted database record becomes the runtime source of truth. Bootstrap failure does not fail process liveness: inspect `/api/v1/retrieval/status`, fix the credential/store issue, and let a later worker attempt retry provisioning. Never commit `backend/.env` or provider keys. The default database is SQLite (`sqlite:///./nhi_ai.db`) for a lightweight local run; Compose overrides it with PostgreSQL. The current bootstrap uses SQLModel `create_all`, so add versioned migrations before changing a long-lived production schema.
 
 ### Queue and worker tuning
 
@@ -91,8 +97,10 @@ Queue names are configured with `DOCUMENTS_QUEUE_NAME` and `TASKS_QUEUE_NAME`. W
 Configure secrets and start the complete stack:
 
 ```bash
+cp .env.example .env
 cp backend/.env.example backend/.env
-# Edit backend/.env and set OPENAI_API_KEY and OPENAI_VECTOR_STORE_ID.
+# Edit backend/.env and set OPENAI_API_KEY. An existing OPENAI_VECTOR_STORE_ID
+# may be supplied as an optional first-run seed.
 docker compose up --build
 ```
 
@@ -103,6 +111,28 @@ Open:
 - Readiness: <http://localhost:8000/health>
 
 The backend waits for healthy PostgreSQL and Redis. Keep both workers running for uploads and agent jobs to finish.
+
+### Developer telemetry console
+
+The unauthenticated agent telemetry endpoints and `/dev/agents` console are
+disabled by default. For trusted local development only, set
+`ENABLE_AGENT_DEV_ROUTES=true` in the root `.env` used by Compose, then restart
+the stack. Compose binds the frontend and backend to `127.0.0.1` by default;
+do not change `HOST_BIND_ADDRESS` to a public interface for this console.
+Telemetry is sanitized before it reaches Redis, expires after
+`AGENT_EVENT_RETENTION_SECONDS` (default one day), and never controls workflow
+success or failure.
+
+To inspect a remote development stack, keep its ports loopback-bound and use an
+SSH tunnel instead:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 -L 8000:127.0.0.1:8000 user@development-host
+```
+
+Then open <http://localhost:3000/dev/agents>. The console intentionally
+contains only sanitized telemetry; prompts, provider responses, and secrets are
+not exposed.
 
 Useful operations:
 
@@ -132,9 +162,12 @@ Terminal 1:
 cd backend
 uv sync
 npm ci --omit=dev --no-audit --no-fund
-uv run python -c "from app.db import init_db; init_db()"
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+The API lifespan initializes the current SQLModel schema and performs a
+best-effort retrieval-index validation. A document worker can also initialize
+the schema and retry vector-store provisioning during a cold start.
 
 The Node dependencies in `backend/package.json` support the current PPTX workflow. The task worker also needs the Codex SDK and the slide workflow's rendering, font, and OCR dependencies; the Docker image provides them.
 
@@ -171,6 +204,10 @@ The Next.js rewrite sends `/api/v1/*` to `BACKEND_URL` or `BACKEND_INTERNAL_URL`
 BACKEND_INTERNAL_URL=http://localhost:8000 pnpm dev
 ```
 
+Copy `frontend/.env.example` to `frontend/.env.local` to configure the same
+values for local development. Keep `ENABLE_AGENT_DEV_ROUTES=false` unless both
+the frontend and backend are running on a trusted development network.
+
 ## Import the predecessor corpus
 
 The migration is dry-run by default and excludes the two news-tagged predecessor PDFs. The current predecessor manifest yields 20 eligible sources (14 PDFs and 6 Markdown files); these become queued records and the document worker performs provider indexing afterward.
@@ -202,18 +239,22 @@ backend/
   app/models/              SQLModel and API contracts
   app/services/chat/       file_search, response, citation adapters
   app/services/documents/  repository and secure file storage
-  app/services/agentic/    generic workflow registry, runner, review loop, skill staging
+  app/services/retrieval/  durable vector-store provisioning and validation
+  app/services/agentic/    coordinator, runner allowlist, telemetry, review loop, skill staging
   app/services/slides/     registered PPTX workflow adapter and validation assets
-  app/tasks/               `documents.ingest` and generic `agents.run` consumers
+  app/tasks/               document ingest/delete and generic `agents.run` consumers
   app/worker.py            settings-driven documents/tasks worker launcher
   .agents/skills/          versioned, allowlisted workflow skills
   scripts/                 Corpus migration utilities
   tests/                   Backend tests
 frontend/
-  app/page.tsx             Chat, knowledge-base, slide workspace
-  lib/api.ts               Typed /api/v1 client and SSE parser
+  app/(workspace)/         Shared shell with /chat, /knowledge, and /slides routes
+  components/ui/           shadcn/base-nova primitives
+  components/workspace/    Modular workflow views and session provider
+  components/dev/          Sanitized agent telemetry dashboard
+  lib/api/                 Domain API facades (documents, chat, slides, agents)
+  lib/api.ts               Backward-compatible typed client barrel and SSE parser
 docker-compose.yml          PostgreSQL, Redis, backend, split workers, frontend
-IMPLEMENTATION_PLAN.md      Architecture comparison and rollout decisions
 ```
 
 ## Verification
@@ -221,9 +262,9 @@ IMPLEMENTATION_PLAN.md      Architecture comparison and rollout decisions
 From the repository root:
 
 ```bash
-cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest -q
-cd ../frontend && pnpm typecheck
+cd backend && PYTHONDONTWRITEBYTECODE=1 uv run pytest -q
+cd ../frontend && pnpm typecheck && pnpm test && pnpm build
 cd .. && docker compose config --quiet
 ```
 
-The backend suite covers document storage/repositories, grounded chat/citations/streaming, generic agent workflow contracts and review-loop behavior, slide jobs, worker separation, and shared-volume resolution. Authentication, authorization, remote vector-store cleanup, retry/dead-letter handling, and versioned database migrations remain follow-up work.
+The backend suite covers retrieval bootstrap, document storage/repositories and provider cleanup, grounded chat/citations/streaming, agent contracts/telemetry/review behavior, slide jobs, worker separation, and shared-volume resolution. The frontend suite covers the API facades, retrieval empty/error states, workspace hooks, slide-job activity, and the developer telemetry console. Authentication, authorization, automatic retry/dead-letter policy, artifact retention, and versioned database migrations remain follow-up work.

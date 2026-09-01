@@ -138,6 +138,28 @@ export interface QaModeInfo {
     description: string;
 }
 
+/** Sanitized readiness contract for the application's retrieval index. */
+export type RetrievalIndexState =
+    | "uninitialized"
+    | "provisioning"
+    | "ready"
+    | "error";
+
+export type RetrievalIndexErrorCode =
+    | "invalid_seed"
+    | "provider_unavailable"
+    | "provider_not_configured"
+    | "store_missing_or_expired"
+    | (string & {});
+
+export interface RetrievalStatus {
+    state: RetrievalIndexState;
+    can_retrieve: boolean;
+    ready_document_count: number;
+    error_code?: RetrievalIndexErrorCode | null;
+    warning_code?: string | null;
+}
+
 export interface Citation {
     type: "file_citation";
     text: string;
@@ -175,6 +197,85 @@ export type AgentJobPhase =
     | "publishing"
     | "completed"
     | "failed";
+
+/** Sanitized developer telemetry returned by the gated agent-run endpoints. */
+export type AgentEventType =
+    | "run_started"
+    | "phase_changed"
+    | "node_started"
+    | "node_progress"
+    | "node_completed"
+    | "node_failed"
+    | "heartbeat"
+    | "run_completed"
+    | "run_failed"
+    | (string & {});
+
+export type AgentRunStatus = "queued" | "running" | "completed" | "failed" | (string & {});
+export type AgentNodeStatus = "pending" | "waiting" | "running" | "completed" | "failed" | (string & {});
+
+export interface AgentRunSummary {
+    run_id: string;
+    workflow: string;
+    status: AgentRunStatus;
+    phase: AgentJobPhase | string | null;
+    runner: string | null;
+    task_id: string | null;
+    worker_id: string | null;
+    started_at: string | null;
+    updated_at: string | null;
+    finished_at: string | null;
+    duration_ms: number | null;
+    message: string | null;
+    last_sequence: number;
+}
+
+export interface AgentNodeSnapshot {
+    node_id: string;
+    agent_role: string | null;
+    runner: string | null;
+    status: AgentNodeStatus;
+    attempt: number | null;
+    task_id: string | null;
+    worker_id: string | null;
+    provider_run_id: string | null;
+    started_at: string | null;
+    updated_at: string | null;
+    finished_at: string | null;
+    duration_ms: number | null;
+    message: string | null;
+}
+
+export interface AgentRunSnapshot extends AgentRunSummary {
+    nodes: AgentNodeSnapshot[];
+}
+
+export interface AgentEvent {
+    run_id: string;
+    workflow: string;
+    node_id: string | null;
+    agent_role: string | null;
+    runner: string | null;
+    worker_id: string | null;
+    attempt: number | null;
+    sequence: number;
+    event_type: AgentEventType;
+    status: string | null;
+    phase: AgentJobPhase | string | null;
+    message: string | null;
+    occurred_at: string;
+    duration_ms: number | null;
+}
+
+export interface AgentRunListResponse {
+    runs: AgentRunSnapshot[];
+}
+
+export interface AgentEventListResponse {
+    events: AgentEvent[];
+    after: number;
+    next_after: number | null;
+}
 
 export type SlideJobStatus = "queued" | "running" | "completed" | "failed";
 
@@ -461,6 +562,12 @@ export async function fetchQaModes(): Promise<QaModeInfo[]> {
     return request<QaModeInfo[]>("/qa-modes");
 }
 
+export async function fetchRetrievalStatus(
+    options: { signal?: AbortSignal } = {},
+): Promise<RetrievalStatus> {
+    return request<RetrievalStatus>("/retrieval/status", options);
+}
+
 export interface StreamHandlers {
     onDelta: (text: string) => void;
     onDone?: (citations: Citation[]) => void;
@@ -631,6 +738,34 @@ export async function getSlideJob(
     options: { signal?: AbortSignal } = {},
 ): Promise<SlideJob> {
     return request<SlideJob>(`/slides/jobs/${encodeURIComponent(id)}`, options);
+}
+
+export async function fetchAgentRuns(
+    limit = 50,
+    options: { signal?: AbortSignal } = {},
+): Promise<AgentRunListResponse> {
+    return request<AgentRunListResponse>(`/dev/agent-runs${queryString({ limit })}`, options);
+}
+
+export async function fetchAgentRun(
+    runId: string,
+    options: { signal?: AbortSignal } = {},
+): Promise<AgentRunSnapshot> {
+    return request<AgentRunSnapshot>(
+        `/dev/agent-runs/${encodeURIComponent(runId)}`,
+        options,
+    );
+}
+
+export async function fetchAgentRunEvents(
+    runId: string,
+    params: { after?: number; limit?: number; signal?: AbortSignal } = {},
+): Promise<AgentEventListResponse> {
+    const { signal, ...query } = params;
+    return request<AgentEventListResponse>(
+        `/dev/agent-runs/${encodeURIComponent(runId)}/events${queryString(query)}`,
+        { signal },
+    );
 }
 
 export function getSlideDownloadUrl(id: string): string {

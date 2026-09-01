@@ -31,6 +31,23 @@ def get_chat_document_repository() -> DocumentRepository:
 
 
 async def _validate_document_scope(request: ChatRequest, repository: DocumentRepository) -> None:
+    # An empty catalog is a normal first-run state.  Return a stable conflict
+    # contract so the UI can direct the user to upload a source instead of
+    # sending a guaranteed-unproductive Responses API request.
+    if not request.document_ids:
+        ready_documents = await repository.list_documents(
+            category=request.mode,
+            status=DocumentStatus.READY,
+            retrieval_enabled=True,
+        )
+        if not ready_documents:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "knowledge_base_empty",
+                    "message": "No retrieval-ready documents are available for this category.",
+                },
+            )
     for document_id in request.document_ids:
         document = await repository.get_document(document_id)
         if document is None:

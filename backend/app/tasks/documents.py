@@ -26,6 +26,8 @@ from app.models.documents import (
     IngestionJob,
 )
 from app.services.documents.storage import DocumentStorageError, LocalDocumentStorage
+from app.services.retrieval.registry import RetrievalIndexRegistry
+from app.models.retrieval import RetrievalIndexState
 from sqlmodel import Session, select
 
 
@@ -44,6 +46,47 @@ class DocumentDeletionService(Protocol):
 
 class NewsDocumentError(ValueError):
     """Raised whenever a source attempts to enter the retrieval index as news."""
+
+
+_retrieval_registry = RetrievalIndexRegistry()
+
+
+def _runtime_vector_store_id() -> str | None:
+    """Read the durable store ID, retaining a compatibility env fallback."""
+
+    try:
+        get_record = getattr(_retrieval_registry, "get_record", None)
+        if callable(get_record) and get_record() is not None:
+            return _retrieval_registry.get_ready_id()
+        return _retrieval_registry.get_ready_id() or settings.openai_vector_store_id
+    except Exception:
+        # A worker can receive a task during the short window before the new
+        # table is available.  Existing deployments with an explicit store ID
+        # can still clean up already-indexed files in that window.
+        return settings.openai_vector_store_id
+
+
+async def _ensure_runtime_vector_store_id() -> str:
+    """Adopt/create the primary store and return its persisted ID."""
+
+    # A worker can begin consuming an upload while the API is still creating
+    # the shared store.  Wait briefly for that other process to finish its
+    # lease instead of failing the first document immediately.
+    for attempt in range(20):
+        record = await asyncio.to_thread(_retrieval_registry.ensure_ready)
+        if record.state == RetrievalIndexState.READY.value and record.vector_store_id:
+            return record.vector_store_id
+        if record.state != RetrievalIndexState.PROVISIONING.value or attempt == 19:
+            raise RuntimeError("Document retrieval index is not available.")
+        await asyncio.sleep(0.5)
+    raise RuntimeError("Document retrieval index is not available.")
+
+
+def set_retrieval_index_registry(registry: RetrievalIndexRegistry) -> None:
+    """Inject the application registry, primarily for worker startup/tests."""
+
+    global _retrieval_registry
+    _retrieval_registry = registry
 
 
 class NoopDocumentIngestionService:
@@ -77,7 +120,8 @@ class OpenAIDocumentDeletionService:
             return
         if not settings.openai_api_key:
             raise RuntimeError("Document retrieval provider is not configured.")
-        if remote_vector_store_id and not settings.openai_vector_store_id:
+        vector_store_id = _runtime_vector_store_id()
+        if remote_vector_store_id and not vector_store_id:
             raise RuntimeError("Document retrieval index is not configured.")
 
         client = OpenAI(api_key=settings.openai_api_key)
@@ -86,7 +130,7 @@ class OpenAIDocumentDeletionService:
                 await asyncio.to_thread(
                     client.vector_stores.files.delete,
                     file_id=remote_vector_store_id,
-                    vector_store_id=settings.openai_vector_store_id,
+                    vector_store_id=vector_store_id,
                 )
             except Exception as exc:
                 # A previously detached vector-store file is already in the
@@ -107,10 +151,9 @@ class OpenAIDocumentIngestionService:
     async def ingest(self, payload: DocumentTaskPayload) -> None:
         if payload.category not in set(DocumentCategory):
             raise NewsDocumentError("News documents are not supported.")
-        if not settings.openai_vector_store_id:
-            raise RuntimeError("Document retrieval index is not configured.")
         if not settings.openai_api_key:
             raise RuntimeError("Document retrieval provider is not configured.")
+        vector_store_id = await _ensure_runtime_vector_store_id()
 
         def load_source_and_mark_indexing() -> tuple[Path, str]:
             with Session(engine) as session:
@@ -146,7 +189,7 @@ class OpenAIDocumentIngestionService:
                 "is_news_source": "false",
             }
             attached = client.vector_stores.files.create(
-                vector_store_id=settings.openai_vector_store_id,
+                vector_store_id=vector_store_id,
                 file_id=uploaded.id,
                 attributes=attributes,
             )

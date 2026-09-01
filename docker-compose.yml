@@ -28,7 +28,7 @@ services:
       dockerfile: Dockerfile
     env_file: ./backend/.env
     ports:
-      - "8000:8000"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:8000:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
       interval: 5s
@@ -41,6 +41,7 @@ services:
       AGENT_OUTPUT_ROOT: /data/output
       DOCUMENTS_QUEUE_NAME: documents
       TASKS_QUEUE_NAME: tasks
+      ENABLE_AGENT_DEV_ROUTES: ${ENABLE_AGENT_DEV_ROUTES:-false}
     volumes:
       - slides-data:/data
     depends_on:
@@ -101,9 +102,10 @@ services:
       args:
         BACKEND_INTERNAL_URL: http://backend:8000
     ports:
-      - "3000:3000"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:3000:3000"
     environment:
       BACKEND_INTERNAL_URL: http://backend:8000
+      ENABLE_AGENT_DEV_ROUTES: ${ENABLE_AGENT_DEV_ROUTES:-false}
     depends_on:
       backend:
         condition: service_healthy

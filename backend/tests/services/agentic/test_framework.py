@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from openai_codex import Sandbox
 
 from app.services.agentic import (
+    AgentExecutionResult,
     AgentPhase,
     AgentTaskPayload,
     BaseWorkflowAdapter,
@@ -16,6 +19,8 @@ from app.services.agentic import (
     UnknownWorkflowError,
     WorkflowRegistry,
     WorkflowStatus,
+    RunnerRegistry,
+    UnknownRunnerError,
     stage_declared_skills,
 )
 from app.services.agentic.runner import CodexRunResult, CodexRunner, WorkflowTimeoutError, safe_error
@@ -170,6 +175,32 @@ async def test_execute_workflow_typed_publication(tmp_path):
     assert result.output == "done"
 
 
+@pytest.mark.asyncio
+async def test_execute_workflow_outer_timeout_preserves_lifecycle_start_time(tmp_path):
+    class HangingRunner:
+        def __init__(self):
+            self.started_at = None
+
+        async def run(self, workspace, turns, **kwargs):
+            self.started_at = datetime.now(timezone.utc)
+            await asyncio.sleep(1)
+
+    runner = HangingRunner()
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="timeout-job", workflow="echo", input={}),
+        registry=WorkflowRegistry({"echo": EchoAdapter()}),
+        runner=runner,
+        workspace_root=tmp_path,
+        timeout_seconds=0.05,
+    )
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.error == "Workflow timed out."
+    assert runner.started_at is not None
+    assert result.started_at <= runner.started_at < result.finished_at
+    assert (result.finished_at - result.started_at).total_seconds() >= 0.02
+
+
 class LoopAdapter(BaseWorkflowAdapter[dict, str]):
     name = "loop"
     max_review_rounds = 3
@@ -221,6 +252,102 @@ class ScriptedRunner:
             if follow_up is not None:
                 pending.append(follow_up)
         return CodexRunResult(thread_id="thread-loop", audits=[], response="review response")
+
+
+class ModernReviewAdapter(BaseWorkflowAdapter[dict, str]):
+    name = "modern-review"
+    max_review_rounds = 2
+    author_runner = "fake"
+    reviewer_runner = "fake"
+
+    def build_prompt(self, value, workspace, **kwargs):
+        return f"author-{kwargs.get('revision_feedback') or 'initial'}"
+
+    def build_review_prompt(self, value, workspace, audit, context):
+        return "review"
+
+    def parse_review(self, response, workspace):
+        return {"blocking_findings": response == "block"}
+
+    def revision_feedback(self, value, review, result):
+        return "correct the blocking finding"
+
+    def publish(self, value, result, workspace):
+        return result.response
+
+
+class ModernRunner:
+    name = "fake"
+    timeout_seconds = 10
+
+    def __init__(self):
+        self.requests = []
+
+    async def run(self, request, *, progress_callback=None):
+        self.requests.append(request)
+        response = "block" if request.node_id == "reviewer" and request.attempt == 1 else f"author-{request.attempt}"
+        return AgentExecutionResult(provider_run_id=f"provider-{len(self.requests)}", response=response)
+
+
+def test_runner_registry_is_an_explicit_allowlist():
+    registry = RunnerRegistry({"fake": ModernRunner()})
+    assert registry.resolve("fake").name == "fake"
+    with pytest.raises(UnknownRunnerError):
+        registry.resolve("missing")
+    with pytest.raises(ValueError):
+        registry.register("fake", ModernRunner())
+
+
+@pytest.mark.asyncio
+async def test_modern_coordinator_uses_independent_author_and_reviewer_sessions(tmp_path):
+    adapter = ModernReviewAdapter()
+    runner = ModernRunner()
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="modern-job", workflow="modern-review", input={}),
+        registry=WorkflowRegistry({"modern-review": adapter}),
+        runner=runner,
+        workspace_root=tmp_path,
+    )
+    assert result.status is WorkflowStatus.COMPLETED
+    assert result.output == "author-2"
+    assert [(item.node_id, item.attempt) for item in runner.requests] == [
+        ("author", 1),
+        ("reviewer", 1),
+        ("author", 2),
+        ("reviewer", 2),
+    ]
+    assert runner.requests[0].sandbox is Sandbox.workspace_write
+    assert runner.requests[1].sandbox is Sandbox.read_only
+    assert runner.requests[0].audit_path != runner.requests[2].audit_path
+
+
+@pytest.mark.asyncio
+async def test_modern_coordinator_emits_node_events_without_affecting_result(tmp_path):
+    adapter = ModernReviewAdapter()
+    runner = ModernRunner()
+    events = []
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="event-job", workflow="modern-review", input={}),
+        registry=WorkflowRegistry({"modern-review": adapter}),
+        runner=runner,
+        workspace_root=tmp_path,
+        event_callback=events.append,
+    )
+    assert result.status is WorkflowStatus.COMPLETED
+    assert [(event["event_type"], event["node_id"], event["attempt"]) for event in events] == [
+        ("node_started", "author", 1),
+        ("node_completed", "author", 1),
+        ("node_started", "validator", 1),
+        ("node_completed", "validator", 1),
+        ("node_started", "reviewer", 1),
+        ("node_completed", "reviewer", 1),
+        ("node_started", "author", 2),
+        ("node_completed", "author", 2),
+        ("node_started", "validator", 2),
+        ("node_completed", "validator", 2),
+        ("node_started", "reviewer", 2),
+        ("node_completed", "reviewer", 2),
+    ]
 
 
 @pytest.mark.asyncio

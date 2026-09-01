@@ -14,7 +14,7 @@ from enum import StrEnum
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class WorkflowStatus(StrEnum):
@@ -122,6 +122,106 @@ class TurnRequest(BaseModel):
     output_schema: dict[str, Any] | None = None
 
 
+class AgentExecutionRequest(BaseModel):
+    """Provider-neutral description of one logical agent activation.
+
+    Workflow inputs never construct this object directly.  The coordinator
+    creates it from an allowlisted workflow plan, which keeps provider choice,
+    prompts, and skill paths out of the public task boundary.
+    """
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    run_id: UUID | str
+    node_id: str = Field(min_length=1, max_length=80)
+    role: str = Field(min_length=1, max_length=120)
+    attempt: int = Field(default=1, ge=1)
+    workspace: Path
+    prompt: str = Field(min_length=1)
+    sandbox: Any = None
+    output_schema: dict[str, Any] | None = None
+    skill_names: tuple[str, ...] = Field(default=(), validation_alias=AliasChoices("skill_names", "staged_skills"))
+    audit_path: Path | None = None
+
+    @property
+    def staged_skills(self) -> tuple[str, ...]:
+        """Readable alias used by provider integrations."""
+
+        return self.skill_names
+
+    @field_validator("node_id", "role")
+    @classmethod
+    def safe_node_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value or value in {".", ".."} or "/" in value or "\\" in value:
+            raise ValueError("agent node names must be simple names")
+        return value
+
+
+class AgentExecutionResult(BaseModel):
+    """Provider-neutral result returned by one runner activation."""
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    provider_run_id: str
+    response: str | None = None
+    duration_ms: int | None = None
+    usage: Any = None
+    audits: list[TurnAudit] = Field(default_factory=list)
+
+    @property
+    def thread_id(self) -> str:
+        """Compatibility alias for callers that still use Codex terminology."""
+
+        return self.provider_run_id
+
+    @property
+    def last_audit(self) -> TurnAudit | None:
+        return self.audits[-1] if self.audits else None
+
+
+class AgentNode(BaseModel):
+    """A server-defined logical node in a bounded workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=80)
+    role: str = Field(min_length=1, max_length=120)
+    runner: str = Field(default="codex", min_length=1, max_length=80)
+    depends_on: tuple[str, ...] = ()
+
+    @field_validator("id", "runner")
+    @classmethod
+    def safe_plan_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value or value in {".", ".."} or "/" in value or "\\" in value:
+            raise ValueError("agent plan names must be simple names")
+        return value
+
+
+class WorkflowPlan(BaseModel):
+    """Allowlisted workflow nodes; this is intentionally not user supplied."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    nodes: list[AgentNode] = Field(min_length=1)
+
+
+@runtime_checkable
+class AgentRunner(Protocol):
+    """Provider-neutral runner interface used by ``WorkflowCoordinator``."""
+
+    name: str
+    timeout_seconds: float | None
+
+    async def run(
+        self,
+        request: AgentExecutionRequest,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> AgentExecutionResult: ...
+
+
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -175,6 +275,13 @@ class BaseWorkflowAdapter(Generic[InputT, OutputT]):
     declared_skills: Sequence[str] = ()
     input_type: type[InputT] | None = None
     output_type: type[OutputT] | None = None
+    # Provider and role selection belongs to the server-side adapter.  These
+    # defaults let simple adapters opt into the generic author/reviewer state
+    # machine without exposing runner selection in task input.
+    author_runner = "codex"
+    reviewer_runner = "codex"
+    author_role = "presentation_author"
+    reviewer_role = "presentation_reviewer"
 
     def validate_input(self, value: Any) -> InputT:
         if self.input_type is None:

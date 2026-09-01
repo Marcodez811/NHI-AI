@@ -1,5 +1,7 @@
 import { Analytics } from "@vercel/analytics/next";
 import type { Metadata, Viewport } from "next";
+import { ThemeProvider } from "../components/theme-provider";
+import { TooltipProvider } from "../components/ui/tooltip";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -38,9 +40,18 @@ export default function RootLayout({
     children: React.ReactNode;
 }>) {
     return (
-        <html lang="zh-Hant" className="bg-background">
+        <html lang="zh-Hant" className="bg-background" suppressHydrationWarning>
             <body className="antialiased">
-                {children}
+                <ThemeProvider
+                    attribute="class"
+                    defaultTheme="system"
+                    enableSystem
+                    disableTransitionOnChange
+                >
+                    <TooltipProvider>
+                        {children}
+                    </TooltipProvider>
+                </ThemeProvider>
                 {process.env.NODE_ENV === "production" && <Analytics />}
             </body>
         </html>

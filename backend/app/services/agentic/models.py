@@ -1,5 +1,21 @@
 """Compatibility import location for generic agentic boundary models."""
 
-from .contracts import AgentPhase, AgentTaskPayload, AgentTaskResult, DeterministicValidationError, TurnAudit, TurnRequest, WorkflowStatus
+from .contracts import (
+    AgentExecutionRequest,
+    AgentExecutionResult,
+    AgentNode,
+    AgentPhase,
+    AgentTaskPayload,
+    AgentTaskResult,
+    DeterministicValidationError,
+    TurnAudit,
+    TurnRequest,
+    WorkflowPlan,
+    WorkflowStatus,
+)
 
-__all__ = ["AgentPhase", "AgentTaskPayload", "AgentTaskResult", "DeterministicValidationError", "TurnAudit", "TurnRequest", "WorkflowStatus"]
+__all__ = [
+    "AgentExecutionRequest", "AgentExecutionResult", "AgentNode", "AgentPhase",
+    "AgentTaskPayload", "AgentTaskResult", "DeterministicValidationError",
+    "TurnAudit", "TurnRequest", "WorkflowPlan", "WorkflowStatus",
+]

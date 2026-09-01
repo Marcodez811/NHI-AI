@@ -6,7 +6,7 @@ import {
     createSlideJob,
     getSlideJob,
     SlideJob,
-} from "../api";
+} from "../api/slides";
 import {
     AgentJobClientPhase,
     useAgentJob,

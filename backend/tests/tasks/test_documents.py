@@ -139,3 +139,33 @@ async def test_provider_not_found_is_idempotent(monkeypatch):
         ("file", {"file_id": "file-source"}),
     ]
 
+
+@pytest.mark.asyncio
+async def test_deletion_prefers_persisted_vector_store_over_legacy_env(monkeypatch):
+    from app.tasks import documents as task_module
+
+    calls: list[dict[str, str]] = []
+
+    class FakeVectorFiles:
+        def delete(self, **kwargs):
+            calls.append(kwargs)
+
+    class FakeFiles:
+        def delete(self, **_kwargs):
+            return None
+
+    client = SimpleNamespace(
+        vector_stores=SimpleNamespace(files=FakeVectorFiles()),
+        files=FakeFiles(),
+    )
+    monkeypatch.setattr(task_module, "OpenAI", lambda **_kwargs: client)
+    monkeypatch.setattr(task_module, "_retrieval_registry", SimpleNamespace(get_ready_id=lambda: "db-vector-store"))
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "openai_vector_store_id", "legacy-env-vector-store")
+
+    await task_module.OpenAIDocumentDeletionService().delete_remote(
+        remote_file_id=None,
+        remote_vector_store_id="vector-file",
+    )
+
+    assert calls == [{"file_id": "vector-file", "vector_store_id": "db-vector-store"}]

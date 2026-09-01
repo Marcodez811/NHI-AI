@@ -11,9 +11,26 @@ from typing import Any
 from pydantic import BaseModel
 from openai_codex import Sandbox
 
-from .contracts import AgentPhase, AgentTaskPayload, AgentTaskResult, DeterministicValidationError, TurnRequest, WorkflowStatus
+from .contracts import (
+    AgentExecutionRequest,
+    AgentExecutionResult,
+    AgentPhase,
+    AgentTaskPayload,
+    AgentTaskResult,
+    DeterministicValidationError,
+    TurnRequest,
+    WorkflowStatus,
+)
 from .registry import WorkflowRegistry, workflow_registry
-from .runner import CodexRunResult, CodexRunner, WorkflowExecutionError, WorkflowTimeoutError
+from .runner import (
+    CodexAgentRunner,
+    CodexRunResult,
+    CodexRunner,
+    RunnerRegistry,
+    WorkflowExecutionError,
+    WorkflowTimeoutError,
+    runner_registry,
+)
 from .staging import stage_declared_skills
 
 
@@ -61,6 +78,20 @@ async def _emit_phase(progress_callback: Any, phase: AgentPhase, message: str | 
         return None
 
 
+async def _emit_event(event_callback: Any, event_type: str, **fields: Any) -> None:
+    """Publish diagnostic lifecycle events without affecting execution."""
+
+    if event_callback is None:
+        return
+    try:
+        value = event_callback({"event_type": event_type, **fields})
+        if inspect.isawaitable(value):
+            await value
+    except Exception:
+        # Telemetry is advisory; the workflow must remain independent of it.
+        return None
+
+
 def _validate_output(adapter: Any, output: Any) -> Any:
     output_type = getattr(adapter, "output_type", None)
     if output_type is None or output is None:
@@ -76,18 +107,415 @@ def _result_output(output: Any) -> Any:
     return output.model_dump(mode="json") if isinstance(output, BaseModel) else output
 
 
+def _uses_execution_request(runner: Any) -> bool:
+    """Identify the new runner contract while retaining old test doubles.
+
+    ``CodexRunner`` historically accepted ``(workspace, turns, ...)`` and is
+    still public.  The coordinator accepts those legacy implementations as
+    well; runner implementations using the provider-neutral contract expose a
+    first parameter named ``request``.  Explicit Codex adapters are marked by
+    their concrete type and do not depend on introspection.
+    """
+
+    if isinstance(runner, (CodexAgentRunner,)):
+        return True
+    if isinstance(runner, CodexRunner):
+        return False
+    try:
+        parameters = list(inspect.signature(runner.run).parameters.values())
+    except (TypeError, ValueError, AttributeError):
+        return True
+    positional = [item for item in parameters if item.kind in (item.POSITIONAL_ONLY, item.POSITIONAL_OR_KEYWORD)]
+    return bool(positional and positional[0].name in {"request", "execution_request"})
+
+
+def _as_execution_result(value: Any) -> AgentExecutionResult:
+    """Normalize provider/fake results at the coordinator boundary."""
+
+    if isinstance(value, AgentExecutionResult):
+        return value
+    if isinstance(value, CodexRunResult):
+        return AgentExecutionResult(
+            provider_run_id=value.thread_id,
+            response=value.response,
+            duration_ms=None,
+            usage=value.last_turn.usage if value.last_turn is not None else None,
+            audits=value.audits,
+        )
+    audits = getattr(value, "audits", ()) or ()
+    provider_run_id = getattr(value, "provider_run_id", None) or getattr(value, "thread_id", None) or "unknown"
+    return AgentExecutionResult(
+        provider_run_id=str(provider_run_id),
+        response=getattr(value, "response", None),
+        duration_ms=getattr(value, "duration_ms", None),
+        usage=getattr(value, "usage", None),
+        audits=list(audits),
+    )
+
+
+async def _run_agent(
+    runner: Any,
+    request: AgentExecutionRequest,
+    *,
+    progress_callback: Any = None,
+) -> AgentExecutionResult:
+    """Invoke a provider-neutral runner and normalize its result."""
+
+    if isinstance(runner, CodexRunner):
+        # The public CodexRunner predates AgentExecutionRequest.  Wrapping the
+        # same operational primitive here gives reviewed workflows independent
+        # threads without changing its long-standing direct API.
+        runner = CodexAgentRunner(codex_runner=runner)
+    if _uses_execution_request(runner):
+        result = runner.run(request, progress_callback=progress_callback)
+        if inspect.isawaitable(result):
+            result = await result
+        return _as_execution_result(result)
+    # Compatibility path for pre-abstraction runners.  It intentionally runs
+    # one turn only; the coordinator still gives each logical activation a
+    # separate invocation when using a legacy CodexRunner instance.
+    result = runner.run(
+        request.workspace,
+        [TurnRequest(kind=request.node_id, prompt=request.prompt, sandbox=request.sandbox, output_schema=request.output_schema)],
+        skill_names=request.skill_names,
+        progress_callback=progress_callback,
+        audit_path=request.audit_path,
+    )
+    if inspect.isawaitable(result):
+        result = await result
+    return _as_execution_result(result)
+
+
+def _runner_for_node(
+    selected: Any,
+    runner_name: str,
+) -> Any:
+    """Resolve one server-selected runner, or use an explicit test override."""
+
+    if selected is None:
+        return runner_registry.resolve(runner_name)
+    if isinstance(selected, RunnerRegistry):
+        return selected.resolve(runner_name)
+    # Duck-typed registries are useful in integration tests without requiring
+    # callers to import the concrete registry implementation.
+    if callable(getattr(selected, "resolve", None)) and not callable(getattr(selected, "run", None)):
+        return selected.resolve(runner_name)
+    return selected
+
+
+def _attempt_audit_path(workspace: Path, node_id: str, attempt: int) -> Path:
+    return workspace / "work" / "agents" / node_id / f"attempt-{attempt}.json"
+
+
+async def _execute_bounded_agents(
+    *,
+    run_id: str,
+    adapter: Any,
+    value: Any,
+    workspace: Path,
+    staged: list[str],
+    review_context: Any,
+    initial_prompt: str,
+    selected_runner: Any,
+    progress_callback: Any,
+    event_callback: Any = None,
+) -> AgentExecutionResult:
+    """Run the server-defined author/validator/reviewer state machine.
+
+    Each author attempt and each reviewer activation calls ``AgentRunner``
+    separately.  This is the key isolation boundary: a reviewer cannot mutate
+    the author's provider session, and a correction never inherits hidden
+    conversational state from an earlier attempt.
+    """
+
+    max_rounds = max(1, int(getattr(adapter, "max_review_rounds", 3)))
+    author_runner_name = str(getattr(adapter, "author_runner", "codex"))
+    reviewer_runner_name = str(getattr(adapter, "reviewer_runner", author_runner_name))
+    author_role = str(getattr(adapter, "author_role", "presentation_author"))
+    reviewer_role = str(getattr(adapter, "reviewer_role", "presentation_reviewer"))
+    author_attempt = 1
+    reviewer_attempt = 0
+    prompt = str(initial_prompt)
+    author_result: AgentExecutionResult | None = None
+    feedback: str | None = None
+
+    while author_attempt <= max_rounds:
+        await _emit_phase(progress_callback, AgentPhase.DRAFTING if author_attempt == 1 else AgentPhase.REVISING)
+        author_request = AgentExecutionRequest(
+            run_id=run_id,
+            node_id="author",
+            role=author_role,
+            attempt=author_attempt,
+            workspace=workspace,
+            prompt=prompt,
+            sandbox=Sandbox.workspace_write,
+            skill_names=tuple(staged),
+            audit_path=_attempt_audit_path(workspace, "author", author_attempt),
+        )
+        author_runner = _runner_for_node(selected_runner, author_runner_name)
+        await _emit_event(
+            event_callback,
+            "node_started",
+            node_id="author",
+            role=author_role,
+            runner=author_runner_name,
+            attempt=author_attempt,
+            status="running",
+            message="Author agent started.",
+        )
+        author_started = asyncio.get_running_loop().time()
+        try:
+            author_result = await _run_agent(author_runner, author_request, progress_callback=progress_callback)
+        except Exception as exc:
+            await _emit_event(
+                event_callback,
+                "node_failed",
+                node_id="author",
+                role=author_role,
+                runner=author_runner_name,
+                attempt=author_attempt,
+                status="failed",
+                message="Author agent failed.",
+                duration_ms=round((asyncio.get_running_loop().time() - author_started) * 1000),
+            )
+            raise
+        await _emit_event(
+            event_callback,
+            "node_completed",
+            node_id="author",
+            role=author_role,
+            runner=author_runner_name,
+            attempt=author_attempt,
+            status="completed",
+            provider_run_id=author_result.provider_run_id,
+            message="Author agent completed.",
+            duration_ms=author_result.duration_ms or round((asyncio.get_running_loop().time() - author_started) * 1000),
+        )
+
+        await _emit_phase(progress_callback, AgentPhase.VALIDATING)
+        validator_started = asyncio.get_running_loop().time()
+        await _emit_event(
+            event_callback,
+            "node_started",
+            node_id="validator",
+            role="deterministic_validator",
+            runner="system",
+            attempt=author_attempt,
+            status="running",
+            message="Deterministic validation started.",
+        )
+        validate_generated = getattr(adapter, "validate_generated", None)
+        if validate_generated is not None:
+            try:
+                validation = await _call(validate_generated, value, workspace)
+                if validation is False:
+                    raise DeterministicValidationError("deterministic validation failed")
+            except (DeterministicValidationError, ValueError) as exc:
+                if author_attempt >= max_rounds:
+                    await _emit_event(
+                        event_callback,
+                        "node_failed",
+                        node_id="validator",
+                        role="deterministic_validator",
+                        runner="system",
+                        attempt=author_attempt,
+                        status="failed",
+                        message="Deterministic validation exhausted the retry limit.",
+                        duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
+                    )
+                    raise WorkflowExecutionError("maximum review rounds exceeded") from exc
+                feedback = str(exc).strip()[:12000] or "deterministic validation failed"
+                await _emit_event(
+                    event_callback,
+                    "node_completed",
+                    node_id="validator",
+                    role="deterministic_validator",
+                    runner="system",
+                    attempt=author_attempt,
+                    status="completed",
+                    message="Deterministic validation returned correctable findings.",
+                    duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
+                )
+                author_attempt += 1
+                prompt = str(
+                    await _call(
+                        adapter.build_prompt,
+                        value,
+                        workspace,
+                        semantic_review_context=review_context,
+                        revision_feedback=feedback,
+                    )
+                )
+                continue
+            except Exception as exc:
+                if getattr(exc, "stage", None) in {"verify_output", "validation", "deterministic"}:
+                    if author_attempt >= max_rounds:
+                        await _emit_event(
+                            event_callback,
+                            "node_failed",
+                            node_id="validator",
+                            role="deterministic_validator",
+                            runner="system",
+                            attempt=author_attempt,
+                            status="failed",
+                            message="Deterministic validation exhausted the retry limit.",
+                            duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
+                        )
+                        raise WorkflowExecutionError("maximum review rounds exceeded") from exc
+                    feedback = str(exc).strip()[:12000] or "deterministic validation failed"
+                    await _emit_event(
+                        event_callback,
+                        "node_completed",
+                        node_id="validator",
+                        role="deterministic_validator",
+                        runner="system",
+                        attempt=author_attempt,
+                        status="completed",
+                        message="Deterministic validation returned correctable findings.",
+                        duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
+                    )
+                    author_attempt += 1
+                    prompt = str(
+                        await _call(
+                            adapter.build_prompt,
+                            value,
+                            workspace,
+                            semantic_review_context=review_context,
+                            revision_feedback=feedback,
+                        )
+                    )
+                    continue
+                await _emit_event(
+                    event_callback,
+                    "node_failed",
+                    node_id="validator",
+                    role="deterministic_validator",
+                    runner="system",
+                    attempt=author_attempt,
+                    status="failed",
+                    message="Deterministic validator failed.",
+                    duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
+                )
+                raise WorkflowExecutionError("deterministic validator failed") from exc
+        await _emit_event(
+            event_callback,
+            "node_completed",
+            node_id="validator",
+            role="deterministic_validator",
+            runner="system",
+            attempt=author_attempt,
+            status="completed",
+            message="Deterministic validation passed.",
+            duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
+        )
+
+        await _emit_phase(progress_callback, AgentPhase.REVIEWING)
+        review_prompt = await _call(
+            adapter.build_review_prompt,
+            value,
+            workspace,
+            author_result.last_audit or author_result,
+            review_context,
+        )
+        reviewer_attempt += 1
+        review_request = AgentExecutionRequest(
+            run_id=run_id,
+            node_id="reviewer",
+            role=reviewer_role,
+            attempt=reviewer_attempt,
+            workspace=workspace,
+            prompt=str(review_prompt),
+            sandbox=Sandbox.read_only,
+            output_schema=getattr(adapter, "review_output_schema", None),
+            skill_names=tuple(staged),
+            audit_path=_attempt_audit_path(workspace, "reviewer", reviewer_attempt),
+        )
+        reviewer_runner = _runner_for_node(selected_runner, reviewer_runner_name)
+        await _emit_event(
+            event_callback,
+            "node_started",
+            node_id="reviewer",
+            role=reviewer_role,
+            runner=reviewer_runner_name,
+            attempt=reviewer_attempt,
+            status="running",
+            message="Reviewer agent started.",
+        )
+        reviewer_started = asyncio.get_running_loop().time()
+        try:
+            review_result = await _run_agent(reviewer_runner, review_request, progress_callback=progress_callback)
+        except Exception:
+            await _emit_event(
+                event_callback,
+                "node_failed",
+                node_id="reviewer",
+                role=reviewer_role,
+                runner=reviewer_runner_name,
+                attempt=reviewer_attempt,
+                status="failed",
+                message="Reviewer agent failed.",
+                duration_ms=round((asyncio.get_running_loop().time() - reviewer_started) * 1000),
+            )
+            raise
+        await _emit_event(
+            event_callback,
+            "node_completed",
+            node_id="reviewer",
+            role=reviewer_role,
+            runner=reviewer_runner_name,
+            attempt=reviewer_attempt,
+            status="completed",
+            provider_run_id=review_result.provider_run_id,
+            message="Reviewer agent completed.",
+            duration_ms=review_result.duration_ms or round((asyncio.get_running_loop().time() - reviewer_started) * 1000),
+        )
+        parse_review = getattr(adapter, "parse_review", None)
+        if parse_review is None:
+            raise WorkflowExecutionError("semantic review parser is missing")
+        review = await _call(parse_review, review_result.response, workspace)
+        blocking_hook = getattr(adapter, "review_has_blocking_findings", None)
+        if blocking_hook is not None:
+            blocking = await _call(blocking_hook, review)
+        elif isinstance(review, dict):
+            blocking = bool(review.get("blocking_findings"))
+        else:
+            blocking = bool(review)
+        if not blocking:
+            return author_result
+        if author_attempt >= max_rounds:
+            raise WorkflowExecutionError("maximum review rounds exceeded")
+        feedback_hook = getattr(adapter, "revision_feedback", None) or getattr(adapter, "build_revision_feedback", None)
+        feedback = await _call(feedback_hook, value, review, author_result) if feedback_hook is not None else str(review)
+        feedback = str(feedback)[:12000]
+        author_attempt += 1
+        await _emit_phase(progress_callback, AgentPhase.REVISING)
+        prompt = str(
+            await _call(
+                adapter.build_prompt,
+                value,
+                workspace,
+                semantic_review_context=review_context,
+                revision_feedback=feedback,
+            )
+        )
+
+    raise WorkflowExecutionError("maximum review rounds exceeded")
+
+
 async def _execute_workflow(
     payload: AgentTaskPayload,
     *,
+    started_at: datetime,
     registry: WorkflowRegistry = workflow_registry,
-    runner: CodexRunner | None = None,
+    runner: Any = None,
     workspace_root: Path = Path("/tmp/agentic/jobs"),
     skills_root: Path | None = None,
     progress_callback: Any = None,
+    event_callback: Any = None,
 ) -> AgentTaskResult:
     """Execute one allowlisted workflow and always return a safe result."""
 
-    started = datetime.now(timezone.utc)
+    started = started_at
     adapter: Any = None
     value: Any = None
     workspace: Path | None = None
@@ -127,7 +555,81 @@ async def _execute_workflow(
         prompt = await _call(adapter.build_prompt, value, workspace, semantic_review_context=review_context)
         turns = [TurnRequest(kind="initial", prompt=prompt, sandbox=Sandbox.workspace_write)]
         build_review = getattr(adapter, "build_review_prompt", None)
-        if build_review is not None:
+        selected_runner = runner
+        # The default registry and all provider-neutral implementations use
+        # one request per logical activation.  Legacy test doubles are kept on
+        # the compatibility callback path below.
+        modern_runner = selected_runner is None
+        if selected_runner is not None and not isinstance(selected_runner, RunnerRegistry):
+            modern_runner = isinstance(selected_runner, CodexRunner) or _uses_execution_request(selected_runner)
+        if build_review is not None and modern_runner:
+            run = await _execute_bounded_agents(
+                run_id=str(payload.job_id),
+                adapter=adapter,
+                value=value,
+                workspace=workspace,
+                staged=staged,
+                review_context=review_context,
+                initial_prompt=str(prompt),
+                selected_runner=selected_runner,
+                progress_callback=progress_callback,
+                event_callback=event_callback,
+            )
+        elif build_review is None and modern_runner:
+            await _emit_phase(progress_callback, AgentPhase.DRAFTING)
+            author_runner_name = str(getattr(adapter, "author_runner", "codex"))
+            author_runner = _runner_for_node(selected_runner, author_runner_name)
+            request = AgentExecutionRequest(
+                run_id=str(payload.job_id),
+                node_id="author",
+                role=str(getattr(adapter, "author_role", "presentation_author")),
+                attempt=1,
+                workspace=workspace,
+                prompt=str(prompt),
+                sandbox=Sandbox.workspace_write,
+                skill_names=tuple(staged),
+                audit_path=_attempt_audit_path(workspace, "author", 1),
+            )
+            author_role = str(getattr(adapter, "author_role", "presentation_author"))
+            await _emit_event(
+                event_callback,
+                "node_started",
+                node_id="author",
+                role=author_role,
+                runner=author_runner_name,
+                attempt=1,
+                status="running",
+                message="Author agent started.",
+            )
+            author_started = asyncio.get_running_loop().time()
+            try:
+                run = await _run_agent(author_runner, request, progress_callback=progress_callback)
+            except Exception:
+                await _emit_event(
+                    event_callback,
+                    "node_failed",
+                    node_id="author",
+                    role=author_role,
+                    runner=author_runner_name,
+                    attempt=1,
+                    status="failed",
+                    message="Author agent failed.",
+                    duration_ms=round((asyncio.get_running_loop().time() - author_started) * 1000),
+                )
+                raise
+            await _emit_event(
+                event_callback,
+                "node_completed",
+                node_id="author",
+                role=author_role,
+                runner=author_runner_name,
+                attempt=1,
+                status="completed",
+                provider_run_id=run.provider_run_id,
+                message="Author agent completed.",
+                duration_ms=run.duration_ms or round((asyncio.get_running_loop().time() - author_started) * 1000),
+            )
+        elif build_review is not None:
             execution_runner = runner or CodexRunner()
             max_rounds = max(1, int(getattr(adapter, "max_review_rounds", 3)))
             # A round consists of one write-capable generation/correction turn,
@@ -240,24 +742,25 @@ async def execute_workflow(
     payload: AgentTaskPayload,
     *,
     registry: WorkflowRegistry = workflow_registry,
-    runner: CodexRunner | None = None,
+    runner: Any = None,
     workspace_root: Path = Path("/tmp/agentic/jobs"),
     skills_root: Path | None = None,
     progress_callback: Any = None,
+    event_callback: Any = None,
     timeout_seconds: float | None = None,
 ) -> AgentTaskResult:
     """Execute the entire lifecycle under one total workflow deadline."""
 
+    started = datetime.now(timezone.utc)
     deadline = timeout_seconds
     if deadline is None and runner is not None:
         deadline = getattr(runner, "timeout_seconds", None)
     try:
-        operation = _execute_workflow(payload, registry=registry, runner=runner, workspace_root=workspace_root, skills_root=skills_root, progress_callback=progress_callback)
+        operation = _execute_workflow(payload, started_at=started, registry=registry, runner=runner, workspace_root=workspace_root, skills_root=skills_root, progress_callback=progress_callback, event_callback=event_callback)
         if deadline is not None:
             return await asyncio.wait_for(operation, timeout=deadline)
         return await operation
     except TimeoutError:
-        started = datetime.now(timezone.utc)
         if isinstance(payload, AgentTaskPayload):
             parsed = payload
         else:
@@ -269,4 +772,6 @@ async def execute_workflow(
         return AgentTaskResult(job_id=parsed.job_id if parsed else "unknown", workflow=parsed.workflow if parsed else "unknown", status=WorkflowStatus.FAILED, phase=AgentPhase.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error="Workflow timed out.")
 
 
-__all__ = ["execute_workflow"]
+from .coordinator import WorkflowCoordinator
+
+__all__ = ["WorkflowCoordinator", "execute_workflow"]

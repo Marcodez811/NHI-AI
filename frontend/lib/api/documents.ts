@@ -1,0 +1,37 @@
+/** Document and folder transport contracts. */
+export {
+  CATEGORY_VALUES,
+  MAX_DOCUMENTS,
+  SUPPORTED_DOCUMENT_EXTENSIONS,
+  documentDisplayName,
+  fetchDocumentList,
+  fetchDocuments,
+  getDocument,
+  uploadDocument,
+  fetchFolders,
+  createFolder,
+  renameFolder,
+  updateFolder,
+  deleteFolder,
+  updateDocument,
+  deleteDocument,
+  getIngestionStatus,
+  getDocumentDownloadUrl,
+  downloadDocument,
+} from "../api";
+
+export type {
+  Category,
+  DocumentRead,
+  DocumentRecord,
+  DocumentStatus,
+  DocumentUpdate,
+  DocumentListFilters,
+  DocumentListResponse,
+  DocumentUploadResponse,
+  FolderRead,
+  FolderCreate,
+  FolderUpdate,
+  IngestionJobRead,
+  QaModeInfo,
+} from "../api";

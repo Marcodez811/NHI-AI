@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    ApiError,
     createFolder as createFolderRequest,
     deleteDocument as deleteDocumentRequest,
     deleteFolder as deleteFolderRequest,
@@ -13,7 +12,6 @@ import {
     fetchDocuments,
     fetchFolders,
     FolderRead,
-    getApiErrorMessage,
     getDocument,
     getIngestionStatus,
     IngestionJobRead,
@@ -21,7 +19,8 @@ import {
     updateDocument as updateDocumentRequest,
     uploadDocument as uploadDocumentRequest,
     Category,
-} from "../api";
+} from "../api/documents";
+import { ApiError, getApiErrorMessage } from "../api/client";
 
 export interface UseDocumentsOptions {
     autoLoad?: boolean;
