@@ -19,7 +19,9 @@ jobs:
           fetch-depth: 1
 
       - name: Apply fixes
-        run: python tools/apply_chatgpt_fixes.py
+        run: |
+          python tools/apply_chatgpt_fixes.py
+          python tools/post_fix_compat.py
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -58,7 +60,7 @@ jobs:
       - name: Prepare package
         run: |
           rm -f .github/workflows/chatgpt-fix-package.yml
-          rm -f tools/apply_chatgpt_fixes.py
+          rm -f tools/apply_chatgpt_fixes.py tools/post_fix_compat.py tools/.package-trigger
           rm -rf backend/.venv frontend/node_modules package
           mkdir -p package/NHI-AI-fixed
           rsync -a --exclude='.git' --exclude='package' ./ package/NHI-AI-fixed/
