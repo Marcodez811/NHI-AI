@@ -109,6 +109,49 @@ describe("SlidesView", () => {
         expect(screen.getByLabelText("簡報標題")).toHaveValue("政策重點整理");
     });
 
+    it("allows a new generation after a failed job", async () => {
+        const user = userEvent.setup();
+        const start = vi.fn(async () => undefined);
+        render(
+            <SlidesView
+                docs={[document()]}
+                selected={["doc-1"]}
+                setSelected={vi.fn()}
+                onUpload={vi.fn()}
+                onBrowseSources={vi.fn()}
+                title="政策重點整理"
+                setTitle={vi.fn()}
+                count={10}
+                setCount={vi.fn()}
+                guidance=""
+                setGuidance={vi.fn()}
+                tone="formal"
+                setTone={vi.fn()}
+                job={{
+                    job_id: "job-failed",
+                    status: "failed",
+                    phase: "failed",
+                    stage: "failed",
+                    message: "Presentation generation failed.",
+                    started_at: null,
+                    finished_at: "2026-09-02T00:00:00Z",
+                    error: "generation failed",
+                    download_url: null,
+                }}
+                phase="failed"
+                error="generation failed"
+                warning={null}
+                start={start}
+                retry={start}
+            />,
+        );
+
+        expect(screen.getByText("來源已就緒，可以生成。")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "生成簡報" })).toBeEnabled();
+        await user.click(screen.getByRole("button", { name: "生成簡報" }));
+        expect(start).toHaveBeenCalledOnce();
+    });
+
     it("offers an inline picker for available sources", async () => {
         const user = userEvent.setup();
         renderView({ docs: [document()] });

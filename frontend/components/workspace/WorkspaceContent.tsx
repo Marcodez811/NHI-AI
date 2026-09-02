@@ -8,122 +8,128 @@ import type { WorkspaceController } from "../../lib/hooks/useWorkspaceController
 import type { View } from "../../lib/workspace/types";
 
 export function WorkspaceContent({
-  workspace,
-  view,
-  onBrowseSources,
-  onUploadSources,
+    workspace,
+    view,
+    onBrowseSources,
+    onUploadSources,
 }: {
-  workspace: WorkspaceController;
-  view: View;
-  onBrowseSources?: () => void;
-  onUploadSources?: () => void;
+    workspace: WorkspaceController;
+    view: View;
+    onBrowseSources?: () => void;
+    onUploadSources?: () => void;
 }) {
-  const catalogError = workspace.catalog.error?.message || null;
+    const catalogError = workspace.catalog.error?.message || null;
 
-  return (
-    <>
-      {workspace.actionError && (
-        <div className="mx-auto mt-4 max-w-5xl rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive" role="alert">
-          {workspace.actionError}
-        </div>
-      )}
-      {view === "chat" && (
-        <ChatView
-          chat={workspace.chat}
-          draft={workspace.draft}
-          setDraft={workspace.setDraft}
-          send={workspace.send}
-          scope={workspace.scope}
-          setScope={workspace.changeScope}
-          modes={workspace.modes}
-          modesError={workspace.qaError}
-          retryModes={() => void workspace.loadModes()}
-          busy={workspace.chatBusy}
-          error={workspace.chatError}
-          eligibilityError={workspace.eligibilityError}
-          retrievalStatus={workspace.retrievalStatus}
-          retrievalLoading={workspace.retrievalLoading}
-          retrievalError={workspace.retrievalError}
-          retryRetrieval={() => void workspace.reloadRetrieval()}
-          catalogLoading={workspace.catalogLoading}
-          hasPendingDocuments={workspace.hasPendingDocuments}
-          hasAnyReadyDocuments={workspace.hasAnyReadyDocuments}
-          hasCategoryReadyDocuments={workspace.hasCategoryReadyDocuments}
-          onUploadSources={
-            onUploadSources ?? (() => {
-              workspace.openUpload();
-              workspace.setView("files");
-            })
-          }
-        />
-      )}
-      {view === "files" && (
-        <FilesView
-          docs={workspace.catalog.documents}
-          folders={workspace.catalog.folders}
-          folderId={workspace.folderId}
-          setFolderId={workspace.setFolderId}
-          folderName={workspace.folderName}
-          query={workspace.query}
-          setQuery={workspace.setQuery}
-          selected={workspace.selected}
-          onToggle={workspace.toggleSelected}
-          onUpload={() => workspace.setUploadOpen(true)}
-          onUpdate={workspace.mutateDocument}
-          onDelete={workspace.deleteDocument}
-          onDownload={workspace.downloadDocument}
-          onCreateFolder={workspace.createFolder}
-          onRenameFolder={workspace.renameFolder}
-          onDeleteFolder={workspace.deleteFolder}
-          loading={workspace.catalog.loading}
-          error={catalogError}
-          actionError={workspace.actionError}
-          getIngestion={workspace.catalog.getIngestion}
-          modes={workspace.modes}
-        />
-      )}
-      {view === "slides" && (
-        <SlidesView
-          docs={workspace.catalog.documents}
-          selected={workspace.selected}
-          setSelected={workspace.setSelected}
-          onUpload={() => workspace.setUploadOpen(true)}
-          onBrowseSources={onBrowseSources ?? (() => workspace.setView("files"))}
-          title={workspace.slideTitle}
-          setTitle={workspace.setSlideTitle}
-          count={workspace.slideCount}
-          setCount={workspace.setSlideCount}
-          guidance={workspace.guidance}
-          setGuidance={workspace.setGuidance}
-          tone={workspace.tone}
-          setTone={workspace.setTone}
-          job={workspace.slideJob.job}
-          phase={workspace.slideJob.phase}
-          phaseHistory={workspace.slideJob.phaseHistory}
-          error={workspace.slideJob.error?.message || null}
-          warning={workspace.slideJob.warning}
-          pollNow={workspace.slideJob.pollNow}
-          start={workspace.startSlides}
-          retry={async () => {
-            await workspace.slideJob.retry();
-          }}
-        />
-      )}
-      {workspace.uploadOpen && (
-        <UploadModal
-          pending={workspace.pending}
-          setPending={workspace.setPending}
-          category={workspace.uploadCategory}
-          setCategory={workspace.setUploadCategory}
-          folderId={workspace.uploadFolderId}
-          setFolderId={workspace.setUploadFolderId}
-          folders={workspace.catalog.folders}
-          modes={workspace.modes}
-          uploading={workspace.uploading}
-          upload={workspace.upload}
-          close={() => workspace.setUploadOpen(false)}
-        />
-      )}
-    </>
-  );
+    return (
+        <>
+            {workspace.actionError && (
+                <div
+                    className="mx-auto mt-4 max-w-5xl rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+                    role="alert"
+                >
+                    {workspace.actionError}
+                </div>
+            )}
+            {view === "chat" && (
+                <ChatView
+                    chat={workspace.chat}
+                    draft={workspace.draft}
+                    setDraft={workspace.setDraft}
+                    send={workspace.send}
+                    scope={workspace.scope}
+                    setScope={workspace.changeScope}
+                    modes={workspace.modes}
+                    modesError={workspace.qaError}
+                    retryModes={() => void workspace.loadModes()}
+                    busy={workspace.chatBusy}
+                    error={workspace.chatError}
+                    eligibilityError={workspace.eligibilityError}
+                    retrievalStatus={workspace.retrievalStatus}
+                    retrievalLoading={workspace.retrievalLoading}
+                    retrievalError={workspace.retrievalError}
+                    retryRetrieval={() => void workspace.reloadRetrieval()}
+                    catalogLoading={workspace.catalogLoading}
+                    hasPendingDocuments={workspace.hasPendingDocuments}
+                    hasAnyReadyDocuments={workspace.hasAnyReadyDocuments}
+                    hasCategoryReadyDocuments={
+                        workspace.hasCategoryReadyDocuments
+                    }
+                    onUploadSources={
+                        onUploadSources ??
+                        (() => {
+                            workspace.openUpload();
+                            workspace.setView("files");
+                        })
+                    }
+                />
+            )}
+            {view === "files" && (
+                <FilesView
+                    docs={workspace.catalog.documents}
+                    folders={workspace.catalog.folders}
+                    folderId={workspace.folderId}
+                    setFolderId={workspace.setFolderId}
+                    folderName={workspace.folderName}
+                    query={workspace.query}
+                    setQuery={workspace.setQuery}
+                    selected={workspace.selected}
+                    onToggle={workspace.toggleSelected}
+                    onUpload={() => workspace.setUploadOpen(true)}
+                    onUpdate={workspace.mutateDocument}
+                    onDelete={workspace.deleteDocument}
+                    onDownload={workspace.downloadDocument}
+                    onCreateFolder={workspace.createFolder}
+                    onRenameFolder={workspace.renameFolder}
+                    onDeleteFolder={workspace.deleteFolder}
+                    loading={workspace.catalog.loading}
+                    error={catalogError}
+                    actionError={workspace.actionError}
+                    getIngestion={workspace.catalog.getIngestion}
+                    modes={workspace.modes}
+                />
+            )}
+            {view === "slides" && (
+                <SlidesView
+                    docs={workspace.catalog.documents}
+                    selected={workspace.selected}
+                    setSelected={workspace.setSelected}
+                    onUpload={() => workspace.setUploadOpen(true)}
+                    onBrowseSources={
+                        onBrowseSources ?? (() => workspace.setView("files"))
+                    }
+                    title={workspace.slideTitle}
+                    setTitle={workspace.setSlideTitle}
+                    count={workspace.slideCount}
+                    setCount={workspace.setSlideCount}
+                    guidance={workspace.guidance}
+                    setGuidance={workspace.setGuidance}
+                    tone={workspace.tone}
+                    setTone={workspace.setTone}
+                    job={workspace.slideJob.job}
+                    phase={workspace.slideJob.phase}
+                    phaseHistory={workspace.slideJob.phaseHistory}
+                    error={workspace.slideJob.error?.message || null}
+                    warning={workspace.slideJob.warning}
+                    pollNow={workspace.slideJob.pollNow}
+                    start={workspace.startSlides}
+                    retry={workspace.startSlides}
+                />
+            )}
+            {workspace.uploadOpen && (
+                <UploadModal
+                    pending={workspace.pending}
+                    setPending={workspace.setPending}
+                    category={workspace.uploadCategory}
+                    setCategory={workspace.setUploadCategory}
+                    folderId={workspace.uploadFolderId}
+                    setFolderId={workspace.setUploadFolderId}
+                    folders={workspace.catalog.folders}
+                    modes={workspace.modes}
+                    uploading={workspace.uploading}
+                    upload={workspace.upload}
+                    close={() => workspace.setUploadOpen(false)}
+                />
+            )}
+        </>
+    );
 }

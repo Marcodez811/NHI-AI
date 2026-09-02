@@ -135,6 +135,42 @@ async def test_store_sequences_events_and_hydrates_node_snapshots():
     assert [event.sequence for event in await store.get_events("run-1", after=1)] == [2, 3, 4]
 
 
+@pytest.mark.asyncio
+async def test_new_node_attempt_resets_activation_scoped_snapshot_fields():
+    store = AgentTelemetryStore(FakeRedis(), retention_seconds=60)
+    await store.start_run(run_id="retry-run", workflow="slides")
+    await store.emit(
+        run_id="retry-run",
+        event_type=AgentEventType.NODE_STARTED,
+        node_id="author",
+        attempt=1,
+        provider_run_id="provider-1",
+    )
+    await store.emit(
+        run_id="retry-run",
+        event_type=AgentEventType.NODE_COMPLETED,
+        node_id="author",
+        duration_ms=123,
+    )
+    await store.emit(
+        run_id="retry-run",
+        event_type=AgentEventType.NODE_STARTED,
+        node_id="author",
+        attempt=2,
+        provider_run_id="provider-2",
+    )
+
+    snapshot = await store.get_run("retry-run")
+    assert snapshot is not None
+    node = snapshot.nodes[0]
+    assert node.attempt == 2
+    assert node.status == "running"
+    assert node.provider_run_id == "provider-2"
+    assert node.finished_at is None
+    assert node.duration_ms is None
+    assert node.started_at == node.updated_at
+
+
 def test_event_model_removes_unallowlisted_metadata_and_sanitizes_text():
     event = AgentEvent(
         run_id="run-1",

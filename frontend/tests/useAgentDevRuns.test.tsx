@@ -106,6 +106,58 @@ describe("useAgentDevRuns", () => {
         expect(result.current.events.map((item) => item.sequence)).toEqual([1, 2, 3]);
     });
 
+    it("drains every event page before treating a terminal run as synchronized", async () => {
+        const terminal = snapshot({ status: "failed", phase: "failed", last_sequence: 450 });
+        vi.mocked(api.fetchAgentRuns).mockResolvedValue({ runs: [terminal] });
+        vi.mocked(api.fetchAgentRun).mockResolvedValue(terminal);
+        vi.mocked(api.fetchAgentRunEvents).mockImplementation(async (_runId, params) => {
+            const after = params?.after ?? 0;
+            const first = after + 1;
+            const last = Math.min(first + 199, 450);
+            const events = first <= 450
+                ? Array.from({ length: last - first + 1 }, (_, index) => event(first + index))
+                : [];
+            return { events, after, next_after: events.length ? last : after };
+        });
+
+        const { result } = renderHook(() => useAgentDevRuns({ pollIntervalMs: 500 }));
+
+        await waitFor(() => expect(result.current.events).toHaveLength(450));
+
+        expect(vi.mocked(api.fetchAgentRunEvents).mock.calls.map((call) => call[1]?.after)).toEqual([
+            0,
+            200,
+            400,
+        ]);
+    });
+
+    it("manually refreshes selected terminal-run details after background polling stops", async () => {
+        const terminal = snapshot({ status: "failed", phase: "failed", last_sequence: 1 });
+        vi.mocked(api.fetchAgentRuns).mockResolvedValue({ runs: [terminal] });
+        vi.mocked(api.fetchAgentRun).mockResolvedValue(terminal);
+        vi.mocked(api.fetchAgentRunEvents).mockImplementation(async (_runId, params) => {
+            const after = params?.after ?? 0;
+            return after === 0
+                ? { events: [event(1)], after, next_after: 1 }
+                : { events: [], after, next_after: after };
+        });
+        const { result } = renderHook(() => useAgentDevRuns({ pollIntervalMs: 500 }));
+
+        await waitFor(() => expect(result.current.events).toHaveLength(1));
+        vi.mocked(api.fetchAgentRun).mockClear();
+        vi.mocked(api.fetchAgentRunEvents).mockClear();
+
+        await act(async () => {
+            await result.current.refresh();
+        });
+
+        expect(api.fetchAgentRun).toHaveBeenCalledOnce();
+        expect(api.fetchAgentRunEvents).toHaveBeenCalledWith(
+            "run-1",
+            expect.objectContaining({ after: 1, limit: 200 }),
+        );
+    });
+
     it("resets telemetry after switching runs and surfaces list errors", async () => {
         const first = snapshot();
         const second = snapshot({ run_id: "run-2", task_id: "task-2" });

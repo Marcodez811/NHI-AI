@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +10,9 @@ import pytest
 from openai_codex import Sandbox
 
 from app.services.agentic import (
+    AgentExecutionRequest,
     AgentExecutionResult,
+    CodexAgentRunner,
     AgentPhase,
     AgentTaskPayload,
     BaseWorkflowAdapter,
@@ -23,7 +26,7 @@ from app.services.agentic import (
     UnknownRunnerError,
     stage_declared_skills,
 )
-from app.services.agentic.runner import CodexRunResult, CodexRunner, WorkflowTimeoutError, safe_error
+from app.services.agentic.runner import CodexRunResult, CodexRunner, WorkflowExecutionError, WorkflowTimeoutError, safe_error
 from app.services.agentic.service import execute_workflow
 
 
@@ -50,8 +53,10 @@ class FakeTurn:
 
 class FakeThread:
     id = "thread-1"
+    last_turn_kwargs = None
 
-    async def turn(self, inputs):
+    async def turn(self, inputs, **kwargs):
+        FakeThread.last_turn_kwargs = kwargs
         return FakeTurn()
 
 
@@ -113,8 +118,81 @@ async def test_runner_collects_turn_audit_and_sanitizes_progress(tmp_path):
     assert result.response == "done"
     assert result.audits[0].model_dump()["turn_id"] == "turn-1"
     assert result.audits[0].kind == "initial"
+    assert result.audits[0].prompt == "go"
     assert AgentPhase.DRAFTING.value in [event["phase"] for event in progress]
+    assert any(event["event_type"] == "node_progress" for event in progress)
     assert all("key" not in event["message"] for event in progress)
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_failed_turn_error_in_exception_and_audit(tmp_path):
+    class FailedTurn(FakeTurn):
+        async def stream(self):
+            yield SimpleNamespace(
+                method="turn/completed",
+                payload=SimpleNamespace(
+                    turn=SimpleNamespace(
+                        id=self.id,
+                        status="failed",
+                        error=SimpleNamespace(message="review output schema was rejected"),
+                        duration_ms=12,
+                    ),
+                ),
+            )
+
+    class FailedThread(FakeThread):
+        async def turn(self, inputs, **kwargs):
+            return FailedTurn()
+
+    class FailedCodex(FakeCodex):
+        async def thread_start(self, **kwargs):
+            return FailedThread()
+
+    audit_path = tmp_path / "audit.json"
+    runner = CodexRunner(codex_factory=FailedCodex, api_key="key", timeout_seconds=2, heartbeat_seconds=0)
+    with pytest.raises(WorkflowExecutionError, match="review output schema was rejected"):
+        await runner.run(tmp_path, [TurnRequest(kind="reviewer", prompt="review")], audit_path=audit_path)
+
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit["turns"][0]["error"] == "review output schema was rejected"
+
+
+@pytest.mark.asyncio
+async def test_runner_forwards_reviewer_schema_and_reports_review_phase(tmp_path):
+    schema = {"type": "object", "additionalProperties": False}
+    progress = []
+    runner = CodexRunner(codex_factory=FakeCodex, api_key="key", timeout_seconds=2, heartbeat_seconds=0)
+    await runner.run(
+        tmp_path,
+        [TurnRequest(kind="reviewer", prompt="review", output_schema=schema)],
+        progress_callback=progress.append,
+    )
+
+    assert FakeThread.last_turn_kwargs["output_schema"] == schema
+    assert any(event["phase"] == AgentPhase.REVIEWING.value for event in progress)
+
+
+@pytest.mark.asyncio
+async def test_provider_progress_is_enriched_with_logical_node_context(tmp_path):
+    request = AgentExecutionRequest(
+        run_id="progress-job",
+        node_id="reviewer",
+        role="presentation_reviewer",
+        attempt=2,
+        workspace=tmp_path,
+        prompt="review",
+    )
+    progress = []
+    runner = CodexAgentRunner(
+        CodexRunner(codex_factory=FakeCodex, api_key="key", timeout_seconds=2, heartbeat_seconds=0),
+    )
+    await runner.run(request, progress_callback=progress.append)
+
+    provider_events = [event for event in progress if event["event_type"] == "node_progress"]
+    assert provider_events
+    assert all(event["node_id"] == "reviewer" for event in provider_events)
+    assert all(event["role"] == "presentation_reviewer" for event in provider_events)
+    assert all(event["attempt"] == 2 for event in provider_events)
 
 
 @pytest.mark.asyncio
@@ -276,6 +354,13 @@ class ModernReviewAdapter(BaseWorkflowAdapter[dict, str]):
         return result.response
 
 
+class MissingArtifactAdapter(ModernReviewAdapter):
+    name = "missing-artifact"
+
+    def post_author_completion_check(self, value, result, workspace):
+        raise RuntimeError("presentation artifact was not generated")
+
+
 class ModernRunner:
     name = "fake"
     timeout_seconds = 10
@@ -286,6 +371,13 @@ class ModernRunner:
     async def run(self, request, *, progress_callback=None):
         self.requests.append(request)
         response = "block" if request.node_id == "reviewer" and request.attempt == 1 else f"author-{request.attempt}"
+        return AgentExecutionResult(provider_run_id=f"provider-{len(self.requests)}", response=response)
+
+
+class AlwaysBlockingRunner(ModernRunner):
+    async def run(self, request, *, progress_callback=None):
+        self.requests.append(request)
+        response = "block" if request.node_id == "reviewer" else f"author-{request.attempt}"
         return AgentExecutionResult(provider_run_id=f"provider-{len(self.requests)}", response=response)
 
 
@@ -316,8 +408,7 @@ async def test_modern_coordinator_uses_independent_author_and_reviewer_sessions(
         ("author", 2),
         ("reviewer", 2),
     ]
-    assert runner.requests[0].sandbox is Sandbox.workspace_write
-    assert runner.requests[1].sandbox is Sandbox.read_only
+    assert all(request.sandbox is Sandbox.full_access for request in runner.requests)
     assert runner.requests[0].audit_path != runner.requests[2].audit_path
 
 
@@ -348,6 +439,53 @@ async def test_modern_coordinator_emits_node_events_without_affecting_result(tmp
         ("node_started", "reviewer", 2),
         ("node_completed", "reviewer", 2),
     ]
+
+
+@pytest.mark.asyncio
+async def test_missing_author_artifact_fails_before_validation_or_review(tmp_path):
+    adapter = MissingArtifactAdapter()
+    runner = ModernRunner()
+    events = []
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="missing-artifact-job", workflow="missing-artifact", input={}),
+        registry=WorkflowRegistry({"missing-artifact": adapter}),
+        runner=runner,
+        workspace_root=tmp_path,
+        event_callback=events.append,
+    )
+
+    assert result.status is WorkflowStatus.FAILED
+    assert [(request.node_id, request.attempt) for request in runner.requests] == [("author", 1)]
+    assert [event["node_id"] for event in events if event["event_type"] == "node_started"] == ["author"]
+    assert [event["node_id"] for event in events if event["event_type"] == "node_failed"] == ["author"]
+    assert not any(event["node_id"] in {"validator", "reviewer"} for event in events)
+
+
+@pytest.mark.asyncio
+async def test_final_deterministic_failure_telemetry_keeps_validation_finding(tmp_path):
+    adapter = LoopAdapter(validation_failures=10)
+    adapter.max_review_rounds = 2
+    runner = ModernRunner()
+    events = []
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="deterministic-exhaust-job", workflow="loop", input={}),
+        registry=WorkflowRegistry({"loop": adapter}),
+        runner=runner,
+        workspace_root=tmp_path,
+        event_callback=events.append,
+    )
+
+    assert result.status is WorkflowStatus.FAILED
+    assert [(request.node_id, request.attempt) for request in runner.requests] == [
+        ("author", 1),
+        ("author", 2),
+    ]
+    validator_failures = [
+        event for event in events
+        if event["event_type"] == "node_failed" and event["node_id"] == "validator"
+    ]
+    assert len(validator_failures) == 1
+    assert "deterministic validator finding" in validator_failures[0]["message"]
 
 
 @pytest.mark.asyncio
@@ -408,6 +546,40 @@ async def test_execute_workflow_round_exhaustion_does_not_publish(tmp_path):
     assert result.phase is AgentPhase.FAILED
     assert not adapter.published
     assert [turn.kind for turn in runner.turns] == ["initial", "review", "correction", "review"]
+
+
+@pytest.mark.asyncio
+async def test_modern_semantic_rejection_reports_blockers_and_does_not_publish(tmp_path):
+    adapter = ModernReviewAdapter()
+    runner = AlwaysBlockingRunner()
+    events = []
+    progress = []
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="modern-exhaust-job", workflow="modern-review", input={}),
+        registry=WorkflowRegistry({"modern-review": adapter}),
+        runner=runner,
+        workspace_root=tmp_path,
+        event_callback=events.append,
+        progress_callback=progress.append,
+    )
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.error == "Publication rejected by semantic review."
+    assert [(request.node_id, request.attempt) for request in runner.requests] == [
+        ("author", 1),
+        ("reviewer", 1),
+        ("author", 2),
+        ("reviewer", 2),
+    ]
+    reviewer_completions = [
+        event for event in events
+        if event["event_type"] == "node_completed" and event["node_id"] == "reviewer"
+    ]
+    assert [event["message"] for event in reviewer_completions] == [
+        "Reviewer found 1 blocking findings.",
+        "Reviewer found 1 blocking findings.",
+    ]
+    assert "Maximum revision attempts reached." in [event["message"] for event in progress]
 
 
 @pytest.mark.asyncio

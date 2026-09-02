@@ -23,7 +23,11 @@ import type {
     DocumentRead,
     SlideJob,
 } from "../../lib/api/slides";
-import { MAX_DOCUMENTS, SUPPORTED_SLIDE_EXTENSIONS, slideDownloadUrl } from "../../lib/api/slides";
+import {
+    MAX_DOCUMENTS,
+    SUPPORTED_SLIDE_EXTENSIONS,
+    slideDownloadUrl,
+} from "../../lib/api/slides";
 import type { Tone } from "../../lib/workspace/types";
 import {
     documentDisplayName,
@@ -112,11 +116,9 @@ export function SlidesView({
     });
     const completed = job?.status === "completed";
     const failed = job?.status === "failed";
-    const terminal = completed || failed;
     const busy = phase === "submitting" || phase === "polling";
     const canGenerate =
         !busy &&
-        !terminal &&
         Boolean(title.trim()) &&
         selectedDocs.length > 0 &&
         notReady.length === 0 &&
@@ -125,10 +127,10 @@ export function SlidesView({
     const sourceFormats = "PDF、DOCX、Markdown、TXT";
     const readinessMessage = busy
         ? "正在建立簡報，請稍候。"
-        : phase === "expired"
-          ? "這次簡報工作已過期，請重新生成。"
-          : failed
-            ? "這次簡報生成失敗，請選擇再次生成。"
+        : canGenerate
+          ? "來源已就緒，可以生成。"
+          : phase === "expired"
+            ? "這次簡報工作已過期，請重新生成。"
             : !title.trim()
               ? "請先輸入簡報標題。"
               : !selectedDocs.length
@@ -139,7 +141,9 @@ export function SlidesView({
                     ? "請移除不支援的來源格式後再生成。"
                     : blockedCount > 0
                       ? "請確認所有選取來源都已就緒。"
-                      : "來源已就緒，可以生成。";
+                      : failed
+                        ? "這次簡報生成失敗，請選擇再次生成。"
+                        : "來源已就緒，可以生成。";
     const availabilityMessage = docs.length
         ? availableSources.length
             ? "知識庫目前有 " + availableSources.length + " 份可用來源。"
@@ -189,25 +193,39 @@ export function SlidesView({
                         </div>
                         <dl className="mt-6 grid gap-4 border-t border-border pt-5 text-sm sm:grid-cols-3">
                             <div className="min-w-0">
-                                <dt className="text-xs text-muted-foreground">來源</dt>
+                                <dt className="text-xs text-muted-foreground">
+                                    來源
+                                </dt>
                                 <dd
                                     className="mt-1 truncate font-medium"
-                                    title={selectedDocs.map(documentDisplayName).join("、")}
+                                    title={selectedDocs
+                                        .map(documentDisplayName)
+                                        .join("、")}
                                 >
                                     {selectedDocs.length
                                         ? selectedDocs.length === 1
-                                            ? documentDisplayName(selectedDocs[0])
+                                            ? documentDisplayName(
+                                                  selectedDocs[0],
+                                              )
                                             : `${documentDisplayName(selectedDocs[0])} 等 ${selectedDocs.length} 份`
                                         : "—"}
                                 </dd>
                             </div>
                             <div>
-                                <dt className="text-xs text-muted-foreground">開始時間</dt>
-                                <dd className="mt-1 font-medium">{formatDateTime(job.started_at)}</dd>
+                                <dt className="text-xs text-muted-foreground">
+                                    開始時間
+                                </dt>
+                                <dd className="mt-1 font-medium">
+                                    {formatDateTime(job.started_at)}
+                                </dd>
                             </div>
                             <div>
-                                <dt className="text-xs text-muted-foreground">完成時間</dt>
-                                <dd className="mt-1 font-medium">{formatDateTime(job.finished_at)}</dd>
+                                <dt className="text-xs text-muted-foreground">
+                                    完成時間
+                                </dt>
+                                <dd className="mt-1 font-medium">
+                                    {formatDateTime(job.finished_at)}
+                                </dd>
                             </div>
                         </dl>
                         <Button
@@ -254,9 +272,18 @@ export function SlidesView({
 
                         {selectedDocs.length > 0 && (
                             <div className="mt-4 flex items-center justify-between gap-3 rounded-lg border border-border bg-secondary/60 px-3 py-2.5 text-xs">
-                                <span className="text-muted-foreground">來源索引狀態</span>
-                                <span className={notReady.length ? "font-medium text-amber-700" : "font-medium text-emerald-700"}>
-                                    {selectedDocs.length - notReady.length} / {selectedDocs.length} 份已就緒
+                                <span className="text-muted-foreground">
+                                    來源索引狀態
+                                </span>
+                                <span
+                                    className={
+                                        notReady.length
+                                            ? "font-medium text-amber-700"
+                                            : "font-medium text-emerald-700"
+                                    }
+                                >
+                                    {selectedDocs.length - notReady.length} /{" "}
+                                    {selectedDocs.length} 份已就緒
                                 </span>
                             </div>
                         )}
@@ -592,7 +619,11 @@ export function SlidesView({
                                             type="button"
                                             aria-pressed={tone === value}
                                             onClick={() => setTone(value)}
-                                            variant={tone === value ? "secondary" : "outline"}
+                                            variant={
+                                                tone === value
+                                                    ? "secondary"
+                                                    : "outline"
+                                            }
                                             className={
                                                 tone === value
                                                     ? "h-auto justify-start border-primary bg-primary/10 p-3 text-left text-primary"
@@ -634,7 +665,10 @@ export function SlidesView({
                         )}
                         {warning && !job && (
                             <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-800">
-                                <CircleAlert size={14} className="mt-0.5 shrink-0" />
+                                <CircleAlert
+                                    size={14}
+                                    className="mt-0.5 shrink-0"
+                                />
                                 <div className="min-w-0 flex-1">
                                     <p>{warning}</p>
                                     {pollNow && (
@@ -659,7 +693,9 @@ export function SlidesView({
                                 warning={warning}
                                 error={error}
                                 workflowLabel="簡報"
-                                onRefresh={pollNow ? () => void pollNow() : undefined}
+                                onRefresh={
+                                    pollNow ? () => void pollNow() : undefined
+                                }
                                 onRetry={() => void retry()}
                             />
                         )}
@@ -708,7 +744,8 @@ export function SlidesView({
                             (notReady.length > 0 || unsupported.length > 0) && (
                                 <p className="text-xs text-muted-foreground">
                                     {notReady.length
-                                        ? notReady.length + " 份文件尚未就緒，完成索引後才能生成"
+                                        ? notReady.length +
+                                          " 份文件尚未就緒，完成索引後才能生成"
                                         : ""}
                                     {unsupported.length
                                         ? (notReady.length ? "；" : "") +

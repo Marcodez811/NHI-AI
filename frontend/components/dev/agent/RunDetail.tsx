@@ -1,7 +1,7 @@
 "use client";
 
 import { Activity, Check, Copy } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { AgentEvent, AgentRunSnapshot } from "../../../lib/api/agents";
 import { Button } from "../../ui/button";
 import { MetaValue } from "./MetaValue";
@@ -12,6 +12,19 @@ import { Timeline } from "./Timeline";
 
 export function RunDetail({ snapshot, events, detailLoading }: { snapshot: AgentRunSnapshot; events: AgentEvent[]; detailLoading: boolean }) {
     const [copied, setCopied] = useState(false);
+    const nodes = useMemo(() => {
+        const lifecycleOrder = ["author", "validator", "reviewer"];
+        return snapshot.nodes
+            .map((node, index) => ({ node, index }))
+            .sort((left, right) => {
+                const leftOrder = lifecycleOrder.indexOf(left.node.node_id.toLowerCase());
+                const rightOrder = lifecycleOrder.indexOf(right.node.node_id.toLowerCase());
+                const normalizedLeft = leftOrder === -1 ? lifecycleOrder.length : leftOrder;
+                const normalizedRight = rightOrder === -1 ? lifecycleOrder.length : rightOrder;
+                return normalizedLeft - normalizedRight || left.index - right.index;
+            })
+            .map(({ node }) => node);
+    }, [snapshot.nodes]);
     const copyRunId = () => {
         copyValue(snapshot.run_id);
         setCopied(true);
@@ -67,7 +80,7 @@ export function RunDetail({ snapshot, events, detailLoading }: { snapshot: Agent
                     <span className="text-xs text-muted-foreground">{snapshot.nodes.length} 個節點</span>
                 </div>
                 {snapshot.nodes.length ? (
-                    <div className="grid gap-3 lg:grid-cols-3">{snapshot.nodes.map((node) => <NodeCard key={node.node_id} node={node} />)}</div>
+                    <div className="grid gap-3 lg:grid-cols-3">{nodes.map((node) => <NodeCard key={node.node_id} node={node} />)}</div>
                 ) : (
                     <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">尚未建立節點。</div>
                 )}

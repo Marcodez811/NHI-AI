@@ -30,6 +30,7 @@ from .artifacts import (
     validate_source_paths,
     verify_output,
 )
+from .contracts import JobError
 from .runtime import build_job_environment, build_prompt
 
 
@@ -38,16 +39,15 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
     declared_skills = ("source-document-extraction", "pptx-nhi-tw")
     input_type = SlidesTaskPayload
     output_type = SlidesTaskResult
-    # The SDK uses this schema for a read-only semantic-review turn.  The
-    # parser below remains authoritative so malformed provider responses fail
-    # closed even when an older SDK ignores output_schema.
+    # The parser below remains authoritative so malformed provider responses
+    # fail closed even when an older SDK ignores output_schema.
     review_output_schema = {
         "type": "object",
         "required": ["blocking_findings", "findings", "summary"],
         "properties": {
             "summary": {"type": "string"},
-            "blocking_findings": {"type": "array", "items": {"type": "object"}},
-            "findings": {"type": "array", "items": {"type": "object"}},
+            "blocking_findings": {"type": "array", "items": {"type": "string"}},
+            "findings": {"type": "array", "items": {"type": "string"}},
         },
         "additionalProperties": False,
     }
@@ -88,32 +88,74 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
         await asyncio.to_thread(context_path.write_text, json.dumps(context, ensure_ascii=False), encoding="utf-8")
 
     async def semantic_review_context(self, value: SlidesTaskPayload, workspace: Path) -> Any:
-        return {"artifacts": ["output/presentation.pptx", "work/intermediate/review_report.json", "work/intermediate/qa_report.json"]}
+        return {
+            "requested_title": value.title,
+            "requested_slide_count": value.slides_count,
+            "artifacts": [
+                "output/presentation.pptx",
+                "work/intermediate/evidence_map.json",
+                "work/intermediate/content_check.json",
+                "work/intermediate/review_report.json",
+                "work/intermediate/qa_report.json",
+                "work/rendered/final/*.png",
+            ]
+        }
+
+    def post_author_completion_check(
+        self,
+        value: SlidesTaskPayload,
+        result: Any,
+        workspace: Path,
+    ) -> None:
+        del value, result
+        if not (workspace / "output" / "presentation.pptx").is_file():
+            raise JobError("author", "presentation artifact was not generated")
 
     async def build_prompt(self, value: SlidesTaskPayload, workspace: Path, *, semantic_review_context: Any = None, revision_feedback: str | None = None) -> str:
         context_path = workspace / "work" / "slide_context.json"
         context = json.loads(await asyncio.to_thread(context_path.read_text, encoding="utf-8"))
         prompt = build_prompt(value, context.get("staged_names", []), font_family=context.get("font"))
         if revision_feedback:
-            prompt += "\n\n## Blocking review findings to correct\n" + revision_feedback
+            prompt += (
+                "\n\n## Corrective revision instructions\n"
+                "This is a corrective revision, not a regeneration. The workspace already contains "
+                "the previous candidate presentation and its evidence/QA artifacts. Modify the "
+                "existing presentation and affected artifacts in place. Preserve the requested "
+                f"title exactly as `{value.title}` and the requested slide count of {value.slides_count}; "
+                "do not redesign or rewrite unaffected slides.\n"
+                "Address every blocking finding below. After changes, regenerate affected renders, "
+                "update EvidenceMap, regenerate content_check/review_report/qa_report, and rerun all "
+                "deterministic checks. Before finishing, verify each blocking finding individually "
+                "and state which slide or artifact change resolves it.\n\n"
+                "## Blocking review findings to correct\n"
+                + revision_feedback
+            )
         # Preserve the job-local brief used by the original slide runtime;
         # this is also useful when diagnosing a retained failed workspace.
         await asyncio.to_thread((workspace / "work" / "prompt.md").write_text, prompt, encoding="utf-8")
         return prompt
 
     def build_review_prompt(self, value: SlidesTaskPayload, workspace: Path, audit: Any, review_context: Any) -> str:
+        requested_title = getattr(value, "title", "") or "(not provided)"
         return (
-            "Perform semantic review of the generated presentation now. You are in a read-only sandbox: "
-            "do not modify any file. Inspect the PPTX and validation artifacts listed below. "
+            "Perform semantic review of the generated presentation now. Do not modify any file. "
+            "Inspect the PPTX and validation artifacts listed below. "
+            f"The authoritative requested presentation title is `{requested_title}`; do not classify "
+            "that exact requested title as template/test residue solely because it looks unusual. "
             "Return ONLY valid JSON with exactly these top-level fields: summary (string), "
-            "blocking_findings (array), findings (array). A blocking finding must prevent publication; "
-            "include concrete slide/artifact evidence and a correction recommendation. "
+            "blocking_findings (array of strings), findings (array of strings). A blocking finding "
+            "must prevent publication. Each finding string must include concrete slide/artifact "
+            "evidence and a correction recommendation. "
             f"Artifacts: {json.dumps(review_context or {}, ensure_ascii=False)}"
         )
 
     async def validate_generated(self, value: SlidesTaskPayload, workspace: Path) -> None:
         try:
-            await asyncio.to_thread(verify_output, workspace)
+            await asyncio.to_thread(
+                verify_output,
+                workspace,
+                expected_slide_count=value.slides_count,
+            )
         except Exception as exc:
             # ``verify_output`` reports expected, correctable artifact findings
             # as JobError. Other exceptions indicate a validator/runtime fault
@@ -125,6 +167,8 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             raise
 
     def parse_review(self, response: str | None, workspace: Path) -> dict[str, Any]:
+        semantic_review_path = workspace / "work" / "intermediate" / "semantic_review.json"
+        semantic_review_path.unlink(missing_ok=True)
         if not response or not isinstance(response, str):
             raise ValueError("semantic review response was empty")
         text = response.strip()
@@ -141,26 +185,21 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             raise ValueError("semantic review response was malformed")
         if not isinstance(review.get("blocking_findings"), list) or not isinstance(review.get("findings"), list):
             raise ValueError("semantic review response was malformed")
-        if any(not isinstance(item, dict) for item in review["blocking_findings"] + review["findings"]):
+        if any(not isinstance(item, str) for item in review["blocking_findings"] + review["findings"]):
             raise ValueError("semantic review response was malformed")
+        semantic_review_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = semantic_review_path.with_suffix(".json.tmp")
+        temporary_path.write_text(json.dumps(review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary_path.replace(semantic_review_path)
         return review
 
     def review_has_blocking_findings(self, review: dict[str, Any]) -> bool:
-        if review.get("blocking_findings"):
-            return True
-        for finding in review.get("findings", []):
-            if isinstance(finding, dict) and (
-                finding.get("blocking") is True
-                or str(finding.get("severity", "")).lower() in {"blocking", "critical", "error"}
-            ):
-                return True
-        return False
+        return bool(review.get("blocking_findings"))
 
     def revision_feedback(self, value: SlidesTaskPayload, review: dict[str, Any], result: Any) -> str:
-        findings = review.get("blocking_findings", []) + review.get("findings", [])
-        # Keep the complete finding set together for each correction turn;
-        # truncation prevents a provider response from becoming an unsafe or
-        # unbounded prompt while retaining enough evidence to act.
+        findings = review.get("blocking_findings", [])
+        # Advisory findings remain in semantic_review.json for diagnosis, but
+        # only publication blockers consume the bounded correction budget.
         return json.dumps(findings, ensure_ascii=False)[:12000]
 
     async def publish(self, value: SlidesTaskPayload, result: Any, workspace: Path) -> SlidesTaskResult:
@@ -171,7 +210,11 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
                 response,
                 encoding="utf-8",
             )
-        verified = await asyncio.to_thread(verify_output, workspace)
+        verified = await asyncio.to_thread(
+            verify_output,
+            workspace,
+            expected_slide_count=value.slides_count,
+        )
         published = await asyncio.to_thread(publish_output, verified, str(value.job_id), settings.agent_output_root)
         return SlidesTaskResult(
             job_id=value.job_id,

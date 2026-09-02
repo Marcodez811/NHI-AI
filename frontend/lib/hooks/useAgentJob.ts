@@ -61,7 +61,7 @@ export interface UseAgentJobResult<Payload, Job extends AgentJobRecord, Created 
     startJob: (payload: Payload) => Promise<Created>;
     start: (payload: Payload) => Promise<Created>;
     pollNow: () => Promise<Job | undefined>;
-    retry: () => Promise<Created | null>;
+    retry: (payload?: Payload) => Promise<Created | null>;
     reset: () => void;
 }
 
@@ -388,9 +388,10 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
         return pollForRef.current(id, generation.current);
     }, [job, terminalStatuses]);
 
-    const retry = useCallback(async (): Promise<Created | null> => {
-        if (!lastPayload.current) return null;
-        return startJob(lastPayload.current);
+    const retry = useCallback(async (payload?: Payload): Promise<Created | null> => {
+        const nextPayload = payload ?? lastPayload.current;
+        if (!nextPayload) return null;
+        return startJob(nextPayload);
     }, [startJob]);
 
     const reset = useCallback(() => {

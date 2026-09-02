@@ -226,9 +226,27 @@ def _run_validator(command: Sequence[str], label: str, job_dir: Path, runner: Ca
         raise JobError("verify_output", f"{label} failed: {details or 'no details'}")
 
 
-def verify_output(job_dir: Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> Path:
+def verify_output(
+    job_dir: Path,
+    *,
+    expected_slide_count: int | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> Path:
     deck = job_dir / "output" / "presentation.pptx"
     slide_count = _pptx_slide_count(deck)
+
+    if (
+        expected_slide_count is not None
+        and slide_count != expected_slide_count
+    ):
+        raise JobError(
+            "verify_output",
+            (
+                f"expected {expected_slide_count} slides, "
+                f"found {slide_count}"
+            ),
+        )
+
     skills = job_dir / ".agents" / "skills"
     evidence = job_dir / "work" / "intermediate" / "evidence_map.json"
     content_check = job_dir / "work" / "intermediate" / "content_check.json"
@@ -236,22 +254,138 @@ def verify_output(job_dir: Path, *, runner: Callable[..., subprocess.CompletedPr
     review_report = job_dir / "work" / "intermediate" / "review_report.json"
     manifest = job_dir / "work" / "extracted" / "manifest.json"
     pptx_scripts = skills / PPTX_SKILL / "scripts"
-    if not all(path.is_file() for path in (evidence, content_check, review_report, qa_report)):
-        raise JobError("verify_output", "EvidenceMap, content check, SlideReview, or QAReport is missing")
-    if any(path.suffix.lower() in {".docx", ".pdf"} for path in (job_dir / "input").iterdir()):
+
+    required_artifacts = (
+        evidence,
+        content_check,
+        review_report,
+        qa_report,
+    )
+
+    if not all(path.is_file() for path in required_artifacts):
+        raise JobError(
+            "verify_output",
+            "EvidenceMap, content check, SlideReview, or QAReport is missing",
+        )
+
+    input_dir = job_dir / "input"
+    has_extractable_source = any(
+        path.suffix.lower() in {".docx", ".pdf"}
+        for path in input_dir.iterdir()
+    )
+
+    if has_extractable_source:
         if not manifest.is_file():
-            raise JobError("verify_output", "source extraction manifest is missing")
-        _run_validator([sys.executable, str(skills / SOURCE_SKILL / "scripts" / "validate_sources.py"), str(manifest.parent)], "source extraction validation", job_dir, runner)
-        _run_validator([sys.executable, str(pptx_scripts / "validate_evidence_map.py"), str(manifest), str(evidence)], "EvidenceMap validation", job_dir, runner)
-    _run_validator([sys.executable, str(pptx_scripts / "review_report.py"), "validate", "--pptx", str(deck), "--renders", str(job_dir / "work" / "rendered" / "final"), "--report", str(review_report)], "SlideReview validation", job_dir, runner)
-    _run_validator([sys.executable, str(pptx_scripts / "check_pptx_content.py"), str(deck), "--output", str(content_check), "--fail-on-findings"], "PPTX content validation", job_dir, runner)
-    _run_validator([sys.executable, str(pptx_scripts / "qa_report.py"), "validate", "--pptx", str(deck), "--evidence-map", str(evidence), "--report", str(qa_report)], "QAReport validation", job_dir, runner)
-    renders = sorted((job_dir / "work" / "rendered" / "final").glob("*.png"))
+            raise JobError(
+                "verify_output",
+                "source extraction manifest is missing",
+            )
+
+        _run_validator(
+            [
+                sys.executable,
+                str(
+                    skills
+                    / SOURCE_SKILL
+                    / "scripts"
+                    / "validate_sources.py"
+                ),
+                str(manifest.parent),
+            ],
+            "source extraction validation",
+            job_dir,
+            runner,
+        )
+
+        _run_validator(
+            [
+                sys.executable,
+                str(
+                    pptx_scripts
+                    / "validate_evidence_map.py"
+                ),
+                str(manifest),
+                str(evidence),
+            ],
+            "EvidenceMap validation",
+            job_dir,
+            runner,
+        )
+
+    _run_validator(
+        [
+            sys.executable,
+            str(pptx_scripts / "review_report.py"),
+            "validate",
+            "--pptx",
+            str(deck),
+            "--renders",
+            str(job_dir / "work" / "rendered" / "final"),
+            "--report",
+            str(review_report),
+        ],
+        "SlideReview validation",
+        job_dir,
+        runner,
+    )
+
+    _run_validator(
+        [
+            sys.executable,
+            str(pptx_scripts / "check_pptx_content.py"),
+            str(deck),
+            "--output",
+            str(content_check),
+            "--fail-on-findings",
+        ],
+        "PPTX content validation",
+        job_dir,
+        runner,
+    )
+
+    _run_validator(
+        [
+            sys.executable,
+            str(pptx_scripts / "qa_report.py"),
+            "validate",
+            "--pptx",
+            str(deck),
+            "--evidence-map",
+            str(evidence),
+            "--report",
+            str(qa_report),
+        ],
+        "QAReport validation",
+        job_dir,
+        runner,
+    )
+
+    renders = sorted(
+        (job_dir / "work" / "rendered" / "final").glob("*.png")
+    )
+
     if len(renders) != slide_count:
-        raise JobError("verify_output", f"expected {slide_count} final slide renders, found {len(renders)}")
-    invalid = [path.name for path in renders if path.stat().st_size <= 8 or path.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n"]
+        raise JobError(
+            "verify_output",
+            (
+                f"expected {slide_count} final slide renders, "
+                f"found {len(renders)}"
+            ),
+        )
+
+    invalid = [
+        path.name
+        for path in renders
+        if path.stat().st_size <= 8
+        or path.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n"
+    ]
+
     if invalid:
-        raise JobError("verify_output", "invalid PNG renders: " + ", ".join(invalid))
+        raise JobError(
+            "verify_output",
+            "invalid PNG renders: " + ", ".join(invalid),
+        )
+
     return deck
 
 

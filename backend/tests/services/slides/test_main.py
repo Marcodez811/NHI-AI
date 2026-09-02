@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
 from app.models.slides import JobStatus, SlidesTaskPayload
 from app.services.slides import agent as slides
 from app.services.slides.adapter import slides_adapter
-from app.services.slides.artifacts import JobError, publish_output
+from app.services.slides.artifacts import JobError, publish_output, verify_output
 
 
 def _payload(job_id):
@@ -53,7 +56,8 @@ class SlidesServiceTests(unittest.TestCase):
                 observed.update(kwargs)
                 return Path("audit"), Path("message")
 
-            def fake_verify(job_dir):
+            def fake_verify(job_dir, *, expected_slide_count=None):
+                observed["expected_slide_count"] = expected_slide_count
                 deck = job_dir / "output" / "presentation.pptx"
                 deck.write_bytes(b"deck")
                 return deck
@@ -124,8 +128,124 @@ class SlidesServiceTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), b"new deck")
 
     def test_semantic_review_rejects_malformed_findings(self):
-        with self.assertRaises(ValueError):
-            slides_adapter.parse_review(
-                '{"summary":"ok","blocking_findings":[],"findings":["not an object"]}',
-                Path("/tmp/workspace"),
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ValueError):
+                slides_adapter.parse_review(
+                    '{"summary":"ok","blocking_findings":[],"findings":[{"detail":"not a string"}]}',
+                    Path(temporary),
+                )
+
+    def test_semantic_review_schema_and_parser_use_string_findings(self):
+        schema = slides_adapter.review_output_schema
+        self.assertEqual(schema["properties"]["blocking_findings"]["items"], {"type": "string"})
+        self.assertEqual(schema["properties"]["findings"]["items"], {"type": "string"})
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            review = slides_adapter.parse_review(
+                '{"summary":"Two issues found.","blocking_findings":["Slide 4 is unsupported."],"findings":["Slide 2 title could be clearer."]}',
+                workspace,
             )
+            self.assertEqual(
+                review,
+                {
+                    "summary": "Two issues found.",
+                    "blocking_findings": ["Slide 4 is unsupported."],
+                    "findings": ["Slide 2 title could be clearer."],
+                },
+            )
+            self.assertEqual(
+                json.loads((workspace / "work/intermediate/semantic_review.json").read_text(encoding="utf-8")),
+                review,
+            )
+            with self.assertRaises(ValueError):
+                slides_adapter.parse_review('{"summary":"bad"}', workspace)
+            self.assertFalse((workspace / "work/intermediate/semantic_review.json").exists())
+
+        prompt = slides_adapter.build_review_prompt(_payload(uuid4()), Path("/tmp/workspace"), None, None)
+        self.assertIn("authoritative requested presentation title", prompt)
+        self.assertNotIn("read-only sandbox", prompt)
+
+    def test_revision_feedback_contains_only_blocking_findings(self):
+        feedback = slides_adapter.revision_feedback(
+            _payload(uuid4()),
+            {
+                "blocking_findings": ["Fix slide 10 policy attribution."],
+                "findings": ["Consider using a range annotation."],
+            },
+            None,
+        )
+        self.assertEqual(json.loads(feedback), ["Fix slide 10 policy attribution."])
+
+    def test_correction_prompt_requires_targeted_in_place_resolution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / "work").mkdir()
+            (workspace / "work/slide_context.json").write_text(
+                json.dumps({"staged_names": [], "font": "Noto Sans TC"}),
+                encoding="utf-8",
+            )
+            prompt = asyncio.run(
+                slides_adapter.build_prompt(
+                    _payload(uuid4()),
+                    workspace,
+                    revision_feedback='["Fix slide 10 policy attribution."]',
+                )
+            )
+
+        self.assertIn("corrective revision, not a regeneration", prompt)
+        self.assertIn("Modify the existing presentation and affected artifacts in place", prompt)
+        self.assertIn("Address every blocking finding below", prompt)
+        self.assertIn("verify each blocking finding individually", prompt)
+        self.assertIn("2026 / Taiwan: NHI briefing", prompt)
+
+    def test_review_context_lists_semantic_review_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            context = asyncio.run(slides_adapter.semantic_review_context(_payload(uuid4()), Path(temporary)))
+        self.assertEqual(context["requested_title"], "2026 / Taiwan: NHI briefing")
+        self.assertIn("work/intermediate/evidence_map.json", context["artifacts"])
+        self.assertIn("work/rendered/final/*.png", context["artifacts"])
+
+    def test_missing_author_artifact_is_a_workflow_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(JobError, "artifact was not generated"):
+                slides_adapter.post_author_completion_check(
+                    _payload(uuid4()),
+                    None,
+                    Path(temporary),
+                )
+
+    def test_verify_output_rejects_requested_slide_count_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            deck = root / "output" / "presentation.pptx"
+            deck.parent.mkdir()
+            with zipfile.ZipFile(deck, "w") as archive:
+                archive.writestr("[Content_Types].xml", "content")
+                archive.writestr("ppt/slides/slide1.xml", "slide")
+                archive.writestr("ppt/slides/slide2.xml", "slide")
+                archive.writestr("padding.bin", "x" * 12_000)
+
+            with self.assertRaisesRegex(JobError, "expected 8 slides, found 2"):
+                verify_output(root, expected_slide_count=8)
+
+    def test_validate_and_publish_pass_requested_slide_count(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request = _payload(uuid4())
+            observed = []
+
+            def fake_verify(job_dir, *, expected_slide_count=None):
+                observed.append(expected_slide_count)
+                deck = job_dir / "output" / "presentation.pptx"
+                deck.parent.mkdir(parents=True, exist_ok=True)
+                deck.write_bytes(b"deck")
+                return deck
+
+            with (
+                patch("app.services.slides.adapter.verify_output", fake_verify),
+                patch("app.services.slides.adapter.publish_output", return_value=root / "published.pptx"),
+            ):
+                asyncio.run(slides_adapter.validate_generated(request, root))
+                asyncio.run(slides_adapter.publish(request, SimpleNamespace(response=None), root))
+
+            self.assertEqual(observed, [request.slides_count, request.slides_count])

@@ -43,6 +43,17 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _progress_telemetry_type(event: dict[str, Any]) -> AgentEventType:
+    """Classify coordinator phases separately from provider node progress."""
+
+    raw_event_type = str(getattr(event.get("event_type"), "value", event.get("event_type") or ""))
+    if event.get("heartbeat") or raw_event_type == AgentEventType.HEARTBEAT.value:
+        return AgentEventType.HEARTBEAT
+    if raw_event_type == AgentEventType.NODE_PROGRESS.value:
+        return AgentEventType.NODE_PROGRESS
+    return AgentEventType.PHASE_CHANGED
+
+
 async def _set_progress(job_id: str, *, status: str, stage: str, message: str, started_at: datetime, phase: AgentPhase | str | None = None, finished_at: datetime | None = None) -> None:
     try:
         clean_stage = stage if _SAFE_STAGE.fullmatch(str(stage or "")) else "working"
@@ -191,10 +202,15 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
             except Exception:
                 logger.exception("Unable to persist durable slide job phase", job_id=job_id)
                 raise
+        telemetry_type = _progress_telemetry_type(event)
         await _emit_telemetry(
             job_id,
-            AgentEventType.HEARTBEAT if event.get("heartbeat") else AgentEventType.PHASE_CHANGED,
+            telemetry_type,
             workflow=payload.workflow,
+            node_id=event.get("node_id"),
+            role=event.get("role"),
+            runner=event.get("runner"),
+            attempt=event.get("attempt"),
             status=WorkflowStatus.RUNNING,
             phase=event.get("phase"),
             message=event.get("message"),
@@ -253,14 +269,15 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
                 error="Presentation result could not be persisted.",
             )
             terminal_phase = AgentPhase.FAILED
-    await _set_progress(job_id, status=result.status, stage=terminal_phase.value, phase=terminal_phase, message="Agent workflow completed." if result.status == WorkflowStatus.COMPLETED else "Agent workflow failed.", started_at=result.started_at, finished_at=result.finished_at)
+    terminal_message = "Agent workflow completed." if result.status == WorkflowStatus.COMPLETED else safe_error(result.error, "Agent workflow failed.")
+    await _set_progress(job_id, status=result.status, stage=terminal_phase.value, phase=terminal_phase, message=terminal_message, started_at=result.started_at, finished_at=result.finished_at)
     await _emit_telemetry(
         job_id,
         AgentEventType.RUN_COMPLETED if result.status == WorkflowStatus.COMPLETED else AgentEventType.RUN_FAILED,
         workflow=payload.workflow,
         status=result.status,
         phase=terminal_phase,
-        message="Agent workflow completed." if result.status == WorkflowStatus.COMPLETED else "Agent workflow failed.",
+        message=terminal_message,
         duration_ms=round((result.finished_at - result.started_at).total_seconds() * 1000),
     )
     if slide_db_session is not None:

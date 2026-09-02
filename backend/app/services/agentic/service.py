@@ -30,6 +30,7 @@ from .runner import (
     WorkflowExecutionError,
     WorkflowTimeoutError,
     runner_registry,
+    safe_error,
 )
 from .staging import stage_declared_skills
 
@@ -105,6 +106,33 @@ def _validate_output(adapter: Any, output: Any) -> Any:
 
 def _result_output(output: Any) -> Any:
     return output.model_dump(mode="json") if isinstance(output, BaseModel) else output
+
+
+async def _check_author_completion(adapter: Any, value: Any, result: AgentExecutionResult, workspace: Path) -> None:
+    check = getattr(adapter, "post_author_completion_check", None)
+    if check is None:
+        return
+    await _call(check, value, result, workspace)
+
+
+def _validation_telemetry(exc: BaseException) -> str:
+    finding = safe_error(str(exc), "Deterministic validation failed.")
+    return f"Deterministic validation failed: {finding}"[:12000]
+
+
+class SemanticReviewRejected(WorkflowExecutionError):
+    """Controlled terminal failure for an unresolved semantic review."""
+
+    def __init__(self, blocking_count: int):
+        self.blocking_count = blocking_count
+        super().__init__("Publication rejected by semantic review.")
+
+
+def _blocking_count(review: Any, blocking: bool) -> int:
+    findings = review.get("blocking_findings") if isinstance(review, dict) else None
+    if isinstance(findings, list):
+        return len(findings)
+    return 1 if blocking else 0
 
 
 def _uses_execution_request(runner: Any) -> bool:
@@ -248,7 +276,7 @@ async def _execute_bounded_agents(
             attempt=author_attempt,
             workspace=workspace,
             prompt=prompt,
-            sandbox=Sandbox.workspace_write,
+            sandbox=Sandbox.full_access,
             skill_names=tuple(staged),
             audit_path=_attempt_audit_path(workspace, "author", author_attempt),
         )
@@ -279,6 +307,21 @@ async def _execute_bounded_agents(
                 duration_ms=round((asyncio.get_running_loop().time() - author_started) * 1000),
             )
             raise
+        try:
+            await _check_author_completion(adapter, value, author_result, workspace)
+        except Exception as exc:
+            await _emit_event(
+                event_callback,
+                "node_failed",
+                node_id="author",
+                role=author_role,
+                runner=author_runner_name,
+                attempt=author_attempt,
+                status="failed",
+                message="Author output check failed.",
+                duration_ms=round((asyncio.get_running_loop().time() - author_started) * 1000),
+            )
+            raise WorkflowExecutionError("author output check failed") from exc
         await _emit_event(
             event_callback,
             "node_completed",
@@ -320,7 +363,7 @@ async def _execute_bounded_agents(
                         runner="system",
                         attempt=author_attempt,
                         status="failed",
-                        message="Deterministic validation exhausted the retry limit.",
+                        message=_validation_telemetry(exc),
                         duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
                     )
                     raise WorkflowExecutionError("maximum review rounds exceeded") from exc
@@ -358,7 +401,7 @@ async def _execute_bounded_agents(
                             runner="system",
                             attempt=author_attempt,
                             status="failed",
-                            message="Deterministic validation exhausted the retry limit.",
+                            message=_validation_telemetry(exc),
                             duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
                         )
                         raise WorkflowExecutionError("maximum review rounds exceeded") from exc
@@ -425,7 +468,7 @@ async def _execute_bounded_agents(
             attempt=reviewer_attempt,
             workspace=workspace,
             prompt=str(review_prompt),
-            sandbox=Sandbox.read_only,
+            sandbox=Sandbox.full_access,
             output_schema=getattr(adapter, "review_output_schema", None),
             skill_names=tuple(staged),
             audit_path=_attempt_audit_path(workspace, "reviewer", reviewer_attempt),
@@ -444,7 +487,7 @@ async def _execute_bounded_agents(
         reviewer_started = asyncio.get_running_loop().time()
         try:
             review_result = await _run_agent(reviewer_runner, review_request, progress_callback=progress_callback)
-        except Exception:
+        except Exception as exc:
             await _emit_event(
                 event_callback,
                 "node_failed",
@@ -453,10 +496,50 @@ async def _execute_bounded_agents(
                 runner=reviewer_runner_name,
                 attempt=reviewer_attempt,
                 status="failed",
-                message="Reviewer agent failed.",
+                message=safe_error(str(exc), "Reviewer agent failed."),
                 duration_ms=round((asyncio.get_running_loop().time() - reviewer_started) * 1000),
             )
             raise
+        parse_review = getattr(adapter, "parse_review", None)
+        if parse_review is None:
+            review_error = WorkflowExecutionError("semantic review parser is missing")
+        else:
+            try:
+                review = await _call(parse_review, review_result.response, workspace)
+                blocking_hook = getattr(adapter, "review_has_blocking_findings", None)
+                if blocking_hook is not None:
+                    blocking = await _call(blocking_hook, review)
+                elif isinstance(review, dict):
+                    blocking = bool(review.get("blocking_findings"))
+                else:
+                    blocking = bool(review)
+            except Exception as exc:
+                await _emit_event(
+                    event_callback,
+                    "node_failed",
+                    node_id="reviewer",
+                    role=reviewer_role,
+                    runner=reviewer_runner_name,
+                    attempt=reviewer_attempt,
+                    status="failed",
+                    message=safe_error(str(exc), "Reviewer response was invalid."),
+                    duration_ms=round((asyncio.get_running_loop().time() - reviewer_started) * 1000),
+                )
+                raise
+        if parse_review is None:
+            await _emit_event(
+                event_callback,
+                "node_failed",
+                node_id="reviewer",
+                role=reviewer_role,
+                runner=reviewer_runner_name,
+                attempt=reviewer_attempt,
+                status="failed",
+                message=str(review_error),
+                duration_ms=round((asyncio.get_running_loop().time() - reviewer_started) * 1000),
+            )
+            raise review_error
+        review_count = _blocking_count(review, blocking)
         await _emit_event(
             event_callback,
             "node_completed",
@@ -466,24 +549,18 @@ async def _execute_bounded_agents(
             attempt=reviewer_attempt,
             status="completed",
             provider_run_id=review_result.provider_run_id,
-            message="Reviewer agent completed.",
+            message=(
+                "Reviewer approved publication."
+                if not blocking
+                else f"Reviewer found {review_count} blocking findings."
+            ),
             duration_ms=review_result.duration_ms or round((asyncio.get_running_loop().time() - reviewer_started) * 1000),
         )
-        parse_review = getattr(adapter, "parse_review", None)
-        if parse_review is None:
-            raise WorkflowExecutionError("semantic review parser is missing")
-        review = await _call(parse_review, review_result.response, workspace)
-        blocking_hook = getattr(adapter, "review_has_blocking_findings", None)
-        if blocking_hook is not None:
-            blocking = await _call(blocking_hook, review)
-        elif isinstance(review, dict):
-            blocking = bool(review.get("blocking_findings"))
-        else:
-            blocking = bool(review)
         if not blocking:
             return author_result
         if author_attempt >= max_rounds:
-            raise WorkflowExecutionError("maximum review rounds exceeded")
+            await _emit_phase(progress_callback, AgentPhase.FAILED, "Maximum revision attempts reached.")
+            raise SemanticReviewRejected(review_count)
         feedback_hook = getattr(adapter, "revision_feedback", None) or getattr(adapter, "build_revision_feedback", None)
         feedback = await _call(feedback_hook, value, review, author_result) if feedback_hook is not None else str(review)
         feedback = str(feedback)[:12000]
@@ -553,7 +630,7 @@ async def _execute_workflow(
         context_hook = getattr(adapter, "semantic_review_context", None) or getattr(adapter, "build_semantic_review_context", None)
         review_context = await _call(context_hook, value, workspace) if context_hook is not None else None
         prompt = await _call(adapter.build_prompt, value, workspace, semantic_review_context=review_context)
-        turns = [TurnRequest(kind="initial", prompt=prompt, sandbox=Sandbox.workspace_write)]
+        turns = [TurnRequest(kind="initial", prompt=prompt, sandbox=Sandbox.full_access)]
         build_review = getattr(adapter, "build_review_prompt", None)
         selected_runner = runner
         # The default registry and all provider-neutral implementations use
@@ -586,7 +663,7 @@ async def _execute_workflow(
                 attempt=1,
                 workspace=workspace,
                 prompt=str(prompt),
-                sandbox=Sandbox.workspace_write,
+                sandbox=Sandbox.full_access,
                 skill_names=tuple(staged),
                 audit_path=_attempt_audit_path(workspace, "author", 1),
             )
@@ -617,6 +694,21 @@ async def _execute_workflow(
                     duration_ms=round((asyncio.get_running_loop().time() - author_started) * 1000),
                 )
                 raise
+            try:
+                await _check_author_completion(adapter, value, run, workspace)
+            except Exception as exc:
+                await _emit_event(
+                    event_callback,
+                    "node_failed",
+                    node_id="author",
+                    role=author_role,
+                    runner=author_runner_name,
+                    attempt=1,
+                    status="failed",
+                    message="Author output check failed.",
+                    duration_ms=round((asyncio.get_running_loop().time() - author_started) * 1000),
+                )
+                raise WorkflowExecutionError("author output check failed") from exc
             await _emit_event(
                 event_callback,
                 "node_completed",
@@ -655,7 +747,7 @@ async def _execute_workflow(
                 return TurnRequest(
                     kind="correction",
                     prompt=str(revision_prompt),
-                    sandbox=Sandbox.workspace_write,
+                    sandbox=Sandbox.full_access,
                 )
 
             async def next_turn(audit: Any, response: str | None) -> TurnRequest | None:
@@ -692,7 +784,7 @@ async def _execute_workflow(
                     await _emit_phase(progress_callback, AgentPhase.REVIEWING)
                     review_prompt = await _call(build_review, value, workspace, audit, review_context)
                     schema = getattr(adapter, "review_output_schema", None)
-                    return TurnRequest(kind="review", prompt=str(review_prompt), sandbox=Sandbox.read_only, output_schema=schema)
+                    return TurnRequest(kind="review", prompt=str(review_prompt), sandbox=Sandbox.full_access, output_schema=schema)
                 if audit.kind != "review":
                     raise WorkflowExecutionError("workflow turn sequence is invalid")
                 parse_review = getattr(adapter, "parse_review", None)
@@ -708,6 +800,9 @@ async def _execute_workflow(
                     blocking = bool(review)
                 if not blocking:
                     return None
+                if review_round >= max_rounds:
+                    await _emit_phase(progress_callback, AgentPhase.FAILED, "Maximum revision attempts reached.")
+                    raise SemanticReviewRejected(_blocking_count(review, blocking))
                 feedback_hook = getattr(adapter, "revision_feedback", None) or getattr(adapter, "build_revision_feedback", None)
                 feedback = await _call(feedback_hook, value, review, audit) if feedback_hook is not None else str(review)
                 return await correction(str(feedback))
@@ -726,6 +821,10 @@ async def _execute_workflow(
     except WorkflowTimeoutError:
         await _emit_phase(progress_callback, AgentPhase.FAILED, "Agent workflow timed out.")
         return AgentTaskResult(job_id=getattr(payload, "job_id", "unknown"), workflow=getattr(payload, "workflow", "unknown"), status=WorkflowStatus.FAILED, phase=AgentPhase.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error="Workflow timed out.")
+    except SemanticReviewRejected as exc:
+        message = safe_error(str(exc), "Publication rejected by semantic review.")
+        await _emit_phase(progress_callback, AgentPhase.FAILED, message)
+        return AgentTaskResult(job_id=getattr(payload, "job_id", "unknown"), workflow=getattr(payload, "workflow", "unknown"), status=WorkflowStatus.FAILED, phase=AgentPhase.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error=message)
     except Exception:
         # Details are logged server-side only; callers get a stable sentence.
         await _emit_phase(progress_callback, AgentPhase.FAILED)

@@ -125,7 +125,7 @@ def _turn_phase(kind: str) -> AgentPhase:
     normalized = str(kind or "").strip().lower()
     if normalized in {"correction", "revision", "revising"}:
         return AgentPhase.REVISING
-    if normalized in {"review", "reviewing"}:
+    if normalized in {"review", "reviewer", "reviewing"}:
         return AgentPhase.REVIEWING
     if normalized in {phase.value for phase in AgentPhase}:
         return AgentPhase(normalized)
@@ -169,6 +169,7 @@ class ProgressReporter:
                 "stage": stage,
                 "message": message,
                 "heartbeat": heartbeat,
+                "event_type": "heartbeat" if heartbeat else "node_progress",
                 "elapsed_seconds": round(asyncio.get_running_loop().time() - self._started, 1),
                 "phase": self._phase.value,
             }
@@ -299,11 +300,14 @@ class CodexRunner:
                                 status="failed",
                                 duration_ms=round((asyncio.get_running_loop().time() - turn_started) * 1000),
                                 response=None,
+                                error=None,
+                                prompt=turn_request.prompt,
                             )
                         )
                         await self._persist_audits(audit_path, str(getattr(thread, "id", "unknown")), audits)
                         raise
                     except Exception as exc:
+                        error_message = safe_error(str(exc), "Codex turn failed.")
                         audits.append(
                             TurnAudit(
                                 turn_id=str(getattr(handle, "id", "unknown")),
@@ -311,10 +315,15 @@ class CodexRunner:
                                 status="failed",
                                 duration_ms=round((asyncio.get_running_loop().time() - turn_started) * 1000),
                                 response=None,
+                                error=error_message,
+                                prompt=turn_request.prompt,
                             )
                         )
                         await self._persist_audits(audit_path, str(getattr(thread, "id", "unknown")), audits)
-                        raise WorkflowExecutionError("Codex turn failed.") from exc
+                        if isinstance(exc, WorkflowExecutionError):
+                            raise
+                        raise WorkflowExecutionError(error_message) from exc
+                    audit = audit.model_copy(update={"prompt": turn_request.prompt})
                     audits.append(audit)
                     # Persist incrementally so a malformed review or a later
                     # SDK failure still leaves every completed turn audit for
@@ -391,8 +400,10 @@ class CodexRunner:
             raise WorkflowExecutionError("Codex turn did not complete")
         status = str(_json_value(getattr(completed, "status", None)))
         if status.split(".")[-1].lower() != "completed":
-            raise WorkflowExecutionError("Codex turn failed")
-        audit = TurnAudit(turn_id=str(getattr(completed, "id", getattr(handle, "id", "unknown"))), kind=kind, status=status, duration_ms=getattr(completed, "duration_ms", None), usage=_json_value(usage), response=_response(items))
+            provider_error = getattr(completed, "error", None)
+            provider_message = getattr(provider_error, "message", None) or str(provider_error or "")
+            raise WorkflowExecutionError(safe_error(provider_message, "Codex turn failed."))
+        audit = TurnAudit(turn_id=str(getattr(completed, "id", getattr(handle, "id", "unknown"))), kind=kind, status=status, duration_ms=getattr(completed, "duration_ms", None), usage=_json_value(usage), response=_response(items), error=None)
         return audit, audit.response
 
 
@@ -427,11 +438,29 @@ class CodexAgentRunner:
             sandbox=request.sandbox,
             output_schema=request.output_schema,
         )
+
+        async def forward_progress(event: dict[str, Any]) -> None:
+            if progress_callback is None:
+                return
+            enriched = dict(event)
+            enriched.setdefault("event_type", "heartbeat" if event.get("heartbeat") else "node_progress")
+            enriched.update(
+                {
+                    "node_id": request.node_id,
+                    "role": request.role,
+                    "runner": self.name,
+                    "attempt": request.attempt,
+                }
+            )
+            result = progress_callback(enriched)
+            if inspect.isawaitable(result):
+                await result
+
         result = await self.codex_runner.run(
             request.workspace,
             [turn],
             skill_names=request.skill_names,
-            progress_callback=progress_callback,
+            progress_callback=forward_progress,
             audit_path=request.audit_path,
         )
         duration_ms = round((asyncio.get_running_loop().time() - started) * 1000)

@@ -484,6 +484,20 @@ class AgentTelemetryStore:
             else:
                 node = existing
             node.updated_at = max(node.updated_at, now)
+            is_new_attempt = (
+                event.event_type is AgentEventType.NODE_STARTED
+                and event.attempt is not None
+                and event.attempt != node.attempt
+            )
+            if is_new_attempt:
+                # A node snapshot represents its latest activation. Clear
+                # activation-scoped fields so a retry cannot display the
+                # previous attempt's timing or provider identity while it is
+                # still running.
+                node.started_at = now
+                node.finished_at = None
+                node.duration_ms = None
+                node.provider_run_id = None
             if event.runner:
                 node.runner = event.runner
             if event.agent_role:

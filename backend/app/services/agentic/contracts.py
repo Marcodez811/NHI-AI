@@ -107,6 +107,8 @@ class TurnAudit(BaseModel):
     duration_ms: int | None = None
     usage: Any = None
     response: str | None = None
+    error: str | None = None
+    prompt: str | None = None
 
 
 class TurnRequest(BaseModel):
@@ -114,10 +116,10 @@ class TurnRequest(BaseModel):
 
     kind: str = Field(min_length=1, max_length=40)
     prompt: str = Field(min_length=1)
-    # Sandbox is deliberately part of the turn contract.  Generation and
-    # correction turns may write the job workspace, while semantic review is
-    # read-only.  Keeping this on the request also makes the transition
-    # visible to test doubles and audit consumers.
+    # Sandbox is deliberately part of the turn contract.  The current Docker
+    # MVP grants author, correction, and reviewer turns full access; workflow
+    # prompts still keep semantic review non-mutating.  Keeping this on the
+    # request makes the policy visible to test doubles and audit consumers.
     sandbox: Any = None
     output_schema: dict[str, Any] | None = None
 
@@ -259,6 +261,8 @@ class WorkflowAdapter(Protocol, Generic[InputT, OutputT]):
 
     def prepare_input(self, value: InputT, workspace: Path) -> Any: ...
 
+    def post_author_completion_check(self, value: InputT, result: Any, workspace: Path) -> Any: ...
+
     def semantic_review_context(self, value: InputT, workspace: Path) -> Any: ...
 
     def revision_feedback(self, value: InputT, review: Any, result: Any) -> Any: ...
@@ -309,6 +313,9 @@ class BaseWorkflowAdapter(Generic[InputT, OutputT]):
         return None
 
     def prepare_input(self, value: InputT, workspace: Path) -> None:
+        return None
+
+    def post_author_completion_check(self, value: InputT, result: Any, workspace: Path) -> None:
         return None
 
     def semantic_review_context(self, value: InputT, workspace: Path) -> Any:

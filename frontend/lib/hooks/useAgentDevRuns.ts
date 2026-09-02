@@ -97,22 +97,47 @@ export function useAgentDevRuns(
     const loadDetail = useCallback(async (runId: string, signal: AbortSignal) => {
         setDetailLoading(true);
         try {
-            const [nextSnapshot, nextEvents] = await Promise.all([
-                fetchAgentRun(runId, { signal }),
-                fetchAgentRunEvents(runId, {
-                    after: eventCursor.current,
+            // Read the snapshot first so a terminal run gives us a fixed
+            // sequence target. The event stream is paginated, and fetching
+            // only one page can otherwise leave a terminal run incomplete.
+            const nextSnapshot = await fetchAgentRun(runId, { signal });
+            if (!mounted.current || signal.aborted || selectedRunIdRef.current !== runId) return;
+
+            let page = await fetchAgentRunEvents(runId, {
+                after: eventCursor.current,
+                limit: eventLimit,
+                signal,
+            });
+            let cursor = eventCursor.current;
+
+            const consumePage = (events: AgentEvent[], nextAfter: number | null) => {
+                const previousCursor = cursor;
+                for (const event of events) {
+                    if (event.sequence > cursor) cursor = event.sequence;
+                    eventsBySequence.current.set(event.sequence, event);
+                }
+                if (nextAfter !== null && nextAfter > cursor) cursor = nextAfter;
+                return cursor > previousCursor;
+            };
+
+            consumePage(page.events, page.next_after);
+            while (cursor < nextSnapshot.last_sequence && page.events.length > 0) {
+                const previousCursor = cursor;
+                page = await fetchAgentRunEvents(runId, {
+                    after: cursor,
                     limit: eventLimit,
                     signal,
-                }),
-            ]);
-            if (!mounted.current || signal.aborted || selectedRunIdRef.current !== runId) return;
-            setSnapshot(nextSnapshot);
-            terminalRunRef.current = isTerminal(nextSnapshot.status);
-            setDetailError(null);
-            for (const event of nextEvents.events) {
-                if (event.sequence > eventCursor.current) eventCursor.current = event.sequence;
-                eventsBySequence.current.set(event.sequence, event);
+                });
+                if (!mounted.current || signal.aborted || selectedRunIdRef.current !== runId) return;
+                const advanced = consumePage(page.events, page.next_after);
+                if (!advanced || cursor <= previousCursor) break;
             }
+
+            if (!mounted.current || signal.aborted || selectedRunIdRef.current !== runId) return;
+            eventCursor.current = cursor;
+            setSnapshot(nextSnapshot);
+            terminalRunRef.current = isTerminal(nextSnapshot.status) && cursor >= nextSnapshot.last_sequence;
+            setDetailError(null);
             setEvents(
                 [...eventsBySequence.current.values()].sort((a, b) => a.sequence - b.sequence),
             );
@@ -125,7 +150,7 @@ export function useAgentDevRuns(
         }
     }, [eventLimit]);
 
-    const refresh = useCallback(async () => {
+    const refreshRuns = useCallback(async (forceDetail = false) => {
         if (!mounted.current || inFlight.current) return;
         inFlight.current = true;
         const controller = new AbortController();
@@ -152,7 +177,7 @@ export function useAgentDevRuns(
                 setDetailError(null);
                 resetEvents();
             }
-            if (nextSelected && !terminalRunRef.current) {
+            if (nextSelected && (forceDetail || !terminalRunRef.current)) {
                 detailRequest.current?.abort();
                 const detailController = new AbortController();
                 detailRequest.current = detailController;
@@ -173,17 +198,21 @@ export function useAgentDevRuns(
         }
     }, [loadDetail, resetEvents, runLimit]);
 
+    const refresh = useCallback(async () => {
+        await refreshRuns(true);
+    }, [refreshRuns]);
+
     useEffect(() => {
         mounted.current = true;
-        void refresh();
-        const timer = window.setInterval(() => void refresh(), pollInterval);
+        void refreshRuns();
+        const timer = window.setInterval(() => void refreshRuns(), pollInterval);
         return () => {
             mounted.current = false;
             window.clearInterval(timer);
             listRequest.current?.abort();
             detailRequest.current?.abort();
         };
-    }, [pollInterval, refresh]);
+    }, [pollInterval, refreshRuns]);
 
     return {
         runs,

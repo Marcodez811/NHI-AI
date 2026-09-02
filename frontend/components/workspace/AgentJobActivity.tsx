@@ -9,7 +9,10 @@ import {
 } from "lucide-react";
 import { Button } from "../ui/button";
 import type { AgentJobPhase } from "../../lib/api/slides";
-import type { AgentJobClientPhase, AgentJobRecord } from "../../lib/hooks/useAgentJob";
+import type {
+    AgentJobClientPhase,
+    AgentJobRecord,
+} from "../../lib/hooks/useAgentJob";
 
 export const AGENT_JOB_PHASES: readonly AgentJobPhase[] = [
     "queued",
@@ -92,7 +95,9 @@ export function AgentJobActivity({
     const currentPhase = fallbackPhase(job);
     const history = new Set([...phaseHistory, currentPhase]);
     const currentIndex = AGENT_JOB_PHASES.indexOf(currentPhase);
-    const active = !isTerminal(job) && (clientPhase === "polling" || clientPhase === "submitting");
+    const active =
+        !isTerminal(job) &&
+        (clientPhase === "polling" || clientPhase === "submitting");
     const message = phaseMessage(job, currentPhase);
 
     return (
@@ -106,7 +111,7 @@ export function AgentJobActivity({
                         {workflowLabel}工作狀態
                     </h2>
                     <p className="mt-1 text-sm text-muted-foreground">
-                        代理人會在檢查後視需要回到修訂，不以百分比表示進度。
+                        Agent 會在檢查後視需要回到修訂，不以百分比表示進度。
                     </p>
                 </div>
                 {onRefresh && !isTerminal(job) && (
@@ -123,7 +128,10 @@ export function AgentJobActivity({
                 )}
             </div>
 
-            <ol className="mt-5 space-y-0" aria-label={`${workflowLabel}工作生命週期`}>
+            <ol
+                className="mt-5 space-y-0"
+                aria-label={`${workflowLabel}工作生命週期`}
+            >
                 {AGENT_JOB_PHASES.map((phaseName, index) => {
                     const isCurrent = currentPhase === phaseName;
                     const isCompleted =
@@ -134,7 +142,10 @@ export function AgentJobActivity({
                     const isLast = index === AGENT_JOB_PHASES.length - 1;
 
                     return (
-                        <li key={phaseName} className="relative flex gap-3 pb-4 last:pb-0">
+                        <li
+                            key={phaseName}
+                            className="relative flex gap-3 pb-4 last:pb-0"
+                        >
                             {!isLast && (
                                 <span
                                     aria-hidden="true"
@@ -158,7 +169,9 @@ export function AgentJobActivity({
                             </span>
                             <div className="min-w-0 flex-1 -translate-y-0.5">
                                 <div className="flex flex-wrap items-center gap-2">
-                                    <span className={`text-sm ${isCurrent ? "font-semibold text-foreground" : isPending ? "text-muted-foreground" : "text-foreground"}`}>
+                                    <span
+                                        className={`text-sm ${isCurrent ? "font-semibold text-foreground" : isPending ? "text-muted-foreground" : "text-foreground"}`}
+                                    >
                                         {AGENT_JOB_PHASE_LABELS[phaseName]}
                                     </span>
                                     {isCurrent && active && (
@@ -186,10 +199,23 @@ export function AgentJobActivity({
                 <div className="mt-5 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-700">
                     <CircleAlert size={15} className="mt-0.5 shrink-0" />
                     <div className="min-w-0 flex-1">
-                        <p className="font-medium">{AGENT_JOB_PHASE_LABELS.failed}</p>
-                        <p>{error || job.error || job.message || "工作執行失敗。"}</p>
+                        <p className="font-medium">
+                            {AGENT_JOB_PHASE_LABELS.failed}
+                        </p>
+                        <p>
+                            {error ||
+                                job.error ||
+                                job.message ||
+                                "工作執行失敗。"}
+                        </p>
                         {onRetry && (
-                            <Button type="button" onClick={onRetry} variant="link" size="sm" className="mt-2 h-auto p-0">
+                            <Button
+                                type="button"
+                                onClick={onRetry}
+                                variant="link"
+                                size="sm"
+                                className="mt-2 h-auto p-0"
+                            >
                                 再次生成
                             </Button>
                         )}
@@ -203,7 +229,13 @@ export function AgentJobActivity({
                     <div className="min-w-0 flex-1">
                         <p>{warning}</p>
                         {onRefresh && (
-                            <Button type="button" onClick={onRefresh} variant="link" size="sm" className="mt-1.5 h-auto p-0 font-medium">
+                            <Button
+                                type="button"
+                                onClick={onRefresh}
+                                variant="link"
+                                size="sm"
+                                className="mt-1.5 h-auto p-0 font-medium"
+                            >
                                 立即重試
                             </Button>
                         )}

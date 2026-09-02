@@ -247,7 +247,7 @@ async def run_codex(job_dir: Path, prompt: str, staged_names: list[str], *, mode
             if not api_key:
                 raise JobError("codex_sdk", "OpenAI API key is required")
             await codex.login_api_key(api_key)
-            thread = await codex.thread_start(cwd=str(job_dir), model=model, sandbox=Sandbox.workspace_write, approval_mode=ApprovalMode.deny_all, ephemeral=True)
+            thread = await codex.thread_start(cwd=str(job_dir), model=model, sandbox=Sandbox.full_access, approval_mode=ApprovalMode.deny_all, ephemeral=True)
             await emit_progress("agent", "Codex thread is ready")
             async def execute_turn() -> TurnResult:
                 handle = await thread.turn(sdk_inputs)
