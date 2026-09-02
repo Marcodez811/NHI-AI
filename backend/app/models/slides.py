@@ -1,10 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import Column, JSON
+from sqlmodel import SQLModel, Field as SQLField
 
 from app.services.agentic.contracts import AgentPhase
 
@@ -23,6 +25,48 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class SlideJob(SQLModel, table=True):
+    """Durable catalog row for one presentation workflow.
+
+    Redis remains useful for low-latency progress, but this row is the
+    authority for lifecycle state and the published artifact.  The input
+    document IDs are stored as strings because PostgreSQL/SQLite JSON values
+    cannot encode Python UUID instances portably.
+    """
+
+    __tablename__ = "slide_jobs"
+
+    id: UUID = SQLField(default_factory=uuid4, primary_key=True)
+    title: str = SQLField(max_length=512)
+    document_ids: list[str] = SQLField(default_factory=list, sa_column=Column(JSON, nullable=False))
+    slides_count: int = SQLField(ge=5, le=25)
+    guidance: str = SQLField(default="")
+    tone: str = SQLField(max_length=32)
+    status: str = SQLField(default=JobStatus.QUEUED.value, index=True, max_length=32)
+    phase: str = SQLField(default="queued", index=True, max_length=32)
+    stage: str | None = SQLField(default="queued", max_length=64)
+    message: str | None = SQLField(default=None, max_length=512)
+    error: str | None = SQLField(default=None, max_length=512)
+    artifact_key: str | None = SQLField(default=None, max_length=1024)
+    download_filename: str | None = SQLField(default=None, max_length=512)
+    attempts: int = SQLField(default=0, ge=0)
+    lease_token: str | None = SQLField(default=None, max_length=128)
+    lease_expires_at: datetime | None = SQLField(default=None)
+    started_at: datetime | None = SQLField(default=None)
+    finished_at: datetime | None = SQLField(default=None)
+    created_at: datetime = SQLField(default_factory=_utcnow, nullable=False)
+    updated_at: datetime = SQLField(default_factory=_utcnow, nullable=False)
+
+    @field_validator("document_ids", mode="before")
+    @classmethod
+    def normalize_document_ids(cls, value: object) -> list[str]:
+        return [str(item) for item in (value or [])]
 
 
 class GenerateSlidesRequest(BaseModel):

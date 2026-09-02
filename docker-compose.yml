@@ -113,6 +113,27 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  scheduler:
+    image: nhi-ai-backend:local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: ./backend/.env
+    command: ["uv", "run", "--no-sync", "python", "-m", "app.worker", "scheduler"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
+      DOCUMENTS_ROOT: /data/documents
+      DOCUMENT_CLEANUP_RECONCILE_INTERVAL_SECONDS: ${DOCUMENT_CLEANUP_RECONCILE_INTERVAL_SECONDS:-900}
+    volumes:
+      - slides-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   frontend:
     image: nhi-ai-frontend:local
     build:

@@ -55,6 +55,33 @@ class Settings(BaseSettings):
     documents_queue_name: str = "documents"
     tasks_queue_name: str = "tasks"
     max_upload_bytes: int = 250 * 1024 * 1024
+    # Promoted-resource cleanup is deliberately conservative: retries are
+    # delayed exponentially and reconciliation provides a second recovery
+    # path when Redis or a worker is unavailable during promotion.
+    document_cleanup_lease_seconds: int = Field(default=300, gt=0)
+    document_cleanup_retry_base_seconds: float = Field(default=60.0, gt=0)
+    document_cleanup_retry_max_seconds: float = Field(default=3600.0, gt=0)
+    document_cleanup_reconcile_interval_seconds: int = Field(default=900, gt=0)
+    document_cleanup_reconcile_batch_size: int = Field(default=100, gt=0)
+    taskiq_schedule_prefix: str = "nhi-ai"
+
+    # Short aliases used by operator configuration and older deployment
+    # manifests.  The canonical names above remain the serialized settings.
+    @property
+    def cleanup_lease_seconds(self) -> int:
+        return self.document_cleanup_lease_seconds
+
+    @property
+    def cleanup_retry_base_seconds(self) -> float:
+        return self.document_cleanup_retry_base_seconds
+
+    @property
+    def cleanup_retry_max_seconds(self) -> float:
+        return self.document_cleanup_retry_max_seconds
+
+    @property
+    def cleanup_reconcile_interval_seconds(self) -> int:
+        return self.document_cleanup_reconcile_interval_seconds
 
     # env variables storage
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)

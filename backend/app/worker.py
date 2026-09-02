@@ -13,7 +13,7 @@ from typing import Literal, Sequence
 
 from app.config import settings
 
-WorkerKind = Literal["documents", "tasks"]
+WorkerKind = Literal["documents", "tasks", "scheduler"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,11 +42,21 @@ def worker_spec(kind: WorkerKind) -> WorkerSpec:
             processes=settings.tasks_worker_processes,
             max_async_tasks=settings.tasks_worker_max_async_tasks,
         )
+    if kind == "scheduler":
+        return WorkerSpec(
+            kind=kind,
+            broker="app.scheduler:scheduler",
+            modules=("app.tasks.documents",),
+            processes=1,
+            max_async_tasks=1,
+        )
     raise ValueError(f"unknown worker kind: {kind!r}")
 
 
 def taskiq_argv(kind: WorkerKind) -> list[str]:
     spec = worker_spec(kind)
+    if kind == "scheduler":
+        return ["taskiq", "scheduler", spec.broker, *spec.modules]
     return [
         "taskiq",
         "worker",
@@ -61,8 +71,8 @@ def taskiq_argv(kind: WorkerKind) -> list[str]:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != 1 or args[0] not in ("documents", "tasks"):
-        raise SystemExit("usage: python -m app.worker {documents|tasks}")
+    if len(args) != 1 or args[0] not in ("documents", "tasks", "scheduler"):
+        raise SystemExit("usage: python -m app.worker {documents|tasks|scheduler}")
     # Reuse Taskiq's own CLI parser and lifecycle.  This launcher only owns
     # selecting the typed workload settings above.
     sys.argv[:] = taskiq_argv(args[0])

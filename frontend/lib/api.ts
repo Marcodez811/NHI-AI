@@ -175,7 +175,6 @@ export interface ChatRequest {
     question: string;
     mode: Category;
     document_ids?: string[];
-    vector_store_id?: string;
     max_num_results?: number;
     include_search_results?: boolean;
 }

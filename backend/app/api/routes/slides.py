@@ -27,11 +27,20 @@ from app.models.slides import (
 )
 from app.services.agentic import AgentPhase, AgentTaskPayload
 from app.services.documents.repository import DocumentRepository
+from app.services.slides.repository import InMemorySlideJobRepository, SlideJobRepository
 from app.models.documents import DocumentStatus
 from app.api.routes.documents import get_document_repository
 from app.tasks.agents import run as agents_run
 
 router = APIRouter(prefix="/slides", tags=["slides"])
+
+_slide_repository = InMemorySlideJobRepository()
+
+
+def get_slide_job_repository() -> SlideJobRepository:
+    """Default dependency for direct use; production overrides this in main."""
+
+    return _slide_repository
 
 _PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 _SAFE_STAGE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -289,10 +298,29 @@ async def create_slides_job(
     backend: Annotated[Any, Depends(get_result_backend)],
     task: Annotated[Any, Depends(get_generate_slides_task)],
     repository: Annotated[DocumentRepository, Depends(get_document_repository)] = None,
+    slide_repository: Annotated[SlideJobRepository, Depends(get_slide_job_repository)] = None,
 ) -> CreateSlidesJobResponse:
     await _validate_slide_documents(request.document_ids, repository)
     job_id = uuid4()
     queued_at = datetime.now(timezone.utc)
+    if slide_repository is not None:
+        from app.models.slides import SlideJob
+        durable_job = SlideJob(
+            id=job_id,
+            title=request.title,
+            document_ids=[str(value) for value in request.document_ids],
+            slides_count=request.slides_count,
+            guidance=request.guidance,
+            tone=request.tone,
+            status=JobStatus.QUEUED.value,
+            phase=AgentPhase.QUEUED.value,
+            stage="queued",
+            message="Presentation job is queued.",
+        )
+        try:
+            await slide_repository.create(durable_job)
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Slide jobs are temporarily unavailable.") from exc
     try:
         await _write_progress(
             backend,
@@ -302,17 +330,27 @@ async def create_slides_job(
             message="Presentation job is queued.",
             started_at=queued_at,
         )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Slide jobs are temporarily unavailable.",
-        ) from exc
+    except Exception:
+        # PostgreSQL records job existence and state. Redis progress is only a
+        # low-latency overlay, so its failure must not discard a durable job.
+        pass
 
     payload = SlidesTaskPayload(job_id=job_id, **request.model_dump())
     agent_payload = AgentTaskPayload(job_id=job_id, workflow="slides", input=payload.model_dump(mode="json"))
     try:
         await task.kicker().with_task_id(str(job_id)).kiq(agent_payload)
     except Exception as exc:
+        if slide_repository is not None:
+            try:
+                await slide_repository.mark_terminal(
+                    job_id,
+                    status=JobStatus.FAILED.value,
+                    phase=AgentPhase.FAILED.value,
+                    error="Slide jobs are temporarily unavailable.",
+                    finished_at=datetime.now(timezone.utc),
+                )
+            except Exception:
+                pass
         try:
             await _write_progress(
                 backend,
@@ -336,7 +374,44 @@ async def create_slides_job(
 async def get_slides_job(
     job_id: UUID,
     backend: Annotated[Any, Depends(get_result_backend)],
+    slide_repository: Annotated[SlideJobRepository, Depends(get_slide_job_repository)] = None,
 ) -> SlidesJobStatusResponse:
+    if slide_repository is not None:
+        durable = await slide_repository.get(job_id)
+        if durable is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Slide job was not found.")
+        # Redis is an advisory low-latency overlay for active jobs only.  A
+        # terminal database row can never be replaced by stale Redis data.
+        if durable.status not in {JobStatus.COMPLETED.value, JobStatus.FAILED.value}:
+            try:
+                progress = await _read_progress(backend, job_id)
+            except HTTPException:
+                # Database state is still sufficient for a status response;
+                # Redis is explicitly advisory and may be unavailable.
+                progress = None
+            if progress is not None:
+                overlay = _progress_response(job_id, progress)
+                # A Redis terminal value can be stale (for example after a
+                # lease handoff), so only active status/phase fields may
+                # overlay the durable row.
+                if overlay.status in {JobStatus.QUEUED, JobStatus.RUNNING} and overlay.phase not in {AgentPhase.COMPLETED, AgentPhase.FAILED}:
+                    return overlay.model_copy(update={
+                        "status": JobStatus(durable.status),
+                        "job_id": durable.id,
+                        "error": None,
+                        "download_url": None,
+                    })
+        return SlidesJobStatusResponse(
+            job_id=durable.id,
+            status=JobStatus(durable.status),
+            phase=_safe_phase(durable.phase, status=JobStatus(durable.status), stage=durable.stage),
+            stage=durable.stage,
+            message=durable.message,
+            started_at=durable.started_at,
+            finished_at=durable.finished_at,
+            error=durable.error,
+            download_url=f"/api/v1/slides/jobs/{durable.id}/download" if durable.status == JobStatus.COMPLETED.value else None,
+        )
     result, progress = await _lookup_job(backend, job_id)
     return _terminal_response(result) if result is not None else _progress_response(job_id, progress)
 
@@ -345,8 +420,25 @@ async def get_slides_job(
 async def download_slides_job(
     job_id: UUID,
     backend: Annotated[Any, Depends(get_result_backend)],
+    slide_repository: Annotated[SlideJobRepository, Depends(get_slide_job_repository)] = None,
 ) -> FileResponse:
-    result, _ = await _lookup_job(backend, job_id)
+    if slide_repository is not None:
+        durable = await slide_repository.get(job_id)
+        if durable is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Slide job was not found.")
+        if durable.status != JobStatus.COMPLETED.value:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Presentation is not ready for download.")
+        result = SlidesTaskResult(
+            job_id=durable.id,
+            status=JobStatus.COMPLETED,
+            phase=AgentPhase.COMPLETED,
+            artifact_key=durable.artifact_key,
+            download_filename=durable.download_filename,
+            started_at=durable.started_at,
+            finished_at=durable.finished_at,
+        )
+    else:
+        result, _ = await _lookup_job(backend, job_id)
     if result is None or result.status is not JobStatus.COMPLETED:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

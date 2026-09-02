@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.models.documents import (
@@ -114,6 +115,37 @@ def _validate_document(document: Document) -> None:
         raise ValueError("News documents are not supported.")
 
 
+_DUPLICATE_EXCLUDED_STATUSES = frozenset(
+    {DocumentStatus.DELETING.value, DocumentStatus.DELETE_FAILED.value}
+)
+
+
+def _is_active_document(document: Document) -> bool:
+    """Return whether a document participates in content uniqueness."""
+
+    return document.status not in _DUPLICATE_EXCLUDED_STATUSES
+
+
+def _integrity_error_is_document_duplicate(exc: IntegrityError) -> bool:
+    """Recognize the document identity index across SQLite/PostgreSQL.
+
+    PostgreSQL reports the index/constraint name while SQLite generally reports
+    the participating table and columns.  Keep this deliberately narrow so a
+    foreign-key or malformed-row error is never presented as a duplicate.
+    """
+
+    detail = str(exc).lower()
+    return (
+        "uq_documents_checksum_category" in detail
+        or (
+            "documents" in detail
+            and "checksum" in detail
+            and "category" in detail
+            and ("unique" in detail or "duplicate" in detail)
+        )
+    )
+
+
 class InMemoryDocumentRepository:
     """Small async repository used by the default API dependency and tests."""
 
@@ -152,13 +184,13 @@ class InMemoryDocumentRepository:
         _validate_document(document)
         if any(
             item.checksum == document.checksum and item.category == document.category
-            and item.status != DocumentStatus.DELETING.value
+            and _is_active_document(item)
             for item in self.documents.values()
         ):
             existing = next(
                 item for item in self.documents.values()
                 if item.checksum == document.checksum and item.category == document.category
-                and item.status != DocumentStatus.DELETING.value
+                and _is_active_document(item)
             )
             raise DuplicateDocumentError(existing.id)
         if document.folder_id is not None and document.folder_id not in self.folders:
@@ -202,7 +234,7 @@ class InMemoryDocumentRepository:
             (item for item in self.documents.values()
              if item.id != document.id and item.checksum == document.checksum
              and item.category == document.category
-             and item.status != DocumentStatus.DELETING.value),
+             and _is_active_document(item)),
             None,
         )
         if duplicate:
@@ -225,7 +257,7 @@ class InMemoryDocumentRepository:
             (item for item in self.documents.values()
              if item.id != document.id and item.checksum == document.checksum
              and item.category == target_category
-             and item.status != DocumentStatus.DELETING.value),
+             and _is_active_document(item)),
             None,
         )
         if duplicate:
@@ -337,6 +369,35 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
         super().__init__()
         self.session = session
 
+    def _translate_document_integrity_error(
+        self,
+        exc: IntegrityError,
+        *,
+        checksum: str,
+        category: str,
+    ) -> None:
+        """Translate a unique-index race after resetting the failed session.
+
+        A failed SQLAlchemy transaction must be rolled back before the lookup;
+        otherwise even the diagnostic query raises ``PendingRollbackError``.
+        If the error is unrelated to document identity, or the competing row
+        is already in an excluded deletion state, preserve the original error.
+        """
+
+        self.session.rollback()
+        if not _integrity_error_is_document_duplicate(exc):
+            raise exc
+        existing = self.session.exec(
+            select(Document).where(
+                Document.checksum == checksum,
+                Document.category == category,
+                Document.status.notin_(_DUPLICATE_EXCLUDED_STATUSES),
+            )
+        ).first()
+        if existing is not None:
+            raise DuplicateDocumentError(existing.id) from exc
+        raise exc
+
     async def create_folder(self, folder: Folder) -> Folder:
         existing = self.session.exec(select(Folder).where(Folder.name == folder.name)).first()
         if existing:
@@ -375,12 +436,17 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
         existing = self.session.exec(
             select(Document).where(Document.checksum == document.checksum, Document.category == document.category)
         ).first()
-        if existing and existing.status != DocumentStatus.DELETING.value:
+        if existing and _is_active_document(existing):
             raise DuplicateDocumentError(existing.id)
         if document.folder_id is not None and not self.session.get(Folder, document.folder_id):
             raise FolderNotFoundError(str(document.folder_id))
         self.session.add(document)
-        self.session.commit()
+        try:
+            self.session.commit()
+        except IntegrityError as exc:
+            self._translate_document_integrity_error(
+                exc, checksum=document.checksum, category=document.category
+            )
         self.session.refresh(document)
         return document
 
@@ -389,7 +455,7 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
         existing = self.session.exec(
             select(Document).where(Document.checksum == document.checksum, Document.category == document.category)
         ).first()
-        if existing and existing.status != DocumentStatus.DELETING.value:
+        if existing and _is_active_document(existing):
             raise DuplicateDocumentError(existing.id)
         if document.folder_id is not None and not self.session.get(Folder, document.folder_id):
             raise FolderNotFoundError(str(document.folder_id))
@@ -397,7 +463,12 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
             raise DocumentStateConflictError("Ingestion job does not belong to document.")
         self.session.add(document)
         self.session.add(job)
-        self.session.commit()
+        try:
+            self.session.commit()
+        except IntegrityError as exc:
+            self._translate_document_integrity_error(
+                exc, checksum=document.checksum, category=document.category
+            )
         self.session.refresh(document)
         self.session.refresh(job)
         return job
@@ -428,7 +499,7 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
                 Document.id != document.id,
                 Document.checksum == document.checksum,
                 Document.category == document.category,
-                Document.status != DocumentStatus.DELETING.value,
+                Document.status.notin_(_DUPLICATE_EXCLUDED_STATUSES),
             )
         ).first()
         if duplicate:
@@ -437,7 +508,12 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
             raise FolderNotFoundError(str(document.folder_id))
         document.updated_at = _now()
         self.session.add(document)
-        self.session.commit()
+        try:
+            self.session.commit()
+        except IntegrityError as exc:
+            self._translate_document_integrity_error(
+                exc, checksum=document.checksum, category=document.category
+            )
         self.session.refresh(document)
         return document
 
@@ -455,7 +531,7 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
                 Document.id != document.id,
                 Document.checksum == document.checksum,
                 Document.category == target_category,
-                Document.status != DocumentStatus.DELETING.value,
+                Document.status.notin_(_DUPLICATE_EXCLUDED_STATUSES),
             )
         ).first()
         if duplicate:
@@ -473,7 +549,12 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
         )
         self.session.add(document)
         self.session.add(job)
-        self.session.commit()
+        try:
+            self.session.commit()
+        except IntegrityError as exc:
+            self._translate_document_integrity_error(
+                exc, checksum=document.checksum, category=target_category
+            )
         self.session.refresh(document)
         self.session.refresh(job)
         return document, job

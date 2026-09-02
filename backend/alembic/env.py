@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # Import all table models so SQLModel.metadata is fully populated.
 import app.models.documents  # noqa: F401
 import app.models.retrieval  # noqa: F401
+import app.models.slides  # noqa: F401
 
 from app.config import settings
 

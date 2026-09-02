@@ -45,6 +45,18 @@ def test_worker_launcher_uses_typed_workload_contract():
         worker_spec("other")  # type: ignore[arg-type]
 
 
+def test_worker_launcher_supports_dedicated_scheduler_process():
+    scheduler = worker_spec("scheduler")
+    assert scheduler.broker == "app.scheduler:scheduler"
+    assert scheduler.modules == ("app.tasks.documents",)
+    assert taskiq_argv("scheduler") == [
+        "taskiq",
+        "scheduler",
+        "app.scheduler:scheduler",
+        "app.tasks.documents",
+    ]
+
+
 def test_new_settings_names_take_precedence_over_deprecated_aliases(monkeypatch):
     monkeypatch.setenv("REDIS_URL", "redis://localhost")
     monkeypatch.setenv("OPENAI_API_KEY", "test")

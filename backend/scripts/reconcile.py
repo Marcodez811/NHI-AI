@@ -55,12 +55,17 @@ def _local_references(session: Session) -> tuple[set[str], set[str]]:
         if document.remote_file_id:
             file_ids.add(str(document.remote_file_id))
     for job in session.exec(select(IngestionJob)).all():
-        value = getattr(job, "candidate_remote_vector_store_file_id", None)
-        if value:
-            attachment_ids.add(str(value))
-        value = getattr(job, "candidate_remote_file_id", None)
-        if value:
-            file_ids.add(str(value))
+        for name in (
+            "candidate_remote_vector_store_file_id",
+            "cleanup_remote_vector_store_file_id",
+        ):
+            value = getattr(job, name, None)
+            if value:
+                attachment_ids.add(str(value))
+        for name in ("candidate_remote_file_id", "cleanup_remote_file_id"):
+            value = getattr(job, name, None)
+            if value:
+                file_ids.add(str(value))
     return attachment_ids, file_ids
 
 

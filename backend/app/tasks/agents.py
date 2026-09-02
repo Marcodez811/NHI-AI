@@ -10,6 +10,8 @@ import socket
 from typing import Any
 
 import redis.asyncio as redis
+from sqlmodel import Session
+from loguru import logger
 
 from taskiq.depends.progress_tracker import TaskProgress
 
@@ -20,6 +22,9 @@ from app.services.agentic.service import execute_workflow
 from app.services.agentic.runner import CodexRunner, safe_error
 from app.services.agentic.events import AgentEventType, AgentTelemetryStore
 from app.services.slides.adapter import slides_adapter  # noqa: F401 - registers the built-in workflow
+from app.db import engine
+from app.models.slides import JobStatus, SlidesTaskResult
+from app.services.slides.repository import SQLModelSlideJobRepository, job_request
 
 _SAFE_STAGE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -81,6 +86,66 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
             await _set_progress("unknown", status=WorkflowStatus.FAILED, stage="failed", phase=AgentPhase.FAILED, message="Agent workflow failed.", started_at=started, finished_at=result.finished_at)
             return result
     job_id = str(payload.job_id)
+    slide_db_session: Session | None = None
+    slide_repository: SQLModelSlideJobRepository | None = None
+    slide_lease_token: str | None = None
+    if payload.workflow == "slides":
+        # Claiming is fenced in the database before any workspace/provider
+        # side effects.  This makes duplicate TaskIQ deliveries harmless.
+        try:
+            from uuid import UUID, uuid4
+            slide_db_session = Session(engine)
+            slide_repository = SQLModelSlideJobRepository(slide_db_session)
+            slide_lease_token = uuid4().hex
+            durable_job, claimed = await slide_repository.claim(
+                UUID(job_id),
+                lease_token=slide_lease_token,
+                # A slide run can legitimately outlive the generic five-minute
+                # lease; keep a duplicate stream delivery from purchasing a
+                # second workflow while the original worker is still active.
+                lease_seconds=max(300, settings.agent_timeout_minutes * 60 + 60),
+            )
+            if durable_job is None:
+                slide_db_session.close()
+                return AgentTaskResult(job_id=payload.job_id, workflow=payload.workflow, status=WorkflowStatus.FAILED, phase=AgentPhase.FAILED, started_at=started, finished_at=_now(), error="Presentation job was not found.")
+            if not claimed:
+                slide_db_session.close()
+                if durable_job.status in {JobStatus.COMPLETED.value, JobStatus.FAILED.value}:
+                    terminal = AgentTaskResult(
+                        job_id=payload.job_id,
+                        workflow=payload.workflow,
+                        status=WorkflowStatus(durable_job.status),
+                        phase=AgentPhase(durable_job.phase),
+                        started_at=durable_job.started_at or started,
+                        finished_at=durable_job.finished_at or _now(),
+                        error=durable_job.error,
+                        output=SlidesTaskResult(
+                            job_id=durable_job.id,
+                            status=JobStatus(durable_job.status),
+                            phase=AgentPhase(durable_job.phase),
+                            artifact_key=durable_job.artifact_key,
+                            download_filename=durable_job.download_filename,
+                            started_at=durable_job.started_at,
+                            finished_at=durable_job.finished_at,
+                            error=durable_job.error,
+                        ).model_dump(mode="json") if durable_job.status == JobStatus.COMPLETED.value else None,
+                    )
+                    return terminal
+                return AgentTaskResult(job_id=payload.job_id, workflow=payload.workflow, status=WorkflowStatus.RUNNING, phase=AgentPhase(durable_job.phase), started_at=durable_job.started_at or started, finished_at=_now())
+            payload = payload.model_copy(update={"input": job_request(durable_job)})
+        except Exception:
+            if slide_db_session is not None:
+                slide_db_session.close()
+            logger.exception("Unable to claim durable slide job", job_id=job_id)
+            return AgentTaskResult(
+                job_id=payload.job_id,
+                workflow=payload.workflow,
+                status=WorkflowStatus.FAILED,
+                phase=AgentPhase.FAILED,
+                started_at=started,
+                finished_at=_now(),
+                error="Presentation job could not be started.",
+            )
     await _emit_telemetry(
         job_id,
         AgentEventType.RUN_STARTED,
@@ -90,9 +155,42 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
         message="Preparing agent workflow.",
     )
     await _set_progress(job_id, status=WorkflowStatus.RUNNING, stage="preparing", phase=AgentPhase.PREPARING, message="Preparing agent workflow.", started_at=started)
+    if slide_repository is not None:
+        try:
+            persisted = await slide_repository.update_progress(
+                payload.job_id,
+                phase=AgentPhase.PREPARING.value,
+                stage="preparing",
+                message="Preparing agent workflow.",
+                lease_token=slide_lease_token,
+            )
+            if persisted is None:
+                raise RuntimeError("slide job lease is no longer owned")
+        except Exception:
+            logger.exception("Unable to persist durable slide job phase", job_id=job_id)
+            if slide_db_session is not None:
+                slide_db_session.close()
+            return AgentTaskResult(
+                job_id=payload.job_id,
+                workflow=payload.workflow,
+                status=WorkflowStatus.FAILED,
+                phase=AgentPhase.FAILED,
+                output=None,
+                started_at=started,
+                finished_at=_now(),
+                error="Presentation job could not be updated.",
+            )
 
     async def progress(event: dict[str, Any]) -> None:
         await _set_progress(job_id, status=WorkflowStatus.RUNNING, stage=str(event.get("stage", "working")), phase=event.get("phase"), message=str(event.get("message", "Agent workflow is in progress.")), started_at=started)
+        if slide_repository is not None:
+            try:
+                persisted = await slide_repository.update_progress(job_id, phase=str(getattr(event.get("phase"), "value", event.get("phase") or AgentPhase.PREPARING.value)), stage=str(event.get("stage", "working")), message=str(event.get("message", "Agent workflow is in progress.")), lease_token=slide_lease_token)
+                if persisted is None:
+                    raise RuntimeError("slide job lease is no longer owned")
+            except Exception:
+                logger.exception("Unable to persist durable slide job phase", job_id=job_id)
+                raise
         await _emit_telemetry(
             job_id,
             AgentEventType.HEARTBEAT if event.get("heartbeat") else AgentEventType.PHASE_CHANGED,
@@ -126,6 +224,35 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
     runner = CodexRunner(model=settings.openai_model, api_key=settings.openai_api_key, timeout_seconds=float(getattr(settings, "agent_timeout_minutes", 45)) * 60)
     result = await execute_workflow(payload, registry=workflow_registry, runner=runner, workspace_root=Path(getattr(settings, "agent_jobs_root", "/tmp/agentic/jobs")), skills_root=Path(__file__).resolve().parents[2] / ".agents" / "skills", progress_callback=progress, event_callback=telemetry_event, timeout_seconds=runner.timeout_seconds)
     terminal_phase = result.phase or (AgentPhase.COMPLETED if result.status == WorkflowStatus.COMPLETED else AgentPhase.FAILED)
+    if slide_repository is not None:
+        try:
+            output = result.output
+            output_data = output if isinstance(output, dict) else (output.model_dump(mode="json") if hasattr(output, "model_dump") else {})
+            persisted = await slide_repository.mark_terminal(
+                payload.job_id,
+                status=JobStatus(result.status.value).value,
+                phase=terminal_phase.value,
+                error=result.error,
+                artifact_key=output_data.get("artifact_key"),
+                download_filename=output_data.get("download_filename"),
+                finished_at=result.finished_at,
+                lease_token=slide_lease_token,
+            )
+            if persisted is None:
+                raise RuntimeError("slide job lease is no longer owned")
+        except Exception:
+            logger.exception("Unable to persist durable slide job terminal state", job_id=job_id)
+            result = AgentTaskResult(
+                job_id=result.job_id,
+                workflow=result.workflow,
+                status=WorkflowStatus.FAILED,
+                phase=AgentPhase.FAILED,
+                output=None,
+                started_at=result.started_at,
+                finished_at=result.finished_at,
+                error="Presentation result could not be persisted.",
+            )
+            terminal_phase = AgentPhase.FAILED
     await _set_progress(job_id, status=result.status, stage=terminal_phase.value, phase=terminal_phase, message="Agent workflow completed." if result.status == WorkflowStatus.COMPLETED else "Agent workflow failed.", started_at=result.started_at, finished_at=result.finished_at)
     await _emit_telemetry(
         job_id,
@@ -136,6 +263,8 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
         message="Agent workflow completed." if result.status == WorkflowStatus.COMPLETED else "Agent workflow failed.",
         duration_ms=round((result.finished_at - result.started_at).total_seconds() * 1000),
     )
+    if slide_db_session is not None:
+        slide_db_session.close()
     return result
 
 

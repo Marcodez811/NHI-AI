@@ -23,6 +23,7 @@ from app.db import engine, init_db  # compatibility export for older worker test
 from app.models.documents import (
     Document,
     DocumentCategory,
+    DocumentCleanupTaskPayload,
     DocumentDeleteTaskPayload,
     DocumentStatus,
     DocumentTaskPayload,
@@ -34,6 +35,14 @@ from app.models.retrieval import RetrievalIndexState
 from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize database datetimes (SQLite commonly returns them naive)."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class DocumentIngestionService(Protocol):
@@ -196,6 +205,14 @@ class _Claim:
     stale: bool = False
 
 
+@dataclass
+class _CleanupClaim:
+    lease_token: str
+    remote_file_id: str | None
+    remote_vector_store_file_id: str | None
+    remote_vector_store_id: str | None
+
+
 def _claim_job(payload: DocumentTaskPayload, *, lease_token: str, lease_seconds: int = 300) -> _Claim:
     """Atomically claim a revision and snapshot all state needed by a worker."""
 
@@ -213,7 +230,7 @@ def _claim_job(payload: DocumentTaskPayload, *, lease_token: str, lease_seconds:
             return _Claim(None, "", "", None, job.candidate_remote_file_id, job.candidate_remote_vector_store_file_id, job.candidate_remote_vector_store_id, stale=True)
         if job.phase == "ready":
             return _Claim(None, "", job.target_category or document.category, document.remote_vector_store_id, None, None, None)
-        if job.lease_expires_at and job.lease_expires_at > now and job.lease_token != lease_token:
+        if job.lease_expires_at and _as_utc(job.lease_expires_at) > now and job.lease_token != lease_token:
             return _Claim(None, "", job.target_category or document.category, document.remote_vector_store_id, None, None, None)
         cleanup_only = job.phase == "cleanup_pending"
         job.lease_token = lease_token
@@ -229,14 +246,19 @@ def _claim_job(payload: DocumentTaskPayload, *, lease_token: str, lease_seconds:
         session.add(job)
         session.commit()
         source = None if cleanup_only else LocalDocumentStorage(settings.documents_root).resolve(document.id)
+        # For cleanup-only legacy deliveries expose the old active IDs, not
+        # candidate IDs (which were cleared during promotion).
+        cleanup_file_id = job.cleanup_remote_file_id if cleanup_only else job.candidate_remote_file_id
+        cleanup_vs_file_id = job.cleanup_remote_vector_store_file_id if cleanup_only else job.candidate_remote_vector_store_file_id
+        cleanup_store_id = job.cleanup_remote_vector_store_id if cleanup_only else job.candidate_remote_vector_store_id
         return _Claim(
             source,
             document.original_filename,
             job.target_category or payload.category.value,
             document.remote_vector_store_id,
-            job.candidate_remote_file_id,
-            job.candidate_remote_vector_store_file_id,
-            job.candidate_remote_vector_store_id,
+            cleanup_file_id,
+            cleanup_vs_file_id,
+            cleanup_store_id,
             cleanup_only=cleanup_only,
         )
 
@@ -361,12 +383,18 @@ class OpenAIDocumentIngestionService:
                 vector_store_id=claim.candidate_store_id or _runtime_vector_store_id(),
             )
             return
-        # A cleanup-only redelivery never creates a second candidate.
+        # A legacy redelivery may observe cleanup_pending.  Cleanup now has
+        # its own task/lease; leave this ingestion delivery successful and let
+        # reconciliation recover it if the cleanup publication was lost.
         if claim.cleanup_only:
-            await self._cleanup_promoted_resources(
-                payload,
-                client,
-                claim.candidate_store_id or _runtime_vector_store_id(),
+            await _enqueue_cleanup_task(
+                DocumentCleanupTaskPayload(
+                    document_id=payload.document_id,
+                    ingestion_job_id=payload.ingestion_job_id,
+                    remote_file_id=claim.candidate_file_id,
+                    remote_vector_store_file_id=claim.candidate_vs_file_id,
+                    remote_vector_store_id=claim.candidate_store_id,
+                )
             )
             return
         if claim.source is None:
@@ -442,57 +470,276 @@ class OpenAIDocumentIngestionService:
             if not promoted:
                 await _cleanup_candidate_resources(client, candidate_remote_file_id=cand_file_id, candidate_remote_vector_store_file_id=cand_vs_file_id, vector_store_id=candidate_store_id)
                 return
-            await self._cleanup_promoted_resources(payload, client, vector_store_id)
+            # Promotion is the durable commit point.  Old resources are
+            # cleaned by a separate idempotent task so a provider outage can
+            # never turn the newly promoted document back into FAILED.
+            old_payload = DocumentCleanupTaskPayload(
+                document_id=payload.document_id,
+                ingestion_job_id=payload.ingestion_job_id,
+                remote_file_id=_old.get("file_id"),
+                remote_vector_store_file_id=_old.get("vs_file_id"),
+                remote_vector_store_id=_old.get("store_id") or vector_store_id,
+            )
+            if any((old_payload.remote_file_id, old_payload.remote_vector_store_file_id)):
+                try:
+                    await _enqueue_cleanup_task(old_payload)
+                except Exception:
+                    # Promotion is already committed.  Redis publication is
+                    # best effort here; periodic reconciliation will publish
+                    # this cleanup_pending job later without changing READY.
+                    logger.warning(
+                        "Could not publish promoted-resource cleanup for %s",
+                        payload.document_id,
+                        exc_info=True,
+                    )
         except Exception as exc:
             await _cleanup_candidate_resources(client, candidate_remote_file_id=cand_file_id, candidate_remote_vector_store_file_id=cand_vs_file_id, vector_store_id=candidate_store_id)
             await asyncio.to_thread(_mark_ingestion_failed, payload, lease_token=lease_token, message="Document indexing failed.")
             raise
 
-    async def _cleanup_promoted_resources(self, payload: DocumentTaskPayload, client: Any, fallback_store_id: str | None) -> None:
-        with Session(engine) as session:
-            job = session.get(IngestionJob, payload.ingestion_job_id)
-            if job is None:
-                return
-            file_id, vs_file_id, store_id = job.cleanup_remote_file_id, job.cleanup_remote_vector_store_file_id, job.cleanup_remote_vector_store_id or fallback_store_id
-        if not file_id and not vs_file_id:
-            with Session(engine) as session:
-                job = session.get(IngestionJob, payload.ingestion_job_id)
-                if job:
-                    job.phase = "ready"
-                    session.add(job)
-                    session.commit()
-            return
+async def _enqueue_cleanup_task(payload: DocumentCleanupTaskPayload) -> None:
+    """Publish cleanup immediately; retries use the durable schedule source."""
+
+    await cleanup_document_task.kicker().with_task_id(
+        f"document-cleanup:{payload.ingestion_job_id}:{payload.attempt}"
+    ).kiq(payload)
+
+
+def _claim_cleanup(
+    payload: DocumentCleanupTaskPayload,
+    *,
+    lease_token: str,
+    lease_seconds: int,
+) -> _CleanupClaim | None:
+    """Atomically claim one cleanup row, fencing duplicate deliveries."""
+
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        job = session.exec(
+            select(IngestionJob)
+            .where(IngestionJob.id == payload.ingestion_job_id)
+            .with_for_update()
+        ).one_or_none()
+        document = session.get(Document, payload.document_id)
+        if job is None or document is None or job.document_id != document.id:
+            return None
+        if not any(
+            (
+                job.cleanup_remote_file_id or payload.remote_file_id,
+                job.cleanup_remote_vector_store_file_id
+                or payload.remote_vector_store_file_id,
+            )
+        ):
+            return None
+        if (
+            job.cleanup_lease_expires_at
+            and _as_utc(job.cleanup_lease_expires_at) > now
+            and job.cleanup_lease_token != lease_token
+        ):
+            return None
+        job.cleanup_lease_token = lease_token
+        job.cleanup_lease_expires_at = datetime.fromtimestamp(
+            now.timestamp() + lease_seconds,
+            tz=timezone.utc,
+        )
+        job.cleanup_attempts += 1
+        job.cleanup_error = None
+        session.add(job)
+        session.commit()
+        return _CleanupClaim(
+            lease_token=lease_token,
+            remote_file_id=job.cleanup_remote_file_id or payload.remote_file_id,
+            remote_vector_store_file_id=(
+                job.cleanup_remote_vector_store_file_id
+                or payload.remote_vector_store_file_id
+            ),
+            remote_vector_store_id=(
+                job.cleanup_remote_vector_store_id
+                or payload.remote_vector_store_id
+                or document.remote_vector_store_id
+            ),
+        )
+
+
+def _finish_cleanup(payload: DocumentCleanupTaskPayload, *, lease_token: str) -> bool:
+    with Session(engine) as session:
+        job = session.exec(
+            select(IngestionJob)
+            .where(IngestionJob.id == payload.ingestion_job_id)
+            .with_for_update()
+        ).one_or_none()
+        if job is None or job.cleanup_lease_token != lease_token:
+            return False
+        job.cleanup_remote_file_id = None
+        job.cleanup_remote_vector_store_file_id = None
+        job.cleanup_remote_vector_store_id = None
+        job.cleanup_lease_token = None
+        job.cleanup_lease_expires_at = None
+        job.cleanup_next_attempt_at = None
+        job.cleanup_error = None
+        job.phase = "ready"
+        session.add(job)
+        session.commit()
+        return True
+
+
+def _fail_cleanup(
+    payload: DocumentCleanupTaskPayload,
+    *,
+    lease_token: str,
+    message: str,
+) -> float | None:
+    """Release a cleanup lease and persist the next exponential retry time."""
+
+    with Session(engine) as session:
+        job = session.exec(
+            select(IngestionJob)
+            .where(IngestionJob.id == payload.ingestion_job_id)
+            .with_for_update()
+        ).one_or_none()
+        if job is None or job.cleanup_lease_token != lease_token:
+            return None
+        delay = min(
+            settings.document_cleanup_retry_max_seconds,
+            settings.document_cleanup_retry_base_seconds
+            * (2 ** max(job.cleanup_attempts - 1, 0)),
+        )
+        job.cleanup_lease_token = None
+        job.cleanup_lease_expires_at = None
+        job.cleanup_next_attempt_at = datetime.fromtimestamp(
+            datetime.now(timezone.utc).timestamp() + delay,
+            tz=timezone.utc,
+        )
+        job.cleanup_error = message
+        job.phase = "cleanup_pending"
+        session.add(job)
+        session.commit()
+        return delay
+
+
+async def _schedule_cleanup_retry(
+    payload: DocumentCleanupTaskPayload,
+    *,
+    delay: float,
+) -> None:
+    """Self-schedule cleanup through Redis TaskIQ's durable schedule source."""
+
+    from app.scheduler import schedule_source
+
+    retry = payload.model_copy(update={"attempt": payload.attempt + 1})
+    schedule_id = f"document-cleanup:{payload.ingestion_job_id}:{retry.attempt}"
+    await (
+        cleanup_document_task.kicker()
+        .with_schedule_id(schedule_id)
+        .schedule_by_time(
+            schedule_source,
+            datetime.fromtimestamp(
+                datetime.now(timezone.utc).timestamp() + delay,
+                tz=timezone.utc,
+            ),
+            retry,
+        )
+    )
+
+
+@documents_broker.task(task_name="documents.cleanup")
+async def cleanup_document_task(payload: DocumentCleanupTaskPayload) -> dict[str, str]:
+    """Delete old promoted resources without affecting the READY document."""
+
+    if not isinstance(payload, DocumentCleanupTaskPayload):
+        payload = DocumentCleanupTaskPayload.model_validate(payload)
+    lease_token = uuid4().hex
+    claim = await asyncio.to_thread(
+        _claim_cleanup,
+        payload,
+        lease_token=lease_token,
+        lease_seconds=settings.document_cleanup_lease_seconds,
+    )
+    if claim is None:
+        return {"document_id": str(payload.document_id), "status": "already_cleaned_or_claimed"}
+    try:
+        await _deletion_service.delete_remote(
+            remote_file_id=claim.remote_file_id,
+            remote_vector_store_file_id=claim.remote_vector_store_file_id,
+            remote_vector_store_id=claim.remote_vector_store_id,
+        )
+    except Exception:
+        delay = await asyncio.to_thread(
+            _fail_cleanup,
+            payload,
+            lease_token=lease_token,
+            message="Promoted-resource cleanup failed.",
+        )
+        if delay is not None:
+            try:
+                await _schedule_cleanup_retry(payload, delay=delay)
+            except Exception:
+                # The persisted due time lets periodic reconciliation recover
+                # if Redis scheduling is unavailable during this attempt.
+                logger.warning(
+                    "Could not self-schedule cleanup retry for %s",
+                    payload.document_id,
+                    exc_info=True,
+                )
+        return {"document_id": str(payload.document_id), "status": "cleanup_pending"}
+    await asyncio.to_thread(_finish_cleanup, payload, lease_token=lease_token)
+    return {"document_id": str(payload.document_id), "status": "cleaned"}
+
+
+def _pending_cleanup_payloads() -> list[DocumentCleanupTaskPayload]:
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        jobs = session.exec(
+            select(IngestionJob)
+            .where(IngestionJob.phase == "cleanup_pending")
+            .order_by(IngestionJob.updated_at)
+            .limit(settings.document_cleanup_reconcile_batch_size)
+        ).all()
+        result: list[DocumentCleanupTaskPayload] = []
+        for job in jobs:
+            if job.cleanup_next_attempt_at and _as_utc(job.cleanup_next_attempt_at) > now:
+                continue
+            if (
+                job.cleanup_lease_expires_at
+                and _as_utc(job.cleanup_lease_expires_at) > now
+            ):
+                continue
+            document = session.get(Document, job.document_id)
+            if document is None:
+                continue
+            result.append(
+                DocumentCleanupTaskPayload(
+                    document_id=document.id,
+                    ingestion_job_id=job.id,
+                    remote_file_id=job.cleanup_remote_file_id,
+                    remote_vector_store_file_id=job.cleanup_remote_vector_store_file_id,
+                    remote_vector_store_id=job.cleanup_remote_vector_store_id,
+                    attempt=job.cleanup_attempts,
+                )
+            )
+        return result
+
+
+@documents_broker.task(
+    task_name="documents.cleanup_reconcile",
+    schedule=[{"interval": settings.document_cleanup_reconcile_interval_seconds}],
+)
+async def reconcile_document_cleanup_task() -> dict[str, int]:
+    """Republish due cleanup rows after worker, Redis, or scheduler outages."""
+
+    payloads = await asyncio.to_thread(_pending_cleanup_payloads)
+    queued = 0
+    for payload in payloads:
         try:
-            if vs_file_id and store_id:
-                try:
-                    await asyncio.to_thread(client.vector_stores.files.delete, file_id=vs_file_id, vector_store_id=store_id)
-                except Exception as exc:
-                    if not _is_not_found_error(exc):
-                        raise
-            if file_id:
-                try:
-                    await asyncio.to_thread(client.files.delete, file_id=file_id)
-                except Exception as exc:
-                    if not _is_not_found_error(exc):
-                        raise
-            with Session(engine) as session:
-                job = session.get(IngestionJob, payload.ingestion_job_id)
-                if job:
-                    job.cleanup_remote_file_id = None
-                    job.cleanup_remote_vector_store_file_id = None
-                    job.cleanup_remote_vector_store_id = None
-                    job.phase = "ready"
-                    session.add(job)
-                    session.commit()
+            await _enqueue_cleanup_task(payload)
+            queued += 1
         except Exception:
-            logger.warning("Old-resource cleanup failed for document %s", payload.document_id, exc_info=True)
-            # Keep all IDs and the cleanup_pending phase for a later delivery.
-            with Session(engine) as session:
-                job = session.get(IngestionJob, payload.ingestion_job_id)
-                if job:
-                    job.phase = "cleanup_pending"
-                    session.add(job)
-                    session.commit()
+            logger.warning(
+                "Could not enqueue cleanup reconciliation for %s",
+                payload.document_id,
+                exc_info=True,
+            )
+    return {"queued": queued}
 
 
 _ingestion_service: DocumentIngestionService = OpenAIDocumentIngestionService()

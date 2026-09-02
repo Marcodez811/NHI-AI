@@ -127,6 +127,14 @@ class IngestionJob(SQLModel, table=True):
     cleanup_remote_file_id: str | None = Field(default=None, max_length=255)
     cleanup_remote_vector_store_file_id: str | None = Field(default=None, max_length=255)
     cleanup_remote_vector_store_id: str | None = Field(default=None, max_length=255)
+    # Cleanup is an independent, retryable workflow.  These fields are kept
+    # separate from ingestion's lease so a failed old-revision cleanup never
+    # makes the promoted document look like an indexing failure.
+    cleanup_attempts: int = Field(default=0, ge=0)
+    cleanup_next_attempt_at: datetime | None = Field(default=None)
+    cleanup_lease_token: str | None = Field(default=None, max_length=128)
+    cleanup_lease_expires_at: datetime | None = Field(default=None)
+    cleanup_error: str | None = Field(default=None, max_length=512)
     lease_token: str | None = Field(default=None, max_length=128)
     lease_expires_at: datetime | None = Field(default=None)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
@@ -251,6 +259,17 @@ class DocumentDeleteTaskPayload(BaseModel):
     remote_file_id: str | None = None
     remote_vector_store_file_id: str | None = None
     remote_vector_store_id: str | None = None
+
+
+class DocumentCleanupTaskPayload(BaseModel):
+    """Retry-safe input for deleting resources replaced by a promotion."""
+
+    document_id: UUID
+    ingestion_job_id: UUID
+    remote_file_id: str | None = None
+    remote_vector_store_file_id: str | None = None
+    remote_vector_store_id: str | None = None
+    attempt: int = PydanticField(default=0, ge=0)
 
 
 def as_document_read(document: Document) -> DocumentRead:

@@ -15,12 +15,13 @@ from app.api.routes.retrieval import (
     get_retrieval_registry,
     router as retrieval_router,
 )
-from app.api.routes.slides import router as slides_router
+from app.api.routes.slides import get_slide_job_repository, router as slides_router
 from app.broker import documents_broker, tasks_broker
 from app.config import settings
 from app.db import engine, get_session, init_db
 from app.models.documents import Document
 from app.services.documents.repository import SQLModelDocumentRepository
+from app.services.slides.repository import SQLModelSlideJobRepository
 from app.services.chat.responder import ResponseService
 from app.services.retrieval.registry import RetrievalIndexRegistry
 from app.tasks.documents import set_retrieval_index_registry
@@ -83,6 +84,13 @@ def _document_repository_from_database():
 
 
 app.dependency_overrides[get_document_repository] = _document_repository_from_database
+
+
+def _slide_job_repository_from_database():
+    yield from (SQLModelSlideJobRepository(session) for session in get_session())
+
+
+app.dependency_overrides[get_slide_job_repository] = _slide_job_repository_from_database
 app.dependency_overrides[get_chat_document_repository] = _document_repository_from_database
 app.dependency_overrides[get_retrieval_document_repository] = _document_repository_from_database
 app.dependency_overrides[get_retrieval_registry] = lambda: retrieval_registry

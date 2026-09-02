@@ -35,6 +35,18 @@ async def test_repository_rejects_duplicate_content_per_category():
 
 
 @pytest.mark.asyncio
+async def test_repository_allows_replacement_after_delete_failed():
+    repo = InMemoryDocumentRepository()
+    deleted = make_document()
+    deleted.status = DocumentStatus.DELETE_FAILED.value
+    await repo.create_document(deleted)
+
+    replacement = make_document()
+    await repo.create_document(replacement)
+    assert replacement.id in repo.documents
+
+
+@pytest.mark.asyncio
 async def test_nonempty_folder_cannot_be_deleted():
     repo = InMemoryDocumentRepository()
     folder = await repo.create_folder(Folder(name="Q&A"))
@@ -43,4 +55,3 @@ async def test_nonempty_folder_cannot_be_deleted():
     await repo.create_document(document)
     with pytest.raises(FolderNotEmptyError):
         await repo.delete_folder(folder.id)
-
