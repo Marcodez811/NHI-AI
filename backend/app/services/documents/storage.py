@@ -62,7 +62,12 @@ def safe_filename(filename: str | None) -> str:
     extension = Path(source).suffix.lower()
     if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
         raise UnsupportedDocumentError("This file type is not supported.")
-    return source[:512]
+    # Enforce the DB column length (512).  Truncate the stem, never the extension.
+    max_stem = 512 - len(extension)
+    stem = Path(source).stem
+    if len(stem) > max_stem:
+        stem = stem[:max_stem]
+    return stem + extension
 
 
 def validate_upload_metadata(filename: str | None, content_type: str | None) -> str:
@@ -121,6 +126,8 @@ class LocalDocumentStorage(DocumentStorage):
                     temporary.write(chunk)
                 temporary.flush()
                 os.fsync(temporary.fileno())
+            if total == 0:
+                raise UnsupportedDocumentError("The uploaded file is empty.")
             destination = directory / filename
             # There must never be two source entries in a document directory.
             for entry in directory.iterdir():

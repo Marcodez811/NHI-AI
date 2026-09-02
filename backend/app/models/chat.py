@@ -6,7 +6,7 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 MAX_CHAT_DOCUMENTS = 20
@@ -26,14 +26,18 @@ class QaMode(StrEnum):
 
 
 class ChatRequest(BaseModel):
-    """Question and explicit source scope submitted by a client."""
+    """Question and explicit source scope submitted by a client.
+
+    Extra fields are forbidden so clients cannot supply ``vector_store_id``
+    or other provider-internal identifiers through the public transport.
+    Vector-store configuration is done through server-side provider injection.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     question: str = Field(min_length=1, max_length=20_000)
     mode: QaMode
     document_ids: list[UUID] = Field(default_factory=list, max_length=MAX_CHAT_DOCUMENTS)
-    # This is useful for isolated clients and tests. Production callers should
-    # leave it unset so the injected provider/configuration selects the index.
-    vector_store_id: str | None = Field(default=None, min_length=1)
     max_num_results: int = Field(default=12, ge=1, le=50)
     include_search_results: bool = True
 

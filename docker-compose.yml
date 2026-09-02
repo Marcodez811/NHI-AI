@@ -49,6 +49,21 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    image: nhi-ai-backend:local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: ./backend/.env
+    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   documents-worker:
     image: nhi-ai-backend:local
@@ -71,6 +86,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   tasks-worker:
     image: nhi-ai-backend:local
@@ -93,6 +110,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   frontend:
     image: nhi-ai-frontend:local

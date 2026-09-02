@@ -110,6 +110,8 @@ class RetrievalIndexRegistry:
         self._settings = app_settings or settings
         self._now = now
         self._lease_seconds = max(1.0, float(lease_seconds))
+        # Captured during _claim so _mark_ready can fence its final write.
+        self._lease_token: str | None = None
 
     @property
     def _bootstrap_timeout(self) -> float:
@@ -217,13 +219,22 @@ class RetrievalIndexRegistry:
                     session.add(record)
                     session.commit()
                     session.refresh(record)
+                    self._lease_token = token
                     return record, True
 
+                # Another process holds a live provisioning lease.  Return the
+                # current row without overwriting the lease — even on force=True
+                # (validate_ready).  The owning process will commit its result
+                # and the next caller will see the updated state.
                 if (
-                    not force
-                    and record.state == RetrievalIndexState.PROVISIONING.value
+                    record.lease_token
                     and record.lease_expires_at is not None
                     and _as_utc(record.lease_expires_at) > _as_utc(now)
+                    and record.state
+                    in {
+                        RetrievalIndexState.PROVISIONING.value,
+                        RetrievalIndexState.READY.value,
+                    }
                 ):
                     return record, False
 
@@ -249,7 +260,35 @@ class RetrievalIndexRegistry:
                         session.refresh(record)
                     return record, False
 
-                record.state = RetrievalIndexState.PROVISIONING.value
+                validating_ready = (
+                    force
+                    and record.state == RetrievalIndexState.READY.value
+                    and bool(record.vector_store_id)
+                )
+                if validating_ready:
+                    # validate_ready on an already-ready store: claim only if
+                    # the remote may have expired.  For a healthy store, return
+                    # it directly rather than resetting to provisioning.
+                    configured_id = self._configured_id()
+                    expected_warning = (
+                        "environment_id_mismatch"
+                        if configured_id and configured_id != record.vector_store_id
+                        else None
+                    )
+                    if record.warning_code != expected_warning:
+                        record.warning_code = expected_warning
+                        record.updated_at = now
+                        session.add(record)
+                        session.commit()
+                        session.refresh(record)
+                    # Still proceed to provision (validate remote) but set token
+                    # so _mark_ready can fence the write.
+
+                # A forced validation leases a ready store without making it
+                # temporarily unreadable to request paths. Provisioning a
+                # missing store still uses the provisioning state.
+                if not validating_ready:
+                    record.state = RetrievalIndexState.PROVISIONING.value
                 record.lease_token = token
                 record.lease_expires_at = lease_expires_at
                 record.error_code = None
@@ -259,6 +298,7 @@ class RetrievalIndexRegistry:
                 session.add(record)
                 session.commit()
                 session.refresh(record)
+                self._lease_token = token
                 return record, True
         except IntegrityError:
             # A separate process inserted the singleton between our read and
@@ -377,6 +417,15 @@ class RetrievalIndexRegistry:
             record = session.get(RetrievalIndex, key)
             if record is None:
                 raise RuntimeError("Retrieval index record disappeared during provisioning.")
+            # Fence: if the lease token no longer matches, another owner has
+            # already written a result.  Return the freshly-read record instead
+            # of overwriting it with potentially-stale data.
+            if self._lease_token and record.lease_token != self._lease_token:
+                logger.warning(
+                    "Registry lease token mismatch — not overwriting result from newer owner"
+                )
+                session.refresh(record)
+                return record
             record.vector_store_id = vector_store_id
             record.state = RetrievalIndexState.READY.value
             record.error_code = None
@@ -389,6 +438,7 @@ class RetrievalIndexRegistry:
             session.add(record)
             session.commit()
             session.refresh(record)
+            self._lease_token = None
             return record
 
     def _mark_error(
@@ -402,6 +452,15 @@ class RetrievalIndexRegistry:
             record = session.get(RetrievalIndex, key)
             if record is None:
                 raise RuntimeError("Retrieval index record disappeared during provisioning.")
+            # Error writes need the same fencing as successful writes. A
+            # timed-out owner must never turn a newer READY/provisioning lease
+            # into ERROR after another process has taken over.
+            if self._lease_token and record.lease_token != self._lease_token:
+                logger.warning(
+                    "Registry lease token mismatch — not overwriting newer error state"
+                )
+                session.refresh(record)
+                return record
             record.state = RetrievalIndexState.ERROR.value
             record.error_code = code.value
             # Never persist SDK exception text: it can contain API URLs,
@@ -413,6 +472,7 @@ class RetrievalIndexRegistry:
             session.add(record)
             session.commit()
             session.refresh(record)
+            self._lease_token = None
             return record
 
 

@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
-from app.api.routes.chat import _validate_document_scope
+from app.api.routes.chat import _resolve_document_scope as _validate_document_scope
 from app.models.chat import ChatRequest, QaMode
 from app.api.routes.retrieval import retrieval_status
 from app.models.documents import Document, DocumentCategory, DocumentStatus

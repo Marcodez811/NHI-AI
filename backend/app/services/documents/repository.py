@@ -46,6 +46,14 @@ class FolderNotEmptyError(DocumentRepositoryError):
     pass
 
 
+class DocumentStateConflictError(DocumentRepositoryError):
+    """The requested transition conflicts with a newer/active revision."""
+
+    def __init__(self, message: str, *, code: str = "state_conflict") -> None:
+        super().__init__(message)
+        self.code = code
+
+
 @runtime_checkable
 class DocumentRepository(Protocol):
     async def create_folder(self, folder: Folder) -> Folder: ...
@@ -59,6 +67,8 @@ class DocumentRepository(Protocol):
     async def delete_folder(self, folder_id: UUID) -> None: ...
 
     async def create_document(self, document: Document) -> Document: ...
+
+    async def create_document_with_job(self, document: Document, job: IngestionJob) -> IngestionJob: ...
 
     async def list_documents(
         self,
@@ -74,6 +84,10 @@ class DocumentRepository(Protocol):
 
     async def update_document(self, document: Document) -> Document: ...
 
+    async def begin_category_reindex(self, document_id: UUID, target_category: str) -> tuple[Document, IngestionJob]: ...
+
+    async def begin_ingestion_retry(self, document_id: UUID) -> tuple[Document, IngestionJob]: ...
+
     async def delete_document(self, document_id: UUID) -> None: ...
 
     async def hard_delete_document(self, document_id: UUID) -> None: ...
@@ -85,6 +99,8 @@ class DocumentRepository(Protocol):
     async def list_ingestion_jobs(self, document_id: UUID) -> list[IngestionJob]: ...
 
     async def update_ingestion_job(self, job: IngestionJob) -> IngestionJob: ...
+
+    async def claim_ingestion(self, job_id: UUID, *, lease_token: str, lease_seconds: int = 300) -> tuple[Document, IngestionJob, bool]: ...
 
 
 def _now() -> datetime:
@@ -150,6 +166,16 @@ class InMemoryDocumentRepository:
         self.documents[document.id] = document
         return document
 
+    async def create_document_with_job(self, document: Document, job: IngestionJob) -> IngestionJob:
+        await self.create_document(document)
+        try:
+            return await self.create_ingestion_job(job)
+        except Exception:
+            # The in-memory repository has no transaction manager; compensate
+            # so callers observe the same all-or-nothing transition.
+            self.documents.pop(document.id, None)
+            raise
+
     async def list_documents(self, *, category=None, folder_id=None, status=None, retrieval_enabled=None, query=None):
         values = list(self.documents.values())
         if category is not None:
@@ -172,11 +198,97 @@ class InMemoryDocumentRepository:
         if document.id not in self.documents:
             raise DocumentNotFoundError(str(document.id))
         _validate_document(document)
+        duplicate = next(
+            (item for item in self.documents.values()
+             if item.id != document.id and item.checksum == document.checksum
+             and item.category == document.category
+             and item.status != DocumentStatus.DELETING.value),
+            None,
+        )
+        if duplicate:
+            raise DuplicateDocumentError(duplicate.id)
         if document.folder_id is not None and document.folder_id not in self.folders:
             raise FolderNotFoundError(str(document.folder_id))
         document.updated_at = _now()
         self.documents[document.id] = document
         return document
+
+    async def begin_category_reindex(self, document_id: UUID, target_category: str) -> tuple[Document, IngestionJob]:
+        document = self.documents.get(document_id)
+        if document is None:
+            raise DocumentNotFoundError(str(document_id))
+        if target_category == document.category:
+            return document, IngestionJob(document_id=document.id, revision=document.ingestion_revision, target_category=target_category)
+        if document.status in {DocumentStatus.QUEUED.value, DocumentStatus.INDEXING.value} or document.pending_category:
+            raise DocumentStateConflictError("Document indexing is already in progress.", code="indexing_in_progress")
+        duplicate = next(
+            (item for item in self.documents.values()
+             if item.id != document.id and item.checksum == document.checksum
+             and item.category == target_category
+             and item.status != DocumentStatus.DELETING.value),
+            None,
+        )
+        if duplicate:
+            raise DuplicateDocumentError(duplicate.id)
+        document.pending_category = target_category
+        document.ingestion_revision += 1
+        document.status = DocumentStatus.INDEXING.value if document.remote_file_id else DocumentStatus.QUEUED.value
+        document.stage = "queued"
+        document.error = None
+        document.updated_at = _now()
+        job = IngestionJob(document_id=document.id, revision=document.ingestion_revision, target_category=target_category)
+        self.ingestion_jobs[job.id] = job
+        return document, job
+
+    async def begin_ingestion_retry(self, document_id: UUID) -> tuple[Document, IngestionJob]:
+        document = self.documents.get(document_id)
+        if document is None:
+            raise DocumentNotFoundError(str(document_id))
+        if document.status not in {DocumentStatus.FAILED.value, DocumentStatus.READY.value}:
+            raise DocumentStateConflictError(f"Document cannot be retried in status '{document.status}'.", code="not_retryable")
+        jobs = [j for j in self.ingestion_jobs.values() if j.document_id == document_id]
+        latest = max(jobs, key=lambda j: j.created_at, default=None)
+        if latest and latest.status not in {DocumentStatus.FAILED.value, DocumentStatus.SUPERSEDED.value}:
+            raise DocumentStateConflictError("Document has an active ingestion job.", code="not_retryable")
+        document.ingestion_revision += 1
+        document.status = DocumentStatus.QUEUED.value
+        document.stage = "queued"
+        document.error = None
+        # A failed re-index has already restored the active category.  The
+        # new retry targets the previously requested category when available.
+        target_category = document.pending_category or document.category
+        if latest and latest.target_category and latest.target_category != document.category:
+            target_category = latest.target_category
+        document.pending_category = target_category if target_category != document.category else None
+        job = IngestionJob(document_id=document.id, revision=document.ingestion_revision, target_category=target_category)
+        self.ingestion_jobs[job.id] = job
+        return document, job
+
+    async def claim_ingestion(self, job_id: UUID, *, lease_token: str, lease_seconds: int = 300) -> tuple[Document, IngestionJob, bool]:
+        job = self.ingestion_jobs.get(job_id)
+        if job is None:
+            raise DocumentNotFoundError(str(job_id))
+        document = self.documents.get(job.document_id)
+        if document is None:
+            raise DocumentNotFoundError(str(job.document_id))
+        now = _now()
+        if job.revision != document.ingestion_revision:
+            job.status = DocumentStatus.SUPERSEDED.value
+            job.phase = "superseded"
+            return document, job, False
+        if job.phase == "ready" or job.status == DocumentStatus.READY.value:
+            return document, job, False
+        if job.lease_expires_at and job.lease_expires_at > now and job.lease_token != lease_token:
+            return document, job, False
+        job.lease_token = lease_token
+        job.lease_expires_at = datetime.fromtimestamp(now.timestamp() + lease_seconds, tz=timezone.utc)
+        job.status = DocumentStatus.INDEXING.value
+        job.phase = job.phase or "uploading"
+        job.attempts += 1
+        document.status = DocumentStatus.INDEXING.value
+        document.stage = job.phase
+        document.error = None
+        return document, job, True
 
     async def delete_document(self, document_id: UUID) -> None:
         if document_id not in self.documents:
@@ -272,6 +384,24 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
         self.session.refresh(document)
         return document
 
+    async def create_document_with_job(self, document: Document, job: IngestionJob) -> IngestionJob:
+        _validate_document(document)
+        existing = self.session.exec(
+            select(Document).where(Document.checksum == document.checksum, Document.category == document.category)
+        ).first()
+        if existing and existing.status != DocumentStatus.DELETING.value:
+            raise DuplicateDocumentError(existing.id)
+        if document.folder_id is not None and not self.session.get(Folder, document.folder_id):
+            raise FolderNotFoundError(str(document.folder_id))
+        if job.document_id != document.id:
+            raise DocumentStateConflictError("Ingestion job does not belong to document.")
+        self.session.add(document)
+        self.session.add(job)
+        self.session.commit()
+        self.session.refresh(document)
+        self.session.refresh(job)
+        return job
+
     async def list_documents(self, *, category=None, folder_id=None, status=None, retrieval_enabled=None, query=None):
         statement = select(Document)
         if category is not None:
@@ -293,6 +423,16 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
         if not self.session.get(Document, document.id):
             raise DocumentNotFoundError(str(document.id))
         _validate_document(document)
+        duplicate = self.session.exec(
+            select(Document).where(
+                Document.id != document.id,
+                Document.checksum == document.checksum,
+                Document.category == document.category,
+                Document.status != DocumentStatus.DELETING.value,
+            )
+        ).first()
+        if duplicate:
+            raise DuplicateDocumentError(duplicate.id)
         if document.folder_id is not None and not self.session.get(Folder, document.folder_id):
             raise FolderNotFoundError(str(document.folder_id))
         document.updated_at = _now()
@@ -300,6 +440,105 @@ class SQLModelDocumentRepository(InMemoryDocumentRepository):
         self.session.commit()
         self.session.refresh(document)
         return document
+
+    async def begin_category_reindex(self, document_id: UUID, target_category: str) -> tuple[Document, IngestionJob]:
+        statement = select(Document).where(Document.id == document_id).with_for_update()
+        document = self.session.exec(statement).one_or_none()
+        if document is None:
+            raise DocumentNotFoundError(str(document_id))
+        if target_category == document.category:
+            raise DocumentStateConflictError("Category is unchanged.", code="category_unchanged")
+        if document.status in {DocumentStatus.QUEUED.value, DocumentStatus.INDEXING.value} or document.pending_category:
+            raise DocumentStateConflictError("Document indexing is already in progress.", code="indexing_in_progress")
+        duplicate = self.session.exec(
+            select(Document).where(
+                Document.id != document.id,
+                Document.checksum == document.checksum,
+                Document.category == target_category,
+                Document.status != DocumentStatus.DELETING.value,
+            )
+        ).first()
+        if duplicate:
+            raise DuplicateDocumentError(duplicate.id)
+        document.pending_category = target_category
+        document.ingestion_revision += 1
+        document.status = DocumentStatus.INDEXING.value if document.remote_file_id else DocumentStatus.QUEUED.value
+        document.stage = "queued"
+        document.error = None
+        document.updated_at = _now()
+        job = IngestionJob(
+            document_id=document.id,
+            revision=document.ingestion_revision,
+            target_category=target_category,
+        )
+        self.session.add(document)
+        self.session.add(job)
+        self.session.commit()
+        self.session.refresh(document)
+        self.session.refresh(job)
+        return document, job
+
+    async def begin_ingestion_retry(self, document_id: UUID) -> tuple[Document, IngestionJob]:
+        document = self.session.exec(select(Document).where(Document.id == document_id).with_for_update()).one_or_none()
+        if document is None:
+            raise DocumentNotFoundError(str(document_id))
+        if document.status not in {DocumentStatus.FAILED.value, DocumentStatus.READY.value}:
+            raise DocumentStateConflictError(f"Document cannot be retried in status '{document.status}'.", code="not_retryable")
+        latest = self.session.exec(
+            select(IngestionJob).where(IngestionJob.document_id == document_id).order_by(IngestionJob.created_at.desc())
+        ).first()
+        if latest and latest.status not in {DocumentStatus.FAILED.value, DocumentStatus.SUPERSEDED.value}:
+            raise DocumentStateConflictError("Document has an active ingestion job.", code="not_retryable")
+        document.ingestion_revision += 1
+        document.status = DocumentStatus.QUEUED.value
+        document.stage = "queued"
+        document.error = None
+        # A failed re-index is restored to the active category before retry.
+        target_category = document.pending_category or document.category
+        if latest and latest.target_category and latest.target_category != document.category:
+            target_category = latest.target_category
+        document.pending_category = target_category if target_category != document.category else None
+        job = IngestionJob(document_id=document.id, revision=document.ingestion_revision, target_category=target_category)
+        self.session.add(document)
+        self.session.add(job)
+        self.session.commit()
+        self.session.refresh(document)
+        self.session.refresh(job)
+        return document, job
+
+    async def claim_ingestion(self, job_id: UUID, *, lease_token: str, lease_seconds: int = 300) -> tuple[Document, IngestionJob, bool]:
+        now = _now()
+        job = self.session.exec(select(IngestionJob).where(IngestionJob.id == job_id).with_for_update()).one_or_none()
+        if job is None:
+            raise DocumentNotFoundError(str(job_id))
+        document = self.session.exec(select(Document).where(Document.id == job.document_id).with_for_update()).one_or_none()
+        if document is None:
+            raise DocumentNotFoundError(str(job.document_id))
+        if job.revision != document.ingestion_revision:
+            job.status = DocumentStatus.SUPERSEDED.value
+            job.phase = "superseded"
+            self.session.add(job)
+            self.session.commit()
+            return document, job, False
+        if job.phase == "ready" or job.status == DocumentStatus.READY.value:
+            return document, job, False
+        if job.lease_expires_at and job.lease_expires_at > now and job.lease_token != lease_token:
+            self.session.rollback()
+            return document, job, False
+        job.lease_token = lease_token
+        job.lease_expires_at = datetime.fromtimestamp(now.timestamp() + lease_seconds, tz=timezone.utc)
+        job.status = DocumentStatus.INDEXING.value
+        job.phase = job.phase or "uploading"
+        job.attempts += 1
+        document.status = DocumentStatus.INDEXING.value
+        document.stage = job.phase
+        document.error = None
+        self.session.add(document)
+        self.session.add(job)
+        self.session.commit()
+        self.session.refresh(document)
+        self.session.refresh(job)
+        return document, job, True
 
     async def delete_document(self, document_id: UUID) -> None:
         document = self.session.get(Document, document_id)

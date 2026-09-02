@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
+from typing import Any
 
 import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, status
@@ -27,6 +28,7 @@ from app.tasks.documents import set_retrieval_index_registry
 redis_client = redis.from_url(settings.redis_url)
 retrieval_registry = RetrievalIndexRegistry()
 set_retrieval_index_registry(retrieval_registry)
+_chat_client: Any | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -59,7 +61,11 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         try:
-            await redis_client.aclose()
+            try:
+                await redis_client.aclose()
+            finally:
+                if _chat_client is not None:
+                    await _chat_client.close()
         finally:
             for broker in reversed(started):
                 try:
@@ -107,11 +113,21 @@ def _runtime_vector_store_id() -> str | None:
         return settings.openai_vector_store_id
 
 
-app.dependency_overrides[get_chat_service] = lambda: ResponseService(
-    vector_store_id_provider=_runtime_vector_store_id,
-    model=settings.openai_chat_model,
-    document_id_for_file=_document_id_for_remote_file,
-)
+def _make_chat_service() -> ResponseService:
+    from openai import AsyncOpenAI
+
+    global _chat_client
+    if _chat_client is None:
+        _chat_client = AsyncOpenAI(api_key=settings.openai_api_key)
+    return ResponseService(
+        client=_chat_client,
+        vector_store_id_provider=_runtime_vector_store_id,
+        model=settings.openai_chat_model,
+        document_id_for_file=_document_id_for_remote_file,
+    )
+
+
+app.dependency_overrides[get_chat_service] = _make_chat_service
 
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")

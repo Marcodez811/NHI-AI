@@ -23,6 +23,7 @@ dependencies = [
     "taskiq>=0.12.4",
     "taskiq-redis>=1.2.3",
     "uvicorn[standard]>=0.52.4",
+    "alembic>=1.19.1",
 ]
 
 [dependency-groups]

@@ -31,6 +31,7 @@ class DocumentStatus(StrEnum):
     FAILED = "failed"
     DELETING = "deleting"
     DELETE_FAILED = "delete_failed"
+    SUPERSEDED = "superseded"
 
 
 SUPPORTED_DOCUMENT_EXTENSIONS = frozenset({".pdf", ".docx", ".md", ".markdown", ".txt"})
@@ -80,8 +81,21 @@ class Document(SQLModel, table=True):
     roles: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     page_count: int | None = Field(default=None)
     table_count: int | None = Field(default=None)
+    # Monotonically incremented on every new ingestion attempt.  Workers must
+    # compare their job's revision snapshot to this value before promoting results.
+    ingestion_revision: int = Field(default=0, ge=0)
+    # Set while a category re-index is in progress; cleared on successful promotion.
+    pending_category: str | None = Field(default=None, max_length=64)
+    # Stable OpenAI Files API file ID for the active attachment.
     remote_file_id: str | None = Field(default=None, max_length=255)
+    # Vector-store attachment (file-in-store) ID for the active attachment.
+    remote_vector_store_file_id: str | None = Field(default=None, max_length=255)
+    # Owning vector store ID for the active attachment.
     remote_vector_store_id: str | None = Field(default=None, max_length=255)
+    # Deprecated compatibility fields.  New worker state is persisted only on
+    # IngestionJob; these are retained for rolling upgrades/old serializers.
+    candidate_remote_file_id: str | None = Field(default=None, max_length=255)
+    candidate_remote_vector_store_file_id: str | None = Field(default=None, max_length=255)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=utcnow, nullable=False)
 
@@ -93,8 +107,28 @@ class IngestionJob(SQLModel, table=True):
     document_id: UUID = Field(foreign_key="documents.id", index=True)
     status: str = Field(default=DocumentStatus.QUEUED.value, max_length=32)
     attempts: int = Field(default=0, ge=0)
+    # Snapshot of the document's ingestion_revision at job creation.
+    # Workers verify this matches before writing results.
+    revision: int = Field(default=0, ge=0)
     stage: str | None = Field(default="queued", max_length=64)
+    # Granular phase within a stage (uploading/attaching/polling/promoting/cleanup_pending).
+    phase: str | None = Field(default=None, max_length=64)
+    # Category to activate when this revision is promoted.  For an initial
+    # ingest this equals the document category; during re-index it is the
+    # pending category while Document.category remains the active category.
+    target_category: str | None = Field(default=None, max_length=64)
     error: str | None = Field(default=None, max_length=512)
+    # Candidate remote IDs persisted for idempotent phase resume.
+    candidate_remote_file_id: str | None = Field(default=None, max_length=255)
+    candidate_remote_vector_store_file_id: str | None = Field(default=None, max_length=255)
+    candidate_remote_vector_store_id: str | None = Field(default=None, max_length=255)
+    # Resources belonging to the previous active revision.  Persisting these
+    # before promotion makes cleanup resumable and prevents orphaned files.
+    cleanup_remote_file_id: str | None = Field(default=None, max_length=255)
+    cleanup_remote_vector_store_file_id: str | None = Field(default=None, max_length=255)
+    cleanup_remote_vector_store_id: str | None = Field(default=None, max_length=255)
+    lease_token: str | None = Field(default=None, max_length=128)
+    lease_expires_at: datetime | None = Field(default=None)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=utcnow, nullable=False)
 
@@ -144,6 +178,8 @@ class DocumentRead(BaseModel):
     roles: list[str]
     page_count: int | None
     table_count: int | None
+    # Shows an accepted category transition before promotion; None otherwise.
+    pending_category: DocumentCategory | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -174,6 +210,12 @@ class DocumentUploadResponse(DocumentRead):
     ingestion_job_id: UUID
 
 
+class DocumentRetryResponse(DocumentRead):
+    """Returned by the retry endpoint; includes the newly queued job ID."""
+
+    ingestion_job_id: UUID
+
+
 class IngestionJobRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -181,7 +223,9 @@ class IngestionJobRead(BaseModel):
     document_id: UUID
     status: DocumentStatus
     attempts: int
+    revision: int
     stage: str | None
+    phase: str | None
     error: str | None
     created_at: datetime
     updated_at: datetime
@@ -205,6 +249,7 @@ class DocumentDeleteTaskPayload(BaseModel):
 
     document_id: UUID
     remote_file_id: str | None = None
+    remote_vector_store_file_id: str | None = None
     remote_vector_store_id: str | None = None
 
 

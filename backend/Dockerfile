@@ -31,5 +31,8 @@ RUN uv sync --frozen --no-dev
 
 COPY ./app ./app
 COPY ./.agents ./.agents
+COPY ./alembic.ini ./alembic.ini
+COPY ./alembic ./alembic
+COPY ./scripts ./scripts
 
 CMD ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
