@@ -181,7 +181,7 @@ Relevant code: [`SlidesWorkflowAdapter.prepare_workspace`](app/services/slides/a
 - the configured model and API key;
 - `ApprovalMode.deny_all`;
 - workspace-write as the default thread sandbox;
-- a total timeout (45 minutes by default) and 60-second heartbeats.
+- a total timeout (60 minutes by default) and 60-second heartbeats.
 
 Each turn receives the staged skills plus a text prompt. The runner streams
 SDK events, maps them to a fixed public progress vocabulary, extracts the final
@@ -194,12 +194,16 @@ For the current slides adapter, the generic service runs this sequence:
 2. **Deterministic validation** — `verify_output()` checks the generated deck
    and required artifacts.
 3. **Semantic review** — only after deterministic validation passes, a
-   read-only `review` turn returns exactly `summary`, `blocking_findings`, and
-   `findings` JSON.
+   read-only `review` turn returns a strict `summary` plus structured finding
+   objects with stable IDs, severity, category, issue key, locations, and
+   correction guidance.
 4. **Correction** — any deterministic finding or blocking semantic finding
-   creates a workspace-write `correction` turn on the same Codex thread.
-5. **Repeat** — the initial generation is review round 1; the adapter's
-   `AGENT_MAX_REVIEW_ROUNDS` setting bounds further rounds (default 3).
+   creates a workspace-write `correction` activation. Provider-neutral runners
+   receive independent author/reviewer activations; the legacy runner keeps its
+   compatibility callback sequence.
+5. **Repeat** — the initial generation is author attempt 1; up to five attempts
+   are allowed. The coordinator continues when prior blockers are resolved and
+   stops after two consecutive semantic-review transitions with no progress.
 6. **Publish** — the loop exits only when the semantic review has no blocking
    findings.
 
@@ -308,8 +312,10 @@ The task worker is started with `python -m app.worker tasks`. Defaults are:
 | `AGENT_AUTHOR_REASONING_EFFORT` | `high` | Author and revision reasoning effort |
 | `AGENT_REVIEWER_REASONING_EFFORT` | `high` | Semantic reviewer reasoning effort |
 | `OPENAI_MODEL` | `gpt-5.6-luna` | Deprecated alias for `AGENT_DEFAULT_MODEL` |
-| `AGENT_TIMEOUT_MINUTES` | `45` | Total workflow deadline |
-| `AGENT_MAX_REVIEW_ROUNDS` | `3` | Initial generation plus bounded corrections/reviews |
+| `AGENT_TIMEOUT_MINUTES` | `60` | Total workflow deadline |
+| `AGENT_MAX_AUTHOR_ATTEMPTS` | `5` | Initial generation plus bounded corrections/reviews |
+| `AGENT_MAX_REVIEW_ROUNDS` | `5` | Deprecated alias for `AGENT_MAX_AUTHOR_ATTEMPTS` |
+| `AGENT_REVIEW_STAGNATION_LIMIT` | `2` | No-progress semantic-review transitions before early rejection |
 | `AGENT_KEEP_WORKSPACE_ON_FAILURE` | `true` | Retain failed workspaces for diagnosis |
 | `AGENT_JOBS_ROOT` | `/tmp/agents/jobs` | Temporary job workspaces |
 | `AGENT_OUTPUT_ROOT` | `/tmp/agents/output` | Published PPTX files |

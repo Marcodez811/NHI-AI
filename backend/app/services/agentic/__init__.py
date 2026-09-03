@@ -5,6 +5,12 @@ from .contracts import (
     AgentExecutionResult,
     AgentNode,
     AgentReasoningEffort,
+    ReviewDecision,
+    ReviewEvaluation,
+    ReviewFinding,
+    ReviewFindingStatus,
+    ReviewOutcome,
+    ReviewSeverity,
     AgentTaskPayload,
     AgentTaskResult,
     AgentPhase,
@@ -16,6 +22,9 @@ from .contracts import (
     WorkflowPlan,
     WorkflowAdapter,
     WorkflowStatus,
+    evaluate_review,
+    normalize_review_outcome,
+    review_finding_identity,
 )
 from .registry import (
     UnknownWorkflowError,
@@ -69,8 +78,8 @@ def __getattr__(name: str):
 
 __all__ = [
     "AgentExecutionRequest", "AgentExecutionResult", "AgentNode", "AgentPhase", "AgentReasoningEffort", "AgentTaskPayload", "AgentTaskResult",
-    "AgentRunner", "BaseWorkflowAdapter", "DeterministicValidationError", "TurnAudit", "TurnRequest", "WorkflowPlan",
-    "WorkflowAdapter", "WorkflowStatus", "WorkflowRegistry",
+    "AgentRunner", "BaseWorkflowAdapter", "DeterministicValidationError", "ReviewDecision", "ReviewEvaluation", "ReviewFinding", "ReviewFindingStatus", "ReviewOutcome", "ReviewSeverity", "TurnAudit", "TurnRequest", "WorkflowPlan",
+    "WorkflowAdapter", "WorkflowStatus", "WorkflowRegistry", "evaluate_review", "normalize_review_outcome", "review_finding_identity",
     "WorkflowRegistryError", "UnknownWorkflowError", "default_registry",
     "workflow_registry", "register_workflow", "SkillStagingError",
     "stage_declared_skills", "validate_skill_name",

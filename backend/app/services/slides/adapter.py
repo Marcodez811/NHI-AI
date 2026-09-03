@@ -17,7 +17,14 @@ from typing import Any
 
 from app.config import settings
 from app.models.slides import JobStatus, SlidesTaskPayload, SlidesTaskResult
-from app.services.agentic.contracts import AgentReasoningEffort, BaseWorkflowAdapter, DeterministicValidationError
+from app.services.agentic.contracts import (
+    AgentReasoningEffort,
+    BaseWorkflowAdapter,
+    DeterministicValidationError,
+    ReviewFindingStatus,
+    ReviewOutcome,
+    ReviewSeverity,
+)
 from app.services.virtual_fs import SharedVolumeDocumentResolver
 
 from .artifacts import (
@@ -60,18 +67,44 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
     # fail closed even when an older SDK ignores output_schema.
     review_output_schema = {
         "type": "object",
-        "required": ["blocking_findings", "findings", "summary"],
+        "required": ["findings", "summary"],
         "properties": {
             "summary": {"type": "string"},
-            "blocking_findings": {"type": "array", "items": {"type": "string"}},
-            "findings": {"type": "array", "items": {"type": "string"}},
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["finding_id", "status", "severity", "category", "issue_key", "locations", "description", "correction"],
+                    "properties": {
+                        "finding_id": {"type": ["string", "null"]},
+                        "status": {"type": "string", "enum": ["open", "resolved"]},
+                        "severity": {"type": "string", "enum": ["blocking", "advisory"]},
+                        "category": {"type": "string"},
+                        "issue_key": {"type": "string"},
+                        "locations": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "description": {"type": "string"},
+                        "correction": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
         },
         "additionalProperties": False,
     }
 
     @property
+    def max_author_attempts(self) -> int:
+        return settings.agent_max_author_attempts
+
+    @property
     def max_review_rounds(self) -> int:
-        return settings.agent_max_review_rounds
+        """Compatibility alias for older coordinator/test integrations."""
+
+        return self.max_author_attempts
+
+    @property
+    def review_stagnation_limit(self) -> int:
+        return settings.agent_review_stagnation_limit
 
     def deterministic_validate(self, value: SlidesTaskPayload, workspace: Path) -> None:
         # Input/preflight checks run in prepare_input.  Generated-deck checks
@@ -114,6 +147,7 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
                 "work/intermediate/content_check.json",
                 "work/intermediate/review_report.json",
                 "work/intermediate/qa_report.json",
+                "work/intermediate/semantic_review_history.json",
                 "work/rendered/final/*.png",
             ]
         }
@@ -152,21 +186,46 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
         await asyncio.to_thread((workspace / "work" / "prompt.md").write_text, prompt, encoding="utf-8")
         return prompt
 
-    def build_review_prompt(self, value: SlidesTaskPayload, workspace: Path, audit: Any, review_context: Any) -> str:
+    def build_review_prompt(
+        self,
+        value: SlidesTaskPayload,
+        workspace: Path,
+        audit: Any,
+        review_context: Any,
+        previous_review: ReviewOutcome | None = None,
+    ) -> str:
         requested_title = getattr(value, "title", "") or "(not provided)"
+        previous = []
+        if previous_review is not None:
+            previous = [
+                {
+                    "finding_id": item.finding_id,
+                    "category": item.category,
+                    "issue_key": item.issue_key,
+                    "locations": list(item.locations),
+                    "description": item.description,
+                }
+                for item in previous_review.findings
+                if item.finding_id and item.status is ReviewFindingStatus.OPEN and item.severity is ReviewSeverity.BLOCKING
+            ]
         return (
             "Perform semantic review of the generated presentation now. Do not modify any file. "
             "Inspect the PPTX and validation artifacts listed below. "
             f"The authoritative requested presentation title is `{requested_title}`; do not classify "
             "that exact requested title as template/test residue solely because it looks unusual. "
             "Return ONLY valid JSON with exactly these top-level fields: summary (string), "
-            "blocking_findings (array of strings), findings (array of strings). A blocking finding "
+            "findings (array of structured findings). Each finding must include finding_id (reuse "
+            "the supplied ID for an existing issue, or null for a new issue), status (open or "
+            "resolved), severity (blocking or advisory), category, issue_key, locations, "
+            "description, and correction. Reassess every prior blocker below exactly once; do not "
+            "omit it. A blocking finding "
             "must prevent publication because it is materially incorrect, misleading, unsupported, "
             "missing, unreadable, or internally inconsistent. Treat ordinary rounding or wording "
             "polish as advisory unless it changes a threshold, comparison, denominator, or meaning. "
             "Consolidate consequences under the independent root cause; for example, identical "
-            "renders and repeated render hashes are one blocker. Each finding string must include "
-            "concrete slide/artifact evidence and a correction recommendation. "
+            "renders and repeated render hashes are one blocker. Use canonical locations such as "
+            "slide:13, artifact:evidence-map, or claim:<id>. Keep issue_key stable across rounds. "
+            f"Prior blocking findings: {json.dumps(previous, ensure_ascii=False)}. "
             f"Artifacts: {json.dumps(review_context or {}, ensure_ascii=False)}"
         )
 
@@ -187,7 +246,12 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
                 raise DeterministicValidationError(str(exc)) from exc
             raise
 
-    def parse_review(self, response: str | None, workspace: Path) -> dict[str, Any]:
+    def parse_review(
+        self,
+        response: str | None,
+        workspace: Path,
+        previous_review: ReviewOutcome | None = None,
+    ) -> ReviewOutcome:
         semantic_review_path = workspace / "work" / "intermediate" / "semantic_review.json"
         semantic_review_path.unlink(missing_ok=True)
         if not response or not isinstance(response, str):
@@ -200,27 +264,25 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             review = json.loads(text)
         except (TypeError, ValueError) as exc:
             raise ValueError("semantic review response was malformed") from exc
-        if not isinstance(review, dict) or set(review) != {"summary", "blocking_findings", "findings"}:
+        if not isinstance(review, dict) or set(review) != {"summary", "findings"}:
             raise ValueError("semantic review response was malformed")
-        if not isinstance(review.get("summary"), str):
-            raise ValueError("semantic review response was malformed")
-        if not isinstance(review.get("blocking_findings"), list) or not isinstance(review.get("findings"), list):
-            raise ValueError("semantic review response was malformed")
-        if any(not isinstance(item, str) for item in review["blocking_findings"] + review["findings"]):
-            raise ValueError("semantic review response was malformed")
+        try:
+            outcome = ReviewOutcome.model_validate(review)
+        except Exception as exc:
+            raise ValueError("semantic review response was malformed") from exc
         semantic_review_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = semantic_review_path.with_suffix(".json.tmp")
-        temporary_path.write_text(json.dumps(review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary_path.write_text(outcome.model_dump_json(indent=2) + "\n", encoding="utf-8")
         temporary_path.replace(semantic_review_path)
-        return review
+        return outcome
 
-    def review_has_blocking_findings(self, review: dict[str, Any]) -> bool:
-        return bool(review.get("blocking_findings"))
-
-    def revision_feedback(self, value: SlidesTaskPayload, review: dict[str, Any], result: Any) -> str:
-        findings = review.get("blocking_findings", [])
-        # Advisory findings remain in semantic_review.json for diagnosis, but
-        # only publication blockers consume the bounded correction budget.
+    def revision_feedback(self, value: SlidesTaskPayload, review: ReviewOutcome, result: Any) -> str:
+        del value, result
+        findings = [
+            item.model_dump(mode="json")
+            for item in review.findings
+            if item.status is ReviewFindingStatus.OPEN and item.severity is ReviewSeverity.BLOCKING
+        ]
         return json.dumps(findings, ensure_ascii=False)[:12000]
 
     async def publish(self, value: SlidesTaskPayload, result: Any, workspace: Path) -> SlidesTaskResult:

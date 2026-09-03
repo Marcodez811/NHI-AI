@@ -11,6 +11,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from app.models.slides import JobStatus, SlidesTaskPayload
+from app.services.agentic.contracts import ReviewFinding, ReviewFindingStatus, ReviewOutcome, ReviewSeverity
 from app.services.slides import agent as slides
 from app.services.slides.adapter import slides_adapter
 from app.services.slides.artifacts import JobError, publish_output, verify_output
@@ -133,31 +134,25 @@ class SlidesServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(ValueError):
                 slides_adapter.parse_review(
-                    '{"summary":"ok","blocking_findings":[],"findings":[{"detail":"not a string"}]}',
+                    '{"summary":"ok","findings":[{"finding_id":null,"status":"open","severity":"blocking","category":"factual","issue_key":"bad","locations":[],"description":"bad","correction":"fix"}]}',
                     Path(temporary),
                 )
 
-    def test_semantic_review_schema_and_parser_use_string_findings(self):
+    def test_semantic_review_schema_and_parser_use_structured_findings(self):
         schema = slides_adapter.review_output_schema
-        self.assertEqual(schema["properties"]["blocking_findings"]["items"], {"type": "string"})
-        self.assertEqual(schema["properties"]["findings"]["items"], {"type": "string"})
+        self.assertIn("findings", schema["properties"])
+        self.assertNotIn("blocking_findings", schema["properties"])
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
             review = slides_adapter.parse_review(
-                '{"summary":"Two issues found.","blocking_findings":["Slide 4 is unsupported."],"findings":["Slide 2 title could be clearer."]}',
+                '{"summary":"Two issues found.","findings":[{"finding_id":null,"status":"open","severity":"blocking","category":"evidence","issue_key":"unsupported-claim","locations":["slide:4","claim:C4"],"description":"Slide 4 is unsupported.","correction":"Add the source mapping."},{"finding_id":null,"status":"open","severity":"advisory","category":"cosmetic","issue_key":"title-clarity","locations":["slide:2"],"description":"Slide 2 title could be clearer.","correction":"Clarify the title."}]}',
                 workspace,
             )
-            self.assertEqual(
-                review,
-                {
-                    "summary": "Two issues found.",
-                    "blocking_findings": ["Slide 4 is unsupported."],
-                    "findings": ["Slide 2 title could be clearer."],
-                },
-            )
+            self.assertIsInstance(review, ReviewOutcome)
+            self.assertEqual(review.findings[0].severity, ReviewSeverity.BLOCKING)
             self.assertEqual(
                 json.loads((workspace / "work/intermediate/semantic_review.json").read_text(encoding="utf-8")),
-                review,
+                review.model_dump(mode="json"),
             )
             with self.assertRaises(ValueError):
                 slides_adapter.parse_review('{"summary":"bad"}', workspace)
@@ -170,15 +165,33 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertNotIn("read-only sandbox", prompt)
 
     def test_revision_feedback_contains_only_blocking_findings(self):
+        review = ReviewOutcome(
+            summary="needs work",
+            findings=[
+                ReviewFinding(
+                    severity=ReviewSeverity.BLOCKING,
+                    category="factual",
+                    issue_key="policy-attribution",
+                    locations=("slide:10",),
+                    description="Policy attribution is missing.",
+                    correction="Fix slide 10 policy attribution.",
+                ),
+                ReviewFinding(
+                    severity=ReviewSeverity.ADVISORY,
+                    category="cosmetic",
+                    issue_key="range-annotation",
+                    locations=("slide:2",),
+                    description="Range annotation could be clearer.",
+                ),
+            ],
+        )
         feedback = slides_adapter.revision_feedback(
             _payload(uuid4()),
-            {
-                "blocking_findings": ["Fix slide 10 policy attribution."],
-                "findings": ["Consider using a range annotation."],
-            },
+            review,
             None,
         )
-        self.assertEqual(json.loads(feedback), ["Fix slide 10 policy attribution."])
+        self.assertEqual(len(json.loads(feedback)), 1)
+        self.assertEqual(json.loads(feedback)[0]["issue_key"], "policy-attribution")
 
     def test_correction_prompt_requires_targeted_in_place_resolution(self):
         with tempfile.TemporaryDirectory() as temporary:

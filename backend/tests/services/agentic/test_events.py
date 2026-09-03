@@ -192,6 +192,26 @@ def test_event_model_removes_unallowlisted_metadata_and_sanitizes_text():
     assert event.metadata == {"reason": "validation passed"}
 
 
+def test_event_model_keeps_review_progress_metadata():
+    event = AgentEvent(
+        run_id="run-1",
+        event_type="node_completed",
+        metadata={
+            "blocking_count": 2,
+            "resolved_count": 1,
+            "stagnant_transitions": 0,
+            "decision": "retry",
+            "prompt": "drop this",
+        },
+    )
+    assert event.metadata == {
+        "blocking_count": 2,
+        "resolved_count": 1,
+        "stagnant_transitions": 0,
+        "decision": "retry",
+    }
+
+
 def test_event_reasoning_effort_is_sanitized_as_an_identifier():
     event = AgentEvent(
         run_id="run-1",

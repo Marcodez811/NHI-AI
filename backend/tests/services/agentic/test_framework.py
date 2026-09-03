@@ -18,6 +18,10 @@ from app.services.agentic import (
     AgentTaskPayload,
     BaseWorkflowAdapter,
     DeterministicValidationError,
+    ReviewFinding,
+    ReviewFindingStatus,
+    ReviewOutcome,
+    ReviewSeverity,
     SkillStagingError,
     TurnRequest,
     UnknownWorkflowError,
@@ -339,7 +343,7 @@ class LoopAdapter(BaseWorkflowAdapter[dict, str]):
     def build_prompt(self, value, workspace, **kwargs):
         return "generate"
 
-    def build_review_prompt(self, value, workspace, audit, context):
+    def build_review_prompt(self, value, workspace, audit, context, previous_review=None):
         return "review"
 
     async def validate_generated(self, value, workspace):
@@ -347,11 +351,21 @@ class LoopAdapter(BaseWorkflowAdapter[dict, str]):
         if self.validations <= self.validation_failures:
             raise DeterministicValidationError("deterministic validator finding")
 
-    def parse_review(self, response, workspace):
+    def parse_review(self, response, workspace, previous_review=None):
         if self.blocking_reviews:
             self.blocking_reviews -= 1
-            return {"summary": "needs work", "blocking_findings": [{"detail": "fix"}], "findings": []}
-        return {"summary": "clean", "blocking_findings": [], "findings": []}
+            return ReviewOutcome(summary="needs work", findings=[ReviewFinding(
+                finding_id=(previous_review.findings[0].finding_id if previous_review and previous_review.findings else None),
+                status=ReviewFindingStatus.OPEN,
+                severity=ReviewSeverity.BLOCKING,
+                category="factual",
+                issue_key="fix",
+                locations=("slide:1",),
+                description="fix",
+                correction="fix",
+            )])
+        resolved = [item.model_copy(update={"status": ReviewFindingStatus.RESOLVED}) for item in (previous_review.findings if previous_review else ())]
+        return ReviewOutcome(summary="clean", findings=resolved)
 
     def publish(self, value, result, workspace):
         self.published = True
@@ -392,11 +406,25 @@ class ModernReviewAdapter(BaseWorkflowAdapter[dict, str]):
     def build_prompt(self, value, workspace, **kwargs):
         return f"author-{kwargs.get('revision_feedback') or 'initial'}"
 
-    def build_review_prompt(self, value, workspace, audit, context):
+    def build_review_prompt(self, value, workspace, audit, context, previous_review=None):
         return "review"
 
-    def parse_review(self, response, workspace):
-        return {"blocking_findings": response == "block"}
+    def parse_review(self, response, workspace, previous_review=None):
+        if response == "block":
+            return ReviewOutcome(summary="needs work", findings=[ReviewFinding(
+                finding_id=(previous_review.findings[0].finding_id if previous_review and previous_review.findings else None),
+                status=ReviewFindingStatus.OPEN,
+                severity=ReviewSeverity.BLOCKING,
+                category="factual",
+                issue_key="fix",
+                locations=("slide:1",),
+                description="fix",
+                correction="fix",
+            )])
+        return ReviewOutcome(
+            summary="clean",
+            findings=[item.model_copy(update={"status": ReviewFindingStatus.RESOLVED}) for item in (previous_review.findings if previous_review else ())],
+        )
 
     def revision_feedback(self, value, review, result):
         return "correct the blocking finding"
@@ -685,6 +713,29 @@ async def test_modern_semantic_rejection_reports_blockers_and_does_not_publish(t
         "Reviewer found 1 blocking finding.",
     ]
     assert "Maximum revision attempts reached." in [event["message"] for event in progress]
+
+
+@pytest.mark.asyncio
+async def test_modern_semantic_stagnation_stops_before_attempt_cap(tmp_path):
+    adapter = ModernReviewAdapter()
+    adapter.max_author_attempts = 5
+    runner = AlwaysBlockingRunner()
+    progress = []
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="modern-stagnated-job", workflow="modern-review", input={}),
+        registry=WorkflowRegistry({"modern-review": adapter}),
+        runner=runner,
+        workspace_root=tmp_path,
+        progress_callback=progress.append,
+    )
+
+    assert result.status is WorkflowStatus.FAILED
+    assert [(request.node_id, request.attempt) for request in runner.requests] == [
+        ("author", 1), ("reviewer", 1),
+        ("author", 2), ("reviewer", 2),
+        ("author", 3), ("reviewer", 3),
+    ]
+    assert "Semantic review stagnated; no prior blockers were resolved." in [event["message"] for event in progress]
 
 
 @pytest.mark.asyncio

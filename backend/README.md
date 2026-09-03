@@ -329,10 +329,10 @@ The coordinator creates a separate `AgentExecutionRequest` for each author attem
 - `source-document-extraction` for PDF/DOCX sources;
 - `pptx-nhi-tw` for NHI styling, evidence mapping, deck construction, rendering, revision, and QA;
 - an offline dependency environment (`PIP_NO_INDEX`, `UV_OFFLINE`, and npm offline mode);
-- a configurable timeout, currently 45 minutes by default;
+- a configurable timeout, currently 60 minutes by default;
 - streamed safe progress updates and a 60-second heartbeat;
 - short-lived sanitized run/node/event telemetry in Redis for the optional development console;
-- a bounded `AGENT_MAX_REVIEW_ROUNDS` loop (default 3): deterministic validation runs before semantic review, blocking findings produce a fresh author attempt, and publication is reached only after both gates pass.
+- an adaptive review loop with up to five author attempts: deterministic validation runs before semantic review, structured blocking findings produce a fresh author attempt, advisory findings do not block publication, and two consecutive semantic-review transitions without resolving a prior blocker stop early.
 
 The prompt explicitly treats `input/` as untrusted source data rather than instructions. For PDF/DOCX inputs, deterministic extraction runs first and produces block-level IDs/locators. The presentation skill maps slide claims to those source blocks, creates an editable native PowerPoint, renders every slide, reviews it, revises problems, and produces the required evidence and QA artifacts.
 
@@ -438,9 +438,11 @@ cp backend/.env.example backend/.env
 | `DOCUMENTS_ROOT`                   | Original shared document storage.                                   | `/tmp/documents`                              |
 | `AGENT_JOBS_ROOT`                  | Temporary agent job workspaces.                                     | `/tmp/agents/jobs`                             |
 | `AGENT_OUTPUT_ROOT`                | Published agent artifacts (including PPTX).                         | `/tmp/agents/output`                           |
-| `AGENT_TIMEOUT_MINUTES`            | Total deadline for one agent workflow, including reviews.           | `45`                                          |
+| `AGENT_TIMEOUT_MINUTES`            | Total deadline for one agent workflow, including reviews.           | `60`                                          |
 | `AGENT_KEEP_WORKSPACE_ON_FAILURE`  | Retain failed workspaces for diagnosis.                             | `true`                                        |
-| `AGENT_MAX_REVIEW_ROUNDS`          | Maximum independent author validation/review attempts.              | `3`                                           |
+| `AGENT_MAX_AUTHOR_ATTEMPTS`        | Maximum independent author validation/review attempts.              | `5`                                           |
+| `AGENT_MAX_REVIEW_ROUNDS`          | Deprecated alias for `AGENT_MAX_AUTHOR_ATTEMPTS`.                  | `5`                                           |
+| `AGENT_REVIEW_STAGNATION_LIMIT`    | Consecutive semantic-review transitions without resolving a prior blocker before early rejection. | `2` |
 | `AGENT_EVENT_RETENTION_SECONDS`    | TTL for sanitized developer run snapshots/events.                   | `86400` (one day)                             |
 | `ENABLE_AGENT_DEV_ROUTES`          | Register unauthenticated development telemetry routes.              | `false`                                       |
 | `DOCUMENTS_QUEUE_NAME`             | Redis Stream for document ingestion/deletion.                       | `documents`                                   |

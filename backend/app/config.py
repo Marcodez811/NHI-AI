@@ -60,7 +60,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_OUTPUT_ROOT", "SLIDES_OUTPUT_ROOT"),
     )
     agent_timeout_minutes: int = Field(
-        default=45,
+        default=60,
         gt=0,
         validation_alias=AliasChoices("AGENT_TIMEOUT_MINUTES", "SLIDES_TIMEOUT_MINUTES"),
     )
@@ -68,7 +68,16 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("AGENT_KEEP_WORKSPACE_ON_FAILURE", "SLIDES_KEEP_WORKSPACE_ON_FAILURE"),
     )
-    agent_max_review_rounds: int = Field(default=3, ge=1, validation_alias=AliasChoices("AGENT_MAX_REVIEW_ROUNDS"))
+    agent_max_author_attempts: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices("AGENT_MAX_AUTHOR_ATTEMPTS", "AGENT_MAX_REVIEW_ROUNDS"),
+    )
+    agent_review_stagnation_limit: int = Field(
+        default=2,
+        ge=1,
+        validation_alias=AliasChoices("AGENT_REVIEW_STAGNATION_LIMIT"),
+    )
     # Agent telemetry is short-lived diagnostic data, not workflow history.
     agent_event_retention_seconds: int = Field(
         default=86_400,
@@ -132,6 +141,7 @@ class Settings(BaseSettings):
             "slides_output_root": "agent_output_root",
             "slides_timeout_minutes": "agent_timeout_minutes",
             "slides_keep_workspace_on_failure": "agent_keep_workspace_on_failure",
+            "agent_max_review_rounds": "agent_max_author_attempts",
         }.items():
             if new_name not in values and old_name in values:
                 values[new_name] = values[old_name]
@@ -188,5 +198,15 @@ class Settings(BaseSettings):
     @slides_keep_workspace_on_failure.setter
     def slides_keep_workspace_on_failure(self, value: bool) -> None:
         self.agent_keep_workspace_on_failure = bool(value)
+
+    @property
+    def agent_max_review_rounds(self) -> int:
+        """Deprecated compatibility alias for the author-attempt budget."""
+
+        return self.agent_max_author_attempts
+
+    @agent_max_review_rounds.setter
+    def agent_max_review_rounds(self, value: int) -> None:
+        self.agent_max_author_attempts = int(value)
 
 settings = Settings()

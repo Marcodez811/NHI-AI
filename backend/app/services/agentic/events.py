@@ -63,6 +63,13 @@ _ALLOWED_METADATA = frozenset(
         "heartbeat",
         "error_code",
         "reason",
+        "blocking_count",
+        "advisory_count",
+        "resolved_count",
+        "new_count",
+        "persistent_count",
+        "stagnant_transitions",
+        "decision",
     }
 )
 

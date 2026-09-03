@@ -56,6 +56,191 @@ class AgentReasoningEffort(StrEnum):
     MAX = "max"
 
 
+class ReviewSeverity(StrEnum):
+    """Severity assigned to a reviewer finding."""
+
+    BLOCKING = "blocking"
+    ADVISORY = "advisory"
+
+
+class ReviewFindingStatus(StrEnum):
+    """Whether a finding is still present in the current candidate."""
+
+    OPEN = "open"
+    RESOLVED = "resolved"
+
+
+class ReviewDecision(StrEnum):
+    """Deterministic decision made after a semantic review."""
+
+    PUBLISH = "publish"
+    RETRY = "retry"
+    REJECT_MAX_ATTEMPTS = "max_attempts"
+    REJECT_STAGNATED = "stagnated"
+
+
+class ReviewFinding(BaseModel):
+    """A structured, identity-bearing semantic review finding.
+
+    ``issue_key`` and ``locations`` are intentionally provider-neutral.  The
+    workflow adapter maps domain concepts (slides, claims, artifacts, etc.)
+    into these canonical identifiers so the coordinator can compare rounds
+    without comparing free-form prose.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: str | None = Field(default=None, min_length=1, max_length=120)
+    status: ReviewFindingStatus = ReviewFindingStatus.OPEN
+    severity: ReviewSeverity = ReviewSeverity.BLOCKING
+    category: str = Field(min_length=1, max_length=80)
+    issue_key: str = Field(min_length=1, max_length=120)
+    locations: tuple[str, ...] = Field(min_length=1, max_length=20)
+    description: str = Field(min_length=1, max_length=4000)
+    correction: str = Field(default="", max_length=4000)
+
+
+class ReviewOutcome(BaseModel):
+    """Normalized result of one semantic review activation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(max_length=4000)
+    findings: list[ReviewFinding] = Field(default_factory=list, max_length=200)
+
+
+class ReviewEvaluation(BaseModel):
+    """Pure policy output used by both coordinator execution paths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: ReviewDecision
+    blocking_count: int = Field(ge=0)
+    advisory_count: int = Field(ge=0)
+    resolved_count: int = Field(ge=0)
+    new_count: int = Field(ge=0)
+    persistent_count: int = Field(ge=0)
+    stagnant_transitions: int = Field(ge=0)
+
+
+def review_finding_identity(finding: ReviewFinding) -> str:
+    """Return the canonical identity used to compare findings across rounds."""
+
+    locations = ",".join(sorted(set(finding.locations)))
+    return f"{finding.category.strip().lower()}::{finding.issue_key.strip().lower()}::{locations}"
+
+
+def normalize_review_outcome(
+    outcome: ReviewOutcome,
+    previous: ReviewOutcome | None,
+    *,
+    attempt: int,
+) -> ReviewOutcome:
+    """Assign stable IDs and fail closed on invalid reviewer continuity.
+
+    The reviewer receives IDs for the previous round's open blockers and must
+    return each one exactly once.  A newly worded finding with the same
+    structured identity inherits the prior ID, preventing wording changes from
+    resetting the stagnation counter.
+    """
+
+    previous_findings = {item.finding_id: item for item in (previous.findings if previous else ()) if item.finding_id}
+    previous_blocker_ids = {
+        item.finding_id
+        for item in (previous.findings if previous else ())
+        if item.finding_id and item.status is ReviewFindingStatus.OPEN and item.severity is ReviewSeverity.BLOCKING
+    }
+    previous_by_identity = {
+        review_finding_identity(item): item.finding_id
+        for item in (previous.findings if previous else ())
+        if item.finding_id
+    }
+    previous_identity_by_id = {
+        item.finding_id: review_finding_identity(item)
+        for item in (previous.findings if previous else ())
+        if item.finding_id
+    }
+
+    seen_ids: set[str] = set()
+    seen_identities: set[str] = set()
+    normalized: list[ReviewFinding] = []
+    for index, item in enumerate(outcome.findings, start=1):
+        identity = review_finding_identity(item)
+        if identity in seen_identities:
+            raise ValueError("semantic review contained duplicate finding identities")
+        seen_identities.add(identity)
+
+        finding_id = item.finding_id
+        if finding_id is not None:
+            if finding_id not in previous_findings:
+                raise ValueError("semantic review referenced an unknown previous finding")
+            if finding_id in seen_ids:
+                raise ValueError("semantic review referenced a previous finding more than once")
+            if previous_identity_by_id[finding_id] != identity:
+                raise ValueError("semantic review changed a previous finding identity")
+        else:
+            finding_id = previous_by_identity.get(identity) or f"review-{attempt}-finding-{index}"
+        seen_ids.add(finding_id)
+        normalized.append(item.model_copy(update={"finding_id": finding_id}))
+
+    missing = previous_blocker_ids - seen_ids
+    if missing:
+        raise ValueError("semantic review omitted a previous blocking finding")
+    return outcome.model_copy(update={"findings": normalized})
+
+
+def evaluate_review(
+    outcome: ReviewOutcome,
+    previous: ReviewOutcome | None,
+    *,
+    attempt: int,
+    max_attempts: int,
+    stagnant_transitions: int,
+    stagnation_limit: int,
+) -> ReviewEvaluation:
+    """Evaluate publication/retry/rejection without provider-specific logic."""
+
+    current_blockers = {
+        item.finding_id
+        for item in outcome.findings
+        if item.finding_id and item.status is ReviewFindingStatus.OPEN and item.severity is ReviewSeverity.BLOCKING
+    }
+    previous_blockers = {
+        item.finding_id
+        for item in (previous.findings if previous else ())
+        if item.finding_id and item.status is ReviewFindingStatus.OPEN and item.severity is ReviewSeverity.BLOCKING
+    }
+    resolved_count = len(previous_blockers - current_blockers)
+    persistent_count = len(previous_blockers & current_blockers)
+    new_count = len(current_blockers - previous_blockers)
+    next_stagnant = stagnant_transitions
+    if previous is not None:
+        next_stagnant = 0 if resolved_count else stagnant_transitions + 1
+
+    if not current_blockers:
+        decision = ReviewDecision.PUBLISH
+    elif attempt >= max_attempts:
+        decision = ReviewDecision.REJECT_MAX_ATTEMPTS
+    elif next_stagnant >= stagnation_limit:
+        decision = ReviewDecision.REJECT_STAGNATED
+    else:
+        decision = ReviewDecision.RETRY
+
+    return ReviewEvaluation(
+        decision=decision,
+        blocking_count=len(current_blockers),
+        advisory_count=sum(
+            1
+            for item in outcome.findings
+            if item.status is ReviewFindingStatus.OPEN and item.severity is ReviewSeverity.ADVISORY
+        ),
+        resolved_count=resolved_count,
+        new_count=new_count,
+        persistent_count=persistent_count,
+        stagnant_transitions=next_stagnant,
+    )
+
+
 class DeterministicValidationError(ValueError):
     """Expected generated-artifact findings that a correction can address."""
 
@@ -274,6 +459,8 @@ class WorkflowAdapter(Protocol, Generic[InputT, OutputT]):
     reviewer_model: str | None
     author_reasoning_effort: AgentReasoningEffort | None
     reviewer_reasoning_effort: AgentReasoningEffort | None
+    max_author_attempts: int
+    review_stagnation_limit: int
 
     def validate_input(self, value: Any) -> InputT: ...
 
@@ -295,6 +482,22 @@ class WorkflowAdapter(Protocol, Generic[InputT, OutputT]):
     def post_author_completion_check(self, value: InputT, result: Any, workspace: Path) -> Any: ...
 
     def semantic_review_context(self, value: InputT, workspace: Path) -> Any: ...
+
+    def build_review_prompt(
+        self,
+        value: InputT,
+        workspace: Path,
+        audit: Any,
+        review_context: Any,
+        previous_review: ReviewOutcome | None = None,
+    ) -> str: ...
+
+    def parse_review(
+        self,
+        response: str | None,
+        workspace: Path,
+        previous_review: ReviewOutcome | None = None,
+    ) -> ReviewOutcome: ...
 
     def revision_feedback(self, value: InputT, review: Any, result: Any) -> Any: ...
 
