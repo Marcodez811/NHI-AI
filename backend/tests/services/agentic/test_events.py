@@ -120,6 +120,8 @@ async def test_store_sequences_events_and_hydrates_node_snapshots():
         event_type=AgentEventType.NODE_STARTED,
         node_id="author",
         attempt=1,
+        model="gpt-5.6-luna",
+        reasoning_effort="high",
         provider_run_id="provider-1",
     )
     await store.emit(run_id="run-1", event_type=AgentEventType.NODE_COMPLETED, node_id="author")
@@ -132,6 +134,8 @@ async def test_store_sequences_events_and_hydrates_node_snapshots():
     assert snapshot.last_sequence == 4
     assert snapshot.nodes[0].status == "completed"
     assert snapshot.nodes[0].provider_run_id == "provider-1"
+    assert snapshot.nodes[0].model == "gpt-5.6-luna"
+    assert snapshot.nodes[0].reasoning_effort == "high"
     assert [event.sequence for event in await store.get_events("run-1", after=1)] == [2, 3, 4]
 
 
@@ -144,6 +148,8 @@ async def test_new_node_attempt_resets_activation_scoped_snapshot_fields():
         event_type=AgentEventType.NODE_STARTED,
         node_id="author",
         attempt=1,
+        model="author-model",
+        reasoning_effort="high",
         provider_run_id="provider-1",
     )
     await store.emit(
@@ -157,6 +163,8 @@ async def test_new_node_attempt_resets_activation_scoped_snapshot_fields():
         event_type=AgentEventType.NODE_STARTED,
         node_id="author",
         attempt=2,
+        model="author-model-v2",
+        reasoning_effort="xhigh",
         provider_run_id="provider-2",
     )
 
@@ -166,6 +174,8 @@ async def test_new_node_attempt_resets_activation_scoped_snapshot_fields():
     assert node.attempt == 2
     assert node.status == "running"
     assert node.provider_run_id == "provider-2"
+    assert node.model == "author-model-v2"
+    assert node.reasoning_effort == "xhigh"
     assert node.finished_at is None
     assert node.duration_ms is None
     assert node.started_at == node.updated_at
@@ -180,6 +190,15 @@ def test_event_model_removes_unallowlisted_metadata_and_sanitizes_text():
     )
     assert event.message == "Agent workflow is in progress."
     assert event.metadata == {"reason": "validation passed"}
+
+
+def test_event_reasoning_effort_is_sanitized_as_an_identifier():
+    event = AgentEvent(
+        run_id="run-1",
+        event_type="node_progress",
+        reasoning_effort="  HIGH  ",
+    )
+    assert event.reasoning_effort == "HIGH"
 
 
 @pytest.mark.asyncio

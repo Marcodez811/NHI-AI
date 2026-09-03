@@ -3,11 +3,42 @@ from pathlib import Path
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.services.agentic.contracts import AgentReasoningEffort
+
 
 class Settings(BaseSettings):
     redis_url: str
     openai_api_key: str
-    openai_model: str = "gpt-5.6-luna"
+    # Agent model policy is separate from the chat/vector-store settings. The
+    # old OPENAI_MODEL variable remains an input alias for the generic default
+    # during migration.
+    agent_default_model: str = Field(
+        default="gpt-5.6-luna",
+        min_length=1,
+        validation_alias=AliasChoices("AGENT_DEFAULT_MODEL", "OPENAI_MODEL"),
+    )
+    agent_author_model: str | None = Field(
+        default="gpt-5.6-luna",
+        min_length=1,
+        validation_alias=AliasChoices("AGENT_AUTHOR_MODEL"),
+    )
+    agent_reviewer_model: str | None = Field(
+        default="gpt-5.6-sol",
+        min_length=1,
+        validation_alias=AliasChoices("AGENT_REVIEWER_MODEL"),
+    )
+    agent_default_reasoning_effort: AgentReasoningEffort = Field(
+        default=AgentReasoningEffort.HIGH,
+        validation_alias=AliasChoices("AGENT_DEFAULT_REASONING_EFFORT"),
+    )
+    agent_author_reasoning_effort: AgentReasoningEffort | None = Field(
+        default=AgentReasoningEffort.HIGH,
+        validation_alias=AliasChoices("AGENT_AUTHOR_REASONING_EFFORT"),
+    )
+    agent_reviewer_reasoning_effort: AgentReasoningEffort | None = Field(
+        default=AgentReasoningEffort.HIGH,
+        validation_alias=AliasChoices("AGENT_REVIEWER_REASONING_EFFORT"),
+    )
     openai_chat_model: str = "gpt-5.6-luna"
     openai_vector_store_id: str | None = None
     openai_vector_store_name: str = "NHI-AI Knowledge Base"
@@ -95,6 +126,7 @@ class Settings(BaseSettings):
             return values
         values = dict(values)
         for old_name, new_name in {
+            "openai_model": "agent_default_model",
             "slides_jobs_root": "agent_jobs_root",
             "slides_documents_root": "documents_root",
             "slides_output_root": "agent_output_root",
@@ -104,6 +136,16 @@ class Settings(BaseSettings):
             if new_name not in values and old_name in values:
                 values[new_name] = values[old_name]
         return values
+
+    # Transitional Python attribute alias for callers that still use the old
+    # setting name (the queued agent worker uses ``agent_default_model``).
+    @property
+    def openai_model(self) -> str:
+        return self.agent_default_model
+
+    @openai_model.setter
+    def openai_model(self, value: str) -> None:
+        self.agent_default_model = value
 
     # Transitional Python attribute aliases.  Setters are deliberate: a
     # number of integrations override settings in tests/startup hooks.

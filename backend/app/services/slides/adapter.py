@@ -17,7 +17,7 @@ from typing import Any
 
 from app.config import settings
 from app.models.slides import JobStatus, SlidesTaskPayload, SlidesTaskResult
-from app.services.agentic.contracts import BaseWorkflowAdapter, DeterministicValidationError
+from app.services.agentic.contracts import AgentReasoningEffort, BaseWorkflowAdapter, DeterministicValidationError
 from app.services.virtual_fs import SharedVolumeDocumentResolver
 
 from .artifacts import (
@@ -39,6 +39,23 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
     declared_skills = ("source-document-extraction", "pptx-nhi-tw")
     input_type = SlidesTaskPayload
     output_type = SlidesTaskResult
+
+    @property
+    def author_model(self) -> str:
+        return settings.agent_author_model or settings.agent_default_model
+
+    @property
+    def reviewer_model(self) -> str:
+        return settings.agent_reviewer_model or settings.agent_default_model
+
+    @property
+    def author_reasoning_effort(self) -> AgentReasoningEffort:
+        return settings.agent_author_reasoning_effort or settings.agent_default_reasoning_effort
+
+    @property
+    def reviewer_reasoning_effort(self) -> AgentReasoningEffort:
+        return settings.agent_reviewer_reasoning_effort or settings.agent_default_reasoning_effort
+
     # The parser below remains authoritative so malformed provider responses
     # fail closed even when an older SDK ignores output_schema.
     review_output_schema = {

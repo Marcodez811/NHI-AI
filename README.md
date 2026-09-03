@@ -72,7 +72,12 @@ Set at least these values in `backend/.env`:
 ```dotenv
 REDIS_URL=redis://localhost:6379/0
 OPENAI_API_KEY=replace-me
-OPENAI_MODEL=gpt-5.6-luna
+AGENT_DEFAULT_MODEL=gpt-5.6-luna
+AGENT_AUTHOR_MODEL=gpt-5.6-luna
+AGENT_REVIEWER_MODEL=gpt-5.6-sol
+AGENT_DEFAULT_REASONING_EFFORT=high
+AGENT_AUTHOR_REASONING_EFFORT=high
+AGENT_REVIEWER_REASONING_EFFORT=high
 OPENAI_CHAT_MODEL=gpt-5.6-luna
 # Optional: seed an existing dedicated news-free store on first startup.
 # OPENAI_VECTOR_STORE_ID=vs_news_free_index

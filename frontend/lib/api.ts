@@ -233,6 +233,8 @@ export interface AgentNodeSnapshot {
     node_id: string;
     agent_role: string | null;
     runner: string | null;
+    model: string | null;
+    reasoning_effort: string | null;
     status: AgentNodeStatus;
     attempt: number | null;
     task_id: string | null;
@@ -255,6 +257,8 @@ export interface AgentEvent {
     node_id: string | null;
     agent_role: string | null;
     runner: string | null;
+    model: string | null;
+    reasoning_effort: string | null;
     worker_id: string | null;
     attempt: number | null;
     sequence: number;

@@ -69,6 +69,39 @@ def test_new_settings_names_take_precedence_over_deprecated_aliases(monkeypatch)
     assert str(settings.agent_jobs_root) == "/new/jobs"
 
 
+def test_agent_model_settings_have_role_defaults_and_legacy_fallback(monkeypatch):
+    monkeypatch.setenv("REDIS_URL", "redis://localhost")
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.delenv("AGENT_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("AGENT_AUTHOR_MODEL", raising=False)
+    monkeypatch.delenv("AGENT_REVIEWER_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_MODEL", "legacy-model")
+    settings = Settings(_env_file=None)
+    assert settings.agent_default_model == "legacy-model"
+    assert settings.agent_author_model == "gpt-5.6-luna"
+    assert settings.agent_reviewer_model == "gpt-5.6-sol"
+    assert settings.agent_default_reasoning_effort.value == "high"
+    assert settings.agent_author_reasoning_effort.value == "high"
+    assert settings.agent_reviewer_reasoning_effort.value == "high"
+    assert settings.openai_model == "legacy-model"
+
+    monkeypatch.setenv("AGENT_DEFAULT_MODEL", "new-default")
+    monkeypatch.setenv("AGENT_AUTHOR_MODEL", "author-env")
+    monkeypatch.setenv("AGENT_REVIEWER_MODEL", "reviewer-env")
+    settings = Settings(_env_file=None)
+    assert settings.agent_default_model == "new-default"
+    assert settings.agent_author_model == "author-env"
+    assert settings.agent_reviewer_model == "reviewer-env"
+
+    monkeypatch.setenv("AGENT_DEFAULT_REASONING_EFFORT", "medium")
+    monkeypatch.setenv("AGENT_AUTHOR_REASONING_EFFORT", "low")
+    monkeypatch.setenv("AGENT_REVIEWER_REASONING_EFFORT", "xhigh")
+    settings = Settings(_env_file=None)
+    assert settings.agent_default_reasoning_effort.value == "medium"
+    assert settings.agent_author_reasoning_effort.value == "low"
+    assert settings.agent_reviewer_reasoning_effort.value == "xhigh"
+
+
 @pytest.mark.asyncio
 async def test_lifespan_cleans_up_partially_started_brokers(monkeypatch):
     from app import main

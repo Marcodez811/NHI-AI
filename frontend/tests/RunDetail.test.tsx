@@ -22,6 +22,8 @@ const snapshot: AgentRunSnapshot = {
             node_id: "reviewer",
             agent_role: "reviewer",
             runner: "codex",
+            model: "gpt-5.6-sol",
+            reasoning_effort: "high",
             status: "completed",
             attempt: 3,
             task_id: "task-1",
@@ -37,6 +39,8 @@ const snapshot: AgentRunSnapshot = {
             node_id: "author",
             agent_role: "author",
             runner: "codex",
+            model: "gpt-5.6-luna",
+            reasoning_effort: "high",
             status: "completed",
             attempt: 3,
             task_id: "task-1",
@@ -52,6 +56,8 @@ const snapshot: AgentRunSnapshot = {
             node_id: "validator",
             agent_role: "validator",
             runner: "system",
+            model: null,
+            reasoning_effort: null,
             status: "completed",
             attempt: 3,
             task_id: "task-1",
@@ -77,5 +83,8 @@ describe("RunDetail", () => {
         expect(nodeHeadings).toEqual(["作者 Agent", "驗證器", "審查 Agent"]);
         expect(screen.getAllByText("最新嘗試")).toHaveLength(3);
         expect(screen.queryByText("嘗試")).not.toBeInTheDocument();
+        expect(screen.getByText("gpt-5.6-luna")).toBeInTheDocument();
+        expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
+        expect(screen.getAllByText("high")).toHaveLength(2);
     });
 });

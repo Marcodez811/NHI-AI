@@ -42,6 +42,8 @@ const event = (sequence: number, runId = "run-1"): AgentEvent => ({
     node_id: null,
     agent_role: null,
     runner: "codex",
+    model: "gpt-5.6-luna",
+    reasoning_effort: "high",
     worker_id: "worker-1",
     attempt: null,
     sequence,

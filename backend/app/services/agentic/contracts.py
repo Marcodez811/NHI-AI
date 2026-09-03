@@ -45,6 +45,17 @@ class AgentPhase(StrEnum):
     FAILED = "failed"
 
 
+class AgentReasoningEffort(StrEnum):
+    """Reasoning levels supported by the current Codex model family."""
+
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
 class DeterministicValidationError(ValueError):
     """Expected generated-artifact findings that a correction can address."""
 
@@ -138,6 +149,12 @@ class AgentExecutionRequest(BaseModel):
     node_id: str = Field(min_length=1, max_length=80)
     role: str = Field(min_length=1, max_length=120)
     attempt: int = Field(default=1, ge=1)
+    # Model selection is per logical activation, not a property of the
+    # runner.  ``None`` means the selected runner's configured default.
+    model: str | None = Field(default=None, min_length=1, max_length=160)
+    # Reasoning effort follows the same per-activation policy as model
+    # selection. ``None`` delegates to the selected runner's default.
+    reasoning_effort: AgentReasoningEffort | None = None
     workspace: Path
     prompt: str = Field(min_length=1)
     sandbox: Any = None
@@ -157,6 +174,16 @@ class AgentExecutionRequest(BaseModel):
         value = value.strip()
         if not value or value in {".", ".."} or "/" in value or "\\" in value:
             raise ValueError("agent node names must be simple names")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def normalize_model_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("model must not be empty")
         return value
 
 
@@ -243,6 +270,10 @@ class WorkflowAdapter(Protocol, Generic[InputT, OutputT]):
     declared_skills: Sequence[str]
     input_type: type[InputT] | None
     output_type: type[OutputT] | None
+    author_model: str | None
+    reviewer_model: str | None
+    author_reasoning_effort: AgentReasoningEffort | None
+    reviewer_reasoning_effort: AgentReasoningEffort | None
 
     def validate_input(self, value: Any) -> InputT: ...
 
@@ -284,6 +315,12 @@ class BaseWorkflowAdapter(Generic[InputT, OutputT]):
     # machine without exposing runner selection in task input.
     author_runner = "codex"
     reviewer_runner = "codex"
+    # ``None`` delegates to the runner's configured default.  Workflows that
+    # use asymmetric model policy override these on the adapter.
+    author_model: str | None = None
+    reviewer_model: str | None = None
+    author_reasoning_effort: AgentReasoningEffort | None = None
+    reviewer_reasoning_effort: AgentReasoningEffort | None = None
     author_role = "presentation_author"
     reviewer_role = "presentation_reviewer"
 

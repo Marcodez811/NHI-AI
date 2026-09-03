@@ -134,6 +134,8 @@ class AgentEvent(BaseModel):
     agent_role: str | None = None
     attempt: int | None = Field(default=None, ge=1)
     runner: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
     task_id: str | None = None
     worker_id: str | None = None
     provider_run_id: str | None = None
@@ -151,6 +153,8 @@ class AgentEvent(BaseModel):
         "node_id",
         "agent_role",
         "runner",
+        "model",
+        "reasoning_effort",
         "task_id",
         "worker_id",
         "provider_run_id",
@@ -207,6 +211,8 @@ class AgentNodeSnapshot(BaseModel):
     agent_role: str | None = None
     status: str = "pending"
     runner: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
     attempt: int | None = None
     task_id: str | None = None
     worker_id: str | None = None
@@ -498,8 +504,14 @@ class AgentTelemetryStore:
                 node.finished_at = None
                 node.duration_ms = None
                 node.provider_run_id = None
+                node.model = None
+                node.reasoning_effort = None
             if event.runner:
                 node.runner = event.runner
+            if event.model:
+                node.model = event.model
+            if event.reasoning_effort:
+                node.reasoning_effort = event.reasoning_effort
             if event.agent_role:
                 node.agent_role = event.agent_role
             if event.task_id:

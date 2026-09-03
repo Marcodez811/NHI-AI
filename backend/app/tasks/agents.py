@@ -19,7 +19,7 @@ from app.broker import result_backend, tasks_broker as broker
 from app.config import settings
 from app.services.agentic import AgentPhase, AgentTaskPayload, AgentTaskResult, WorkflowStatus, workflow_registry
 from app.services.agentic.service import execute_workflow
-from app.services.agentic.runner import CodexRunner, safe_error
+from app.services.agentic.runner import CodexAgentRunner, CodexRunner, RunnerRegistry, safe_error
 from app.services.agentic.events import AgentEventType, AgentTelemetryStore
 from app.services.slides.adapter import slides_adapter  # noqa: F401 - registers the built-in workflow
 from app.db import engine
@@ -37,6 +37,26 @@ _telemetry_store = AgentTelemetryStore(
     retention_seconds=settings.agent_event_retention_seconds,
 )
 _worker_id = f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _build_runner_registry() -> tuple[RunnerRegistry, float | None]:
+    """Build the worker's configured provider allowlist.
+
+    Runner selection remains server-owned by the workflow adapter while the
+    Codex primitive supplies credentials and the fallback model.  The
+    coordinator can therefore honor different runner names per node without
+    exposing either choice through the task payload.
+    """
+
+    codex_runner = CodexAgentRunner(
+        CodexRunner(
+            model=settings.agent_default_model,
+            reasoning_effort=settings.agent_default_reasoning_effort,
+            api_key=settings.openai_api_key,
+            timeout_seconds=float(getattr(settings, "agent_timeout_minutes", 45)) * 60,
+        ),
+    )
+    return RunnerRegistry({"codex": codex_runner}), codex_runner.timeout_seconds
 
 
 def _now() -> datetime:
@@ -210,6 +230,7 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
             node_id=event.get("node_id"),
             role=event.get("role"),
             runner=event.get("runner"),
+            model=event.get("model"),
             attempt=event.get("attempt"),
             status=WorkflowStatus.RUNNING,
             phase=event.get("phase"),
@@ -230,6 +251,7 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
             node_id=event.get("node_id"),
             role=event.get("role"),
             runner=event.get("runner"),
+            model=event.get("model"),
             attempt=event.get("attempt"),
             status=event.get("status"),
             provider_run_id=event.get("provider_run_id"),
@@ -237,8 +259,8 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
             duration_ms=event.get("duration_ms"),
         )
 
-    runner = CodexRunner(model=settings.openai_model, api_key=settings.openai_api_key, timeout_seconds=float(getattr(settings, "agent_timeout_minutes", 45)) * 60)
-    result = await execute_workflow(payload, registry=workflow_registry, runner=runner, workspace_root=Path(getattr(settings, "agent_jobs_root", "/tmp/agentic/jobs")), skills_root=Path(__file__).resolve().parents[2] / ".agents" / "skills", progress_callback=progress, event_callback=telemetry_event, timeout_seconds=runner.timeout_seconds)
+    runner_registry, runner_timeout = _build_runner_registry()
+    result = await execute_workflow(payload, registry=workflow_registry, runner=runner_registry, workspace_root=Path(getattr(settings, "agent_jobs_root", "/tmp/agentic/jobs")), skills_root=Path(__file__).resolve().parents[2] / ".agents" / "skills", progress_callback=progress, event_callback=telemetry_event, timeout_seconds=runner_timeout)
     terminal_phase = result.phase or (AgentPhase.COMPLETED if result.status == WorkflowStatus.COMPLETED else AgentPhase.FAILED)
     if slide_repository is not None:
         try:

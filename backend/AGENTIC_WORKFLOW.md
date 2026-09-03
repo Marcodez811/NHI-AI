@@ -286,7 +286,7 @@ routes/slides.py
   -> services/agentic/service.py: execute_workflow
   -> services/agentic/registry.py: slides
   -> services/slides/adapter.py
-  -> services/agentic/runner.py: CodexRunner
+  -> services/agentic/runner.py: RunnerRegistry -> CodexAgentRunner -> CodexRunner
 ```
 
 `app/tasks/slides.py` and `app/services/slides/agent.py` are retained as
@@ -301,7 +301,13 @@ The task worker is started with `python -m app.worker tasks`. Defaults are:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `OPENAI_MODEL` | `gpt-5.6-luna` | Codex model |
+| `AGENT_DEFAULT_MODEL` | `gpt-5.6-luna` | Fallback model for activations without role policy |
+| `AGENT_AUTHOR_MODEL` | `gpt-5.6-luna` | Author and revision activations |
+| `AGENT_REVIEWER_MODEL` | `gpt-5.6-sol` | Semantic reviewer activations |
+| `AGENT_DEFAULT_REASONING_EFFORT` | `high` | Fallback reasoning effort for activations without role policy |
+| `AGENT_AUTHOR_REASONING_EFFORT` | `high` | Author and revision reasoning effort |
+| `AGENT_REVIEWER_REASONING_EFFORT` | `high` | Semantic reviewer reasoning effort |
+| `OPENAI_MODEL` | `gpt-5.6-luna` | Deprecated alias for `AGENT_DEFAULT_MODEL` |
 | `AGENT_TIMEOUT_MINUTES` | `45` | Total workflow deadline |
 | `AGENT_MAX_REVIEW_ROUNDS` | `3` | Initial generation plus bounded corrections/reviews |
 | `AGENT_KEEP_WORKSPACE_ON_FAILURE` | `true` | Retain failed workspaces for diagnosis |

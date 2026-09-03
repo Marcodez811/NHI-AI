@@ -28,6 +28,8 @@ export function NodeCard({ node }: { node: AgentNodeSnapshot }) {
             </div>
             <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-3 border-t border-border/70 pt-3">
                 <MetaValue label="Runner" value={node.runner || "—"} />
+                <MetaValue label="Model" value={node.model || "—"} />
+                <MetaValue label="Reasoning" value={node.reasoning_effort || "—"} />
                 <MetaValue label="最新嘗試" value={String(node.attempt ?? 0)} />
                 <MetaValue label="Worker" value={node.worker_id || "—"} copyable />
                 <MetaValue label="耗時" value={formatElapsed(node.duration_ms, node.started_at, node.finished_at)} />

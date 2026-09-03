@@ -25,6 +25,7 @@ from .contracts import (
     AgentExecutionRequest,
     AgentExecutionResult,
     AgentPhase,
+    AgentReasoningEffort,
     AgentRunner,
     ProgressCallback,
     TurnAudit,
@@ -228,15 +229,16 @@ class CodexRunResult:
 class CodexRunner:
     """Run labeled streamed turns under one total workflow deadline."""
 
-    def __init__(self, *, codex_factory: Any = AsyncCodex, model: str | None = None, api_key: str | None = None, timeout_seconds: float = 2700.0, heartbeat_seconds: float = 60.0, backend_root: Path | None = None):
+    def __init__(self, *, codex_factory: Any = AsyncCodex, model: str | None = None, reasoning_effort: AgentReasoningEffort | None = AgentReasoningEffort.HIGH, api_key: str | None = None, timeout_seconds: float = 2700.0, heartbeat_seconds: float = 60.0, backend_root: Path | None = None):
         self.codex_factory = codex_factory
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
         self.heartbeat_seconds = heartbeat_seconds
         self.backend_root = backend_root or Path(__file__).resolve().parents[3]
 
-    async def run(self, workspace: Path, turns: Sequence[TurnRequest], *, skill_names: Sequence[str] = (), progress_callback: ProgressCallback | None = None, audit_path: Path | None = None, turn_callback: Callable[[TurnAudit, str | None], Any] | None = None) -> CodexRunResult:
+    async def run(self, workspace: Path, turns: Sequence[TurnRequest], *, model: str | None = None, reasoning_effort: AgentReasoningEffort | None = None, skill_names: Sequence[str] = (), progress_callback: ProgressCallback | None = None, audit_path: Path | None = None, turn_callback: Callable[[TurnAudit, str | None], Any] | None = None) -> CodexRunResult:
         if not turns:
             raise WorkflowExecutionError("workflow did not provide a prompt")
         reporter = ProgressReporter(callback=progress_callback, path=audit_path.with_name("progress.jsonl") if audit_path else None, heartbeat_seconds=self.heartbeat_seconds)
@@ -255,7 +257,14 @@ class CodexRunner:
                 # Reviewer requests therefore start read-only sessions instead
                 # of relying only on a per-turn hint.
                 session_sandbox = turns[0].sandbox or Sandbox.workspace_write
-                thread = await codex.thread_start(cwd=str(workspace), model=self.model, sandbox=session_sandbox, approval_mode=ApprovalMode.deny_all, ephemeral=True)
+                effective_model = model if model is not None else self.model
+                effective_effort = reasoning_effort if reasoning_effort is not None else self.reasoning_effort
+                thread_config = (
+                    {"model_reasoning_effort": getattr(effective_effort, "value", effective_effort)}
+                    if effective_effort is not None
+                    else None
+                )
+                thread = await codex.thread_start(cwd=str(workspace), model=effective_model, config=thread_config, sandbox=session_sandbox, approval_mode=ApprovalMode.deny_all, ephemeral=True)
                 audits: list[TurnAudit] = []
                 response: str | None = None
                 pending = list(turns)
@@ -432,6 +441,8 @@ class CodexAgentRunner:
         progress_callback: ProgressCallback | None = None,
     ) -> AgentExecutionResult:
         started = asyncio.get_running_loop().time()
+        effective_model = request.model if request.model is not None else getattr(self.codex_runner, "model", None)
+        effective_effort = request.reasoning_effort if request.reasoning_effort is not None else getattr(self.codex_runner, "reasoning_effort", None)
         turn = TurnRequest(
             kind=request.node_id if request.node_id else request.role,
             prompt=request.prompt,
@@ -449,6 +460,8 @@ class CodexAgentRunner:
                     "node_id": request.node_id,
                     "role": request.role,
                     "runner": self.name,
+                    "model": effective_model,
+                    "reasoning_effort": getattr(effective_effort, "value", effective_effort),
                     "attempt": request.attempt,
                 }
             )
@@ -459,6 +472,8 @@ class CodexAgentRunner:
         result = await self.codex_runner.run(
             request.workspace,
             [turn],
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
             skill_names=request.skill_names,
             progress_callback=forward_progress,
             audit_path=request.audit_path,

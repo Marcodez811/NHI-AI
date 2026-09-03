@@ -264,6 +264,10 @@ async def _execute_bounded_agents(
     max_rounds = max(1, int(getattr(adapter, "max_review_rounds", 3)))
     author_runner_name = str(getattr(adapter, "author_runner", "codex"))
     reviewer_runner_name = str(getattr(adapter, "reviewer_runner", author_runner_name))
+    author_model = getattr(adapter, "author_model", None)
+    reviewer_model = getattr(adapter, "reviewer_model", None)
+    author_reasoning_effort = getattr(adapter, "author_reasoning_effort", None)
+    reviewer_reasoning_effort = getattr(adapter, "reviewer_reasoning_effort", None)
     author_role = str(getattr(adapter, "author_role", "presentation_author"))
     reviewer_role = str(getattr(adapter, "reviewer_role", "presentation_reviewer"))
     author_attempt = 1
@@ -279,6 +283,8 @@ async def _execute_bounded_agents(
             node_id="author",
             role=author_role,
             attempt=author_attempt,
+            model=author_model,
+            reasoning_effort=author_reasoning_effort,
             workspace=workspace,
             prompt=prompt,
             sandbox=Sandbox.full_access,
@@ -291,6 +297,8 @@ async def _execute_bounded_agents(
             "node_started",
             node_id="author",
             role=author_role,
+            model=author_model,
+            reasoning_effort=author_reasoning_effort,
             runner=author_runner_name,
             attempt=author_attempt,
             status="running",
@@ -305,6 +313,8 @@ async def _execute_bounded_agents(
                 "node_failed",
                 node_id="author",
                 role=author_role,
+                model=author_model,
+                reasoning_effort=author_reasoning_effort,
                 runner=author_runner_name,
                 attempt=author_attempt,
                 status="failed",
@@ -320,6 +330,8 @@ async def _execute_bounded_agents(
                 "node_failed",
                 node_id="author",
                 role=author_role,
+                model=author_model,
+                reasoning_effort=author_reasoning_effort,
                 runner=author_runner_name,
                 attempt=author_attempt,
                 status="failed",
@@ -332,6 +344,8 @@ async def _execute_bounded_agents(
             "node_completed",
             node_id="author",
             role=author_role,
+            model=author_model,
+            reasoning_effort=author_reasoning_effort,
             runner=author_runner_name,
             attempt=author_attempt,
             status="completed",
@@ -471,6 +485,8 @@ async def _execute_bounded_agents(
             node_id="reviewer",
             role=reviewer_role,
             attempt=reviewer_attempt,
+            model=reviewer_model,
+            reasoning_effort=reviewer_reasoning_effort,
             workspace=workspace,
             prompt=str(review_prompt),
             sandbox=Sandbox.full_access,
@@ -484,6 +500,8 @@ async def _execute_bounded_agents(
             "node_started",
             node_id="reviewer",
             role=reviewer_role,
+            model=reviewer_model,
+            reasoning_effort=reviewer_reasoning_effort,
             runner=reviewer_runner_name,
             attempt=reviewer_attempt,
             status="running",
@@ -498,6 +516,8 @@ async def _execute_bounded_agents(
                 "node_failed",
                 node_id="reviewer",
                 role=reviewer_role,
+                model=reviewer_model,
+                reasoning_effort=reviewer_reasoning_effort,
                 runner=reviewer_runner_name,
                 attempt=reviewer_attempt,
                 status="failed",
@@ -524,6 +544,8 @@ async def _execute_bounded_agents(
                     "node_failed",
                     node_id="reviewer",
                     role=reviewer_role,
+                    model=reviewer_model,
+                    reasoning_effort=reviewer_reasoning_effort,
                     runner=reviewer_runner_name,
                     attempt=reviewer_attempt,
                     status="failed",
@@ -537,6 +559,8 @@ async def _execute_bounded_agents(
                 "node_failed",
                 node_id="reviewer",
                 role=reviewer_role,
+                model=reviewer_model,
+                reasoning_effort=reviewer_reasoning_effort,
                 runner=reviewer_runner_name,
                 attempt=reviewer_attempt,
                 status="failed",
@@ -550,6 +574,8 @@ async def _execute_bounded_agents(
             "node_completed",
             node_id="reviewer",
             role=reviewer_role,
+            model=reviewer_model,
+            reasoning_effort=reviewer_reasoning_effort,
             runner=reviewer_runner_name,
             attempt=reviewer_attempt,
             status="completed",
@@ -641,9 +667,12 @@ async def _execute_workflow(
         # The default registry and all provider-neutral implementations use
         # one request per logical activation.  Legacy test doubles are kept on
         # the compatibility callback path below.
-        modern_runner = selected_runner is None
+        modern_runner = selected_runner is None or isinstance(selected_runner, RunnerRegistry)
         if selected_runner is not None and not isinstance(selected_runner, RunnerRegistry):
-            modern_runner = isinstance(selected_runner, CodexRunner) or _uses_execution_request(selected_runner)
+            if callable(getattr(selected_runner, "resolve", None)) and not callable(getattr(selected_runner, "run", None)):
+                modern_runner = True
+            else:
+                modern_runner = isinstance(selected_runner, CodexRunner) or _uses_execution_request(selected_runner)
         if build_review is not None and modern_runner:
             run = await _execute_bounded_agents(
                 run_id=str(payload.job_id),
@@ -666,6 +695,8 @@ async def _execute_workflow(
                 node_id="author",
                 role=str(getattr(adapter, "author_role", "presentation_author")),
                 attempt=1,
+                model=getattr(adapter, "author_model", None),
+                reasoning_effort=getattr(adapter, "author_reasoning_effort", None),
                 workspace=workspace,
                 prompt=str(prompt),
                 sandbox=Sandbox.full_access,
@@ -678,6 +709,8 @@ async def _execute_workflow(
                 "node_started",
                 node_id="author",
                 role=author_role,
+                model=request.model,
+                reasoning_effort=request.reasoning_effort,
                 runner=author_runner_name,
                 attempt=1,
                 status="running",
@@ -692,6 +725,8 @@ async def _execute_workflow(
                     "node_failed",
                     node_id="author",
                     role=author_role,
+                    model=request.model,
+                    reasoning_effort=request.reasoning_effort,
                     runner=author_runner_name,
                     attempt=1,
                     status="failed",
@@ -707,6 +742,8 @@ async def _execute_workflow(
                     "node_failed",
                     node_id="author",
                     role=author_role,
+                    model=request.model,
+                    reasoning_effort=request.reasoning_effort,
                     runner=author_runner_name,
                     attempt=1,
                     status="failed",
@@ -719,6 +756,8 @@ async def _execute_workflow(
                 "node_completed",
                 node_id="author",
                 role=author_role,
+                model=request.model,
+                reasoning_effort=request.reasoning_effort,
                 runner=author_runner_name,
                 attempt=1,
                 status="completed",

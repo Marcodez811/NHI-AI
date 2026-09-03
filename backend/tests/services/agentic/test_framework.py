@@ -14,6 +14,7 @@ from app.services.agentic import (
     AgentExecutionResult,
     CodexAgentRunner,
     AgentPhase,
+    AgentReasoningEffort,
     AgentTaskPayload,
     BaseWorkflowAdapter,
     DeterministicValidationError,
@@ -61,6 +62,8 @@ class FakeThread:
 
 
 class FakeCodex:
+    last_thread_kwargs = None
+
     def __init__(self, config):
         self.config = config
 
@@ -74,6 +77,7 @@ class FakeCodex:
         self.key = key
 
     async def thread_start(self, **kwargs):
+        FakeCodex.last_thread_kwargs = kwargs
         return FakeThread()
 
 
@@ -83,6 +87,18 @@ def test_registry_rejects_unknown_workflow_and_payload_extras():
         registry.resolve("missing")
     with pytest.raises(ValueError):
         AgentTaskPayload.model_validate({"job_id": "j", "workflow": "echo", "input": {}, "module": "os"})
+
+
+def test_execution_request_validates_reasoning_effort():
+    with pytest.raises(ValueError):
+        AgentExecutionRequest(
+            run_id="run-1",
+            node_id="author",
+            role="author",
+            workspace="/tmp/workspace",
+            prompt="draft",
+            reasoning_effort="unsupported",
+        )
 
 
 def test_slide_adapter_can_be_imported_directly_without_circular_import():
@@ -122,6 +138,35 @@ async def test_runner_collects_turn_audit_and_sanitizes_progress(tmp_path):
     assert AgentPhase.DRAFTING.value in [event["phase"] for event in progress]
     assert any(event["event_type"] == "node_progress" for event in progress)
     assert all("key" not in event["message"] for event in progress)
+
+
+@pytest.mark.asyncio
+async def test_runner_uses_per_activation_model_override_and_preserves_default(tmp_path):
+    runner = CodexRunner(
+        codex_factory=FakeCodex,
+        model="default-model",
+        api_key="key",
+        timeout_seconds=2,
+        heartbeat_seconds=0,
+    )
+
+    await runner.run(tmp_path, [TurnRequest(kind="initial", prompt="go")])
+    assert FakeCodex.last_thread_kwargs["model"] == "default-model"
+
+    runner.reasoning_effort = AgentReasoningEffort.HIGH
+    await runner.run(tmp_path, [TurnRequest(kind="initial", prompt="go")])
+    assert FakeCodex.last_thread_kwargs["config"] == {"model_reasoning_effort": "high"}
+
+    await runner.run(tmp_path, [TurnRequest(kind="reviewer", prompt="review")], model="reviewer-model")
+    assert FakeCodex.last_thread_kwargs["model"] == "reviewer-model"
+
+    await runner.run(
+        tmp_path,
+        [TurnRequest(kind="reviewer", prompt="review")],
+        model="reviewer-model",
+        reasoning_effort=AgentReasoningEffort.XHIGH,
+    )
+    assert FakeCodex.last_thread_kwargs["config"] == {"model_reasoning_effort": "xhigh"}
 
 
 @pytest.mark.asyncio
@@ -179,6 +224,7 @@ async def test_provider_progress_is_enriched_with_logical_node_context(tmp_path)
         node_id="reviewer",
         role="presentation_reviewer",
         attempt=2,
+        model="reviewer-model",
         workspace=tmp_path,
         prompt="review",
     )
@@ -192,6 +238,7 @@ async def test_provider_progress_is_enriched_with_logical_node_context(tmp_path)
     assert provider_events
     assert all(event["node_id"] == "reviewer" for event in provider_events)
     assert all(event["role"] == "presentation_reviewer" for event in provider_events)
+    assert all(event["model"] == "reviewer-model" for event in provider_events)
     assert all(event["attempt"] == 2 for event in provider_events)
 
 
@@ -337,6 +384,10 @@ class ModernReviewAdapter(BaseWorkflowAdapter[dict, str]):
     max_review_rounds = 2
     author_runner = "fake"
     reviewer_runner = "fake"
+    author_model = "author-model"
+    reviewer_model = "reviewer-model"
+    author_reasoning_effort = AgentReasoningEffort.HIGH
+    reviewer_reasoning_effort = AgentReasoningEffort.XHIGH
 
     def build_prompt(self, value, workspace, **kwargs):
         return f"author-{kwargs.get('revision_feedback') or 'initial'}"
@@ -381,6 +432,20 @@ class AlwaysBlockingRunner(ModernRunner):
         return AgentExecutionResult(provider_run_id=f"provider-{len(self.requests)}", response=response)
 
 
+class SplitReviewAdapter(ModernReviewAdapter):
+    name = "split-review"
+    author_runner = "author-runner"
+    reviewer_runner = "reviewer-runner"
+
+
+class AuthorRunner(ModernRunner):
+    name = "author-runner"
+
+
+class ReviewerRunner(ModernRunner):
+    name = "reviewer-runner"
+
+
 def test_runner_registry_is_an_explicit_allowlist():
     registry = RunnerRegistry({"fake": ModernRunner()})
     assert registry.resolve("fake").name == "fake"
@@ -388,6 +453,34 @@ def test_runner_registry_is_an_explicit_allowlist():
         registry.resolve("missing")
     with pytest.raises(ValueError):
         registry.register("fake", ModernRunner())
+
+
+@pytest.mark.asyncio
+async def test_modern_coordinator_resolves_author_and_reviewer_from_runner_registry(tmp_path):
+    adapter = SplitReviewAdapter()
+    author_runner = AuthorRunner()
+    reviewer_runner = ReviewerRunner()
+    registry = RunnerRegistry({
+        "author-runner": author_runner,
+        "reviewer-runner": reviewer_runner,
+    })
+
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="split-job", workflow="split-review", input={}),
+        registry=WorkflowRegistry({"split-review": adapter}),
+        runner=registry,
+        workspace_root=tmp_path,
+    )
+
+    assert result.status is WorkflowStatus.COMPLETED
+    assert [(item.node_id, item.model) for item in author_runner.requests] == [
+        ("author", "author-model"),
+        ("author", "author-model"),
+    ]
+    assert [(item.node_id, item.model) for item in reviewer_runner.requests] == [
+        ("reviewer", "reviewer-model"),
+        ("reviewer", "reviewer-model"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -409,6 +502,18 @@ async def test_modern_coordinator_uses_independent_author_and_reviewer_sessions(
         ("reviewer", 2),
     ]
     assert all(request.sandbox is Sandbox.full_access for request in runner.requests)
+    assert [request.model for request in runner.requests] == [
+        "author-model",
+        "reviewer-model",
+        "author-model",
+        "reviewer-model",
+    ]
+    assert [request.reasoning_effort for request in runner.requests] == [
+        AgentReasoningEffort.HIGH,
+        AgentReasoningEffort.XHIGH,
+        AgentReasoningEffort.HIGH,
+        AgentReasoningEffort.XHIGH,
+    ]
     assert runner.requests[0].audit_path != runner.requests[2].audit_path
 
 

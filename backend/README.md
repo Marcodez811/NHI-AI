@@ -320,7 +320,11 @@ so the configured async-task concurrency is not serialized by blocking calls.
 
 The coordinator creates a separate `AgentExecutionRequest` for each author attempt and reviewer activation. The Codex runner adapter gives each request its own ephemeral Codex thread rooted at the job directory. This prevents the read-only reviewer from sharing or modifying author session state and makes every revision depend only on the persisted workspace plus explicit feedback. The runtime uses:
 
-- the configured `OPENAI_MODEL`;
+- the configured author/reviewer agent models (`AGENT_AUTHOR_MODEL` and
+  `AGENT_REVIEWER_MODEL`), with `AGENT_DEFAULT_MODEL` as the fallback;
+- the configured author/reviewer reasoning efforts (`AGENT_AUTHOR_REASONING_EFFORT`
+  and `AGENT_REVIEWER_REASONING_EFFORT`), with `AGENT_DEFAULT_REASONING_EFFORT`
+  as the fallback;
 - workspace-write sandboxing for generation/correction, read-only sandboxing for semantic review, and denied approval prompts;
 - `source-document-extraction` for PDF/DOCX sources;
 - `pptx-nhi-tw` for NHI styling, evidence mapping, deck construction, rendering, revision, and QA;
@@ -419,7 +423,13 @@ cp backend/.env.example backend/.env
 | ---------------------------------- | ------------------------------------------------------------------- | --------------------------------------------- |
 | `REDIS_URL`                        | Task queue, progress, and result Redis connection.                  | Required                                      |
 | `OPENAI_API_KEY`                   | OpenAI Files/vector store, Responses API, and Codex SDK credential. | Required                                      |
-| `OPENAI_MODEL`                     | Slide-generation Codex model.                                       | `gpt-5.6-luna`                                |
+| `AGENT_DEFAULT_MODEL`              | Fallback Codex model for agent activations without role policy.      | `gpt-5.6-luna`                                |
+| `AGENT_AUTHOR_MODEL`               | Model for slide authoring and revisions.                             | `gpt-5.6-luna`                                |
+| `AGENT_REVIEWER_MODEL`             | Model for semantic slide review.                                    | `gpt-5.6-sol`                                  |
+| `AGENT_DEFAULT_REASONING_EFFORT`   | Fallback Codex reasoning effort without role policy.                | `high`                                         |
+| `AGENT_AUTHOR_REASONING_EFFORT`    | Reasoning effort for slide authoring and revisions.                 | `high`                                         |
+| `AGENT_REVIEWER_REASONING_EFFORT`  | Reasoning effort for semantic slide review.                         | `high`                                         |
+| `OPENAI_MODEL`                     | Deprecated alias for `AGENT_DEFAULT_MODEL`.                         | `gpt-5.6-luna`                                |
 | `OPENAI_CHAT_MODEL`                | Grounded chat model.                                                | `gpt-5.6-luna`                                |
 | `OPENAI_VECTOR_STORE_ID`           | Optional first-run seed for the shared non-news index.              | Omitted: created and persisted automatically  |
 | `OPENAI_VECTOR_STORE_NAME`         | Name for an automatically created vector store.                    | `NHI-AI Knowledge Base`                       |
