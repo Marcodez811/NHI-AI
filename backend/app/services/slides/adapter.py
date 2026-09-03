@@ -144,8 +144,12 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             "that exact requested title as template/test residue solely because it looks unusual. "
             "Return ONLY valid JSON with exactly these top-level fields: summary (string), "
             "blocking_findings (array of strings), findings (array of strings). A blocking finding "
-            "must prevent publication. Each finding string must include concrete slide/artifact "
-            "evidence and a correction recommendation. "
+            "must prevent publication because it is materially incorrect, misleading, unsupported, "
+            "missing, unreadable, or internally inconsistent. Treat ordinary rounding or wording "
+            "polish as advisory unless it changes a threshold, comparison, denominator, or meaning. "
+            "Consolidate consequences under the independent root cause; for example, identical "
+            "renders and repeated render hashes are one blocker. Each finding string must include "
+            "concrete slide/artifact evidence and a correction recommendation. "
             f"Artifacts: {json.dumps(review_context or {}, ensure_ascii=False)}"
         )
 

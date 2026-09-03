@@ -9,6 +9,7 @@ RUN apt-get update \
         libreoffice-impress \
         nodejs \
         npm \
+        poppler-utils \
         tesseract-ocr \
         tesseract-ocr-chi-tra \
         tesseract-ocr-eng \

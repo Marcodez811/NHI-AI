@@ -14,6 +14,7 @@ from app.models.slides import JobStatus, SlidesTaskPayload
 from app.services.slides import agent as slides
 from app.services.slides.adapter import slides_adapter
 from app.services.slides.artifacts import JobError, publish_output, verify_output
+from pypdf import PdfWriter
 
 
 def _payload(job_id):
@@ -85,6 +86,7 @@ class SlidesServiceTests(unittest.TestCase):
             self.assertEqual(result.artifact_key, f"{job_id}.pptx")
             self.assertEqual(result.download_filename, "2026 Taiwan NHI briefing.pptx")
             self.assertEqual(observed["api_key"], "secret-api-key")
+            self.assertEqual(observed["expected_slide_count"], request.slides_count)
             self.assertTrue((root / "published" / result.artifact_key).is_file())
             self.assertFalse((root / "jobs" / str(job_id)).exists())
             serialized = result.model_dump_json()
@@ -163,6 +165,8 @@ class SlidesServiceTests(unittest.TestCase):
 
         prompt = slides_adapter.build_review_prompt(_payload(uuid4()), Path("/tmp/workspace"), None, None)
         self.assertIn("authoritative requested presentation title", prompt)
+        self.assertIn("ordinary rounding", prompt)
+        self.assertIn("independent root cause", prompt)
         self.assertNotIn("read-only sandbox", prompt)
 
     def test_revision_feedback_contains_only_blocking_findings(self):
@@ -227,6 +231,52 @@ class SlidesServiceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(JobError, "expected 8 slides, found 2"):
                 verify_output(root, expected_slide_count=8)
+
+    def test_verify_output_rejects_identical_final_renders(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            deck = root / "output" / "presentation.pptx"
+            deck.parent.mkdir()
+            with zipfile.ZipFile(deck, "w") as archive:
+                archive.writestr("[Content_Types].xml", "content")
+                archive.writestr("ppt/slides/slide1.xml", "slide")
+                archive.writestr("ppt/slides/slide2.xml", "slide")
+                archive.writestr("padding.bin", "x" * 12_000)
+            (root / "input").mkdir()
+            intermediate = root / "work" / "intermediate"
+            intermediate.mkdir(parents=True)
+            for name in ("evidence_map.json", "content_check.json", "review_report.json", "qa_report.json"):
+                (intermediate / name).write_text("{}", encoding="utf-8")
+            renders = root / "work" / "rendered" / "final"
+            renders.mkdir(parents=True)
+            for number in (1, 2):
+                (renders / f"slide-{number}.png").write_bytes(b"\x89PNG\r\n\x1a\nidentical")
+
+            def office_runner(command, **kwargs):
+                if "soffice.py" in " ".join(command):
+                    output_dir = Path(command[command.index("--outdir") + 1])
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    writer = PdfWriter()
+                    writer.add_blank_page(width=100, height=100)
+                    writer.add_blank_page(width=100, height=100)
+                    with (output_dir / "presentation.pdf").open("wb") as handle:
+                        writer.write(handle)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with self.assertRaisesRegex(JobError, "all final slide renders are identical"):
+                verify_output(root, expected_slide_count=2, runner=office_runner)
+
+    def test_preflight_requires_thumbnail_renderer(self):
+        def tool_lookup(name):
+            return None if name == "pdftoppm" else f"/usr/bin/{name}"
+
+        with self.assertRaisesRegex(JobError, "pdftoppm"):
+            slides.preflight(
+                [],
+                tool_lookup=tool_lookup,
+                module_lookup=lambda name: object(),
+                runner=lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Noto Sans TC\n", stderr=""),
+            )
 
     def test_validate_and_publish_pass_requested_slide_count(self):
         with tempfile.TemporaryDirectory() as temporary:

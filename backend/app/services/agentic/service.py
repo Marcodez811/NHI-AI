@@ -135,6 +135,11 @@ def _blocking_count(review: Any, blocking: bool) -> int:
     return 1 if blocking else 0
 
 
+def _blocking_message(count: int) -> str:
+    noun = "finding" if count == 1 else "findings"
+    return f"Reviewer found {count} blocking {noun}."
+
+
 def _uses_execution_request(runner: Any) -> bool:
     """Identify the new runner contract while retaining old test doubles.
 
@@ -552,7 +557,7 @@ async def _execute_bounded_agents(
             message=(
                 "Reviewer approved publication."
                 if not blocking
-                else f"Reviewer found {review_count} blocking findings."
+                else _blocking_message(review_count)
             ),
             duration_ms=review_result.duration_ms or round((asyncio.get_running_loop().time() - reviewer_started) * 1000),
         )

@@ -576,8 +576,8 @@ async def test_modern_semantic_rejection_reports_blockers_and_does_not_publish(t
         if event["event_type"] == "node_completed" and event["node_id"] == "reviewer"
     ]
     assert [event["message"] for event in reviewer_completions] == [
-        "Reviewer found 1 blocking findings.",
-        "Reviewer found 1 blocking findings.",
+        "Reviewer found 1 blocking finding.",
+        "Reviewer found 1 blocking finding.",
     ]
     assert "Maximum revision attempts reached." in [event["message"] for event in progress]
 

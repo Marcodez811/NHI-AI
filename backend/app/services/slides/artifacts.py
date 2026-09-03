@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -38,6 +40,16 @@ REQUIRED_PDF_AGENT_PACKAGES = {
     "pytesseract": "pytesseract",
 }
 REQUIRED_NODE_MODULES = ("pptxgenjs", "sharp", "react", "react-dom", "react-icons")
+REQUIRED_PPTX_TOOLS = (
+    "add_slide.py",
+    "clean.py",
+    "thumbnail.py",
+    "office/soffice.py",
+    "office/validate.py",
+    "office/helpers/__init__.py",
+    "office/validators/__init__.py",
+    "office/schemas/ISO-IEC29500-4_2016/pml.xsd",
+)
 REQUIRED_TESSERACT_LANGUAGES = {"chi_tra", "eng"}
 CJK_FONT_PREFERENCES = (
     "Microsoft JhengHei", "Noto Sans CJK", "Noto Sans TC", "Noto Serif CJK", "Source Han", "PingFang TC",
@@ -55,6 +67,33 @@ def _run_checked_tool(command: Sequence[str], label: str, runner: Callable[..., 
         details = (result.stderr or result.stdout or "").strip()
         raise JobError("preflight", f"{label} failed: {details or 'no details'}")
     return result
+
+
+def _check_pptx_tooling(*, tool_lookup: Callable[[str], str | None], module_lookup: Callable[[str], Any], runner: Callable[..., subprocess.CompletedProcess[str]], backend_root: Path, environment: dict[str, str] | None) -> None:
+    skill_scripts = REPOSITORY_SKILLS_DIR / PPTX_SKILL / "scripts"
+    missing = [relative for relative in REQUIRED_PPTX_TOOLS if not (skill_scripts / relative).is_file()]
+    if missing:
+        raise JobError("preflight", "PPTX skill tooling is incomplete: " + ", ".join(missing))
+    if not tool_lookup("pdftoppm"):
+        raise JobError("preflight", "pdftoppm is required for PPTX thumbnail rendering")
+    for import_name, package in REQUIRED_PYTHON_AGENT_PACKAGES.items():
+        if module_lookup(import_name) is None:
+            raise JobError("preflight", f"missing Python package for PPTX tooling: {package}")
+    _run_checked_tool(
+        [sys.executable, "-m", "py_compile", *[str(skill_scripts / relative) for relative in ("add_slide.py", "clean.py", "thumbnail.py", "office/validate.py")]],
+        "PPTX helper syntax",
+        runner,
+        cwd=backend_root,
+        env=environment,
+    )
+    for relative in ("thumbnail.py", "office/validate.py"):
+        _run_checked_tool(
+            [sys.executable, str(skill_scripts / relative), "--help"],
+            f"PPTX helper {relative}",
+            runner,
+            cwd=backend_root,
+            env=environment,
+        )
 
 
 def _has_font_files(directory: Path) -> bool:
@@ -105,6 +144,13 @@ def preflight(input_paths: Sequence[Path], *, tool_lookup: Callable[[str], str |
         raise JobError("preflight", "missing system tools: " + ", ".join(missing_tools))
     if not tool_lookup("soffice"):
         raise JobError("preflight", "LibreOffice is required to render and visually validate the slides, but 'soffice' was not found")
+    _check_pptx_tooling(
+        tool_lookup=tool_lookup,
+        module_lookup=module_lookup,
+        runner=runner,
+        backend_root=backend_root,
+        environment=environment,
+    )
     module_checks = "; ".join(f"require.resolve({name!r})" for name in REQUIRED_NODE_MODULES)
     _run_checked_tool(["node", "-e", module_checks], "required Node modules", runner, cwd=backend_root, env=environment)
     fonts = _run_checked_tool(["fc-list", "--format=%{family}\\n"], "CJK font discovery", runner, env=environment).stdout
@@ -216,6 +262,46 @@ def _pptx_slide_count(path: Path) -> int:
     return len(slides)
 
 
+def _validate_office_output(deck: Path, pptx_scripts: Path, job_dir: Path, runner: Callable[..., subprocess.CompletedProcess[str]], slide_count: int) -> None:
+    _run_validator(
+        [sys.executable, str(pptx_scripts / "office" / "validate.py"), str(deck)],
+        "Office XML validation",
+        job_dir,
+        runner,
+    )
+    with tempfile.TemporaryDirectory(prefix="slides_office_") as temporary:
+        output_dir = Path(temporary)
+        _run_validator(
+            [
+                sys.executable,
+                str(pptx_scripts / "office" / "soffice.py"),
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(output_dir),
+                str(deck),
+            ],
+            "LibreOffice conversion",
+            job_dir,
+            runner,
+        )
+        pdf = output_dir / f"{deck.stem}.pdf"
+        if not pdf.is_file() or pdf.stat().st_size == 0:
+            raise JobError("verify_output", "LibreOffice conversion produced no PDF")
+        try:
+            from pypdf import PdfReader
+
+            converted_slide_count = len(PdfReader(str(pdf)).pages)
+        except Exception as exc:
+            raise JobError("verify_output", "LibreOffice conversion produced an unreadable PDF") from exc
+        if converted_slide_count != slide_count:
+            raise JobError(
+                "verify_output",
+                f"LibreOffice PDF has {converted_slide_count} pages, expected {slide_count}",
+            )
+
+
 def _run_validator(command: Sequence[str], label: str, job_dir: Path, runner: Callable[..., subprocess.CompletedProcess[str]]) -> None:
     try:
         result = runner(list(command), cwd=job_dir, capture_output=True, text=True, timeout=180)
@@ -312,6 +398,8 @@ def verify_output(
             runner,
         )
 
+    _validate_office_output(deck, pptx_scripts, job_dir, runner, slide_count)
+
     _run_validator(
         [
             sys.executable,
@@ -385,6 +473,10 @@ def verify_output(
             "verify_output",
             "invalid PNG renders: " + ", ".join(invalid),
         )
+
+    render_hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in renders]
+    if slide_count > 1 and len(set(render_hashes)) == 1:
+        raise JobError("verify_output", "all final slide renders are identical")
 
     return deck
 

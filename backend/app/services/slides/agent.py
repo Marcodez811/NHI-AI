@@ -87,7 +87,11 @@ async def generate_slides(
             cjk_font=cjk_font,
             progress_callback=progress_callback,
         )
-        verified_output = await asyncio.to_thread(verify_output, job_dir)
+        verified_output = await asyncio.to_thread(
+            verify_output,
+            job_dir,
+            expected_slide_count=request.slides_count,
+        )
         published = await asyncio.to_thread(publish_output, verified_output, str(job_id), output_root)
         finished_at = datetime.now(timezone.utc)
         await asyncio.to_thread(cleanup_job, job_dir)

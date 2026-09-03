@@ -175,6 +175,8 @@ def _validate_renders(report: dict[str, Any], render_dir: Path, slide_count: int
             raise ContractError(
                 f"reviewed render SHA-256 does not match final slide {slide_number} PNG"
             )
+    if slide_count > 1 and len({sha256_file(path) for path in render_paths}) == 1:
+        raise ContractError("All final PNG renders are identical")
 
 
 def validate_review_report(
