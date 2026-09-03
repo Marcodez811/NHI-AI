@@ -126,8 +126,10 @@ class ReviewEvaluation(BaseModel):
 def review_finding_identity(finding: ReviewFinding) -> str:
     """Return the canonical identity used to compare findings across rounds."""
 
-    locations = ",".join(sorted(set(finding.locations)))
-    return f"{finding.category.strip().lower()}::{finding.issue_key.strip().lower()}::{locations}"
+    # Locations deliberately do not participate in identity.  An author can
+    # fix a claim by moving or replacing it, which naturally changes its
+    # canonical location while the underlying issue remains the same.
+    return f"{finding.category.strip().lower()}::{finding.issue_key.strip().lower()}"
 
 
 def normalize_review_outcome(
@@ -178,8 +180,13 @@ def normalize_review_outcome(
                 raise ValueError("semantic review referenced a previous finding more than once")
             if previous_identity_by_id[finding_id] != identity:
                 raise ValueError("semantic review changed a previous finding identity")
+            if previous_findings[finding_id].severity != item.severity:
+                raise ValueError("semantic review changed a previous finding severity")
         else:
-            finding_id = previous_by_identity.get(identity) or f"review-{attempt}-finding-{index}"
+            inherited_id = previous_by_identity.get(identity)
+            if inherited_id and previous_findings[inherited_id].severity != item.severity:
+                raise ValueError("semantic review changed a previous finding severity")
+            finding_id = inherited_id or f"review-{attempt}-finding-{index}"
         seen_ids.add(finding_id)
         normalized.append(item.model_copy(update={"finding_id": finding_id}))
 

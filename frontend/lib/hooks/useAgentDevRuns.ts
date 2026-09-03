@@ -34,10 +34,19 @@ export interface UseAgentDevRunsResult {
     refresh: () => Promise<void>;
 }
 
-const DEFAULT_POLL_INTERVAL = 1_000;
+const DEFAULT_POLL_INTERVAL = 10_000;
 const DEFAULT_RUN_LIMIT = 50;
 const DEFAULT_EVENT_LIMIT = 200;
 const TERMINAL_STATUSES = new Set(["completed", "failed"]);
+const LIFECYCLE_EVENT_TYPES = new Set([
+    "run_started",
+    "phase_changed",
+    "node_started",
+    "node_completed",
+    "node_failed",
+    "run_completed",
+    "run_failed",
+]);
 
 function asApiError(error: unknown, fallback: string): ApiError {
     if (error instanceof ApiError) return error;
@@ -114,7 +123,9 @@ export function useAgentDevRuns(
                 const previousCursor = cursor;
                 for (const event of events) {
                     if (event.sequence > cursor) cursor = event.sequence;
-                    eventsBySequence.current.set(event.sequence, event);
+                    if (LIFECYCLE_EVENT_TYPES.has(event.event_type)) {
+                        eventsBySequence.current.set(event.sequence, event);
+                    }
                 }
                 if (nextAfter !== null && nextAfter > cursor) cursor = nextAfter;
                 return cursor > previousCursor;

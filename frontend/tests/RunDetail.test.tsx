@@ -16,6 +16,7 @@ const snapshot: AgentRunSnapshot = {
     finished_at: null,
     duration_ms: null,
     message: "Reviewing presentation",
+    last_heartbeat_at: null,
     last_sequence: 0,
     nodes: [
         {
@@ -34,6 +35,7 @@ const snapshot: AgentRunSnapshot = {
             finished_at: null,
             duration_ms: null,
             message: null,
+            last_heartbeat_at: null,
         },
         {
             node_id: "author",
@@ -51,6 +53,7 @@ const snapshot: AgentRunSnapshot = {
             finished_at: null,
             duration_ms: null,
             message: null,
+            last_heartbeat_at: null,
         },
         {
             node_id: "validator",
@@ -68,6 +71,7 @@ const snapshot: AgentRunSnapshot = {
             finished_at: null,
             duration_ms: null,
             message: null,
+            last_heartbeat_at: null,
         },
     ],
 };
@@ -75,14 +79,14 @@ const snapshot: AgentRunSnapshot = {
 describe("RunDetail", () => {
     afterEach(() => cleanup());
 
-    it("renders workflow nodes in lifecycle order and labels the latest attempt", () => {
+    it("renders workflow nodes in lifecycle order and labels their reconstructed attempts", () => {
         render(<RunDetail snapshot={snapshot} events={[]} detailLoading={false} />);
 
         const nodeHeadings = Array.from(document.querySelectorAll("article h3"))
             .map((heading) => heading.textContent);
         expect(nodeHeadings).toEqual(["作者 Agent", "驗證器", "審查 Agent"]);
-        expect(screen.getAllByText("最新嘗試")).toHaveLength(3);
-        expect(screen.queryByText("嘗試")).not.toBeInTheDocument();
+        expect(screen.getAllByText("目前嘗試")).toHaveLength(3);
+        expect(screen.getAllByText("3")).toHaveLength(3);
         expect(screen.getByText("gpt-5.6-luna")).toBeInTheDocument();
         expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
         expect(screen.getAllByText("high")).toHaveLength(2);

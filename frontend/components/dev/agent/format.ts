@@ -77,13 +77,14 @@ export function formatDateTime(value?: string | null): string {
     }).format(date);
 }
 
-export function formatElapsed(durationMs?: number | null, startedAt?: string | null, finishedAt?: string | null): string {
-    let value = durationMs ?? null;
-    if (value === null && startedAt) {
-        const end = finishedAt ? new Date(finishedAt).valueOf() : Date.now();
+export function formatElapsed(durationMs?: number | null, startedAt?: string | null, finishedAt?: string | null, now = Date.now()): string {
+    let value: number | null = null;
+    if (startedAt) {
+        const end = finishedAt ? new Date(finishedAt).valueOf() : now;
         const start = new Date(startedAt).valueOf();
         if (!Number.isNaN(start) && !Number.isNaN(end)) value = Math.max(0, end - start);
     }
+    if (value === null) value = durationMs ?? null;
     if (value === null || !Number.isFinite(value)) return "—";
     const seconds = Math.floor(value / 1000);
     if (seconds < 60) return `${seconds}s`;

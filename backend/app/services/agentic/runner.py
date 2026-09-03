@@ -136,7 +136,7 @@ def _turn_phase(kind: str) -> AgentPhase:
 class ProgressReporter:
     """Serialize sanitized progress and emit periodic heartbeats."""
 
-    def __init__(self, *, callback: ProgressCallback | None = None, path: Path | None = None, heartbeat_seconds: float = 60.0):
+    def __init__(self, *, callback: ProgressCallback | None = None, path: Path | None = None, heartbeat_seconds: float = 10.0):
         self.callback = callback
         self.path = path
         self.heartbeat_seconds = heartbeat_seconds
@@ -229,7 +229,7 @@ class CodexRunResult:
 class CodexRunner:
     """Run labeled streamed turns under one total workflow deadline."""
 
-    def __init__(self, *, codex_factory: Any = AsyncCodex, model: str | None = None, reasoning_effort: AgentReasoningEffort | None = AgentReasoningEffort.HIGH, api_key: str | None = None, timeout_seconds: float = 2700.0, heartbeat_seconds: float = 60.0, backend_root: Path | None = None):
+    def __init__(self, *, codex_factory: Any = AsyncCodex, model: str | None = None, reasoning_effort: AgentReasoningEffort | None = AgentReasoningEffort.HIGH, api_key: str | None = None, timeout_seconds: float = 2700.0, heartbeat_seconds: float = 10.0, backend_root: Path | None = None):
         self.codex_factory = codex_factory
         self.model = model
         self.reasoning_effort = reasoning_effort

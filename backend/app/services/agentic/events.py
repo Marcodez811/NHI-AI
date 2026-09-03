@@ -229,6 +229,7 @@ class AgentNodeSnapshot(BaseModel):
     finished_at: datetime | None = None
     duration_ms: int | None = None
     message: str | None = None
+    last_heartbeat_at: datetime | None = None
 
 
 class AgentRunSnapshot(BaseModel):
@@ -248,6 +249,7 @@ class AgentRunSnapshot(BaseModel):
     finished_at: datetime | None = None
     duration_ms: int | None = None
     message: str | None = None
+    last_heartbeat_at: datetime | None = None
     last_sequence: int = 0
     nodes: list[AgentNodeSnapshot] = Field(default_factory=list)
 
@@ -362,14 +364,23 @@ class AgentTelemetryStore:
                 raw_summary = await self._call(pipeline.get(summary_key))
                 raw_nodes = await self._call(pipeline.hgetall(nodes_key))
                 previous = self._snapshot_from_raw(raw_summary, raw_nodes)
-                sequence = int(_decode(raw_sequence) or 0) + 1
+                # Heartbeats only update the liveness snapshot.  They do not
+                # consume a lifecycle cursor or grow the bounded event stream.
+                previous_sequence = int(_decode(raw_sequence) or 0)
+                sequence = previous_sequence if event.event_type is AgentEventType.HEARTBEAT else previous_sequence + 1
                 sequenced_event = AgentEvent.model_validate(
                     {**event.model_dump(mode="python"), "sequence": sequence}
                 )
                 snapshot, node = self._apply_event(previous, sequenced_event)
 
                 await self._call(pipeline.multi())
-                await self._persist(pipeline, sequenced_event, snapshot, node)
+                await self._persist(
+                    pipeline,
+                    sequenced_event,
+                    snapshot,
+                    node,
+                    persist_lifecycle_event=event.event_type is not AgentEventType.HEARTBEAT,
+                )
                 await self._call(pipeline.execute())
                 return sequenced_event
             except WatchError:
@@ -457,6 +468,17 @@ class AgentTelemetryStore:
         # monotonic by commit order.
         snapshot.updated_at = max(snapshot.updated_at, now)
         snapshot.last_sequence = event.sequence
+        if event.event_type is AgentEventType.HEARTBEAT:
+            snapshot.last_heartbeat_at = max(snapshot.last_heartbeat_at or now, now)
+            node: AgentNodeSnapshot | None = None
+            if event.node_id:
+                node = next((item for item in snapshot.nodes if item.node_id == event.node_id), None)
+                if node is None:
+                    node = AgentNodeSnapshot(node_id=event.node_id, updated_at=now)
+                    snapshot.nodes.append(node)
+                node.updated_at = max(node.updated_at, now)
+                node.last_heartbeat_at = max(node.last_heartbeat_at or now, now)
+            return snapshot, node
         if event.workflow:
             snapshot.workflow = event.workflow
         if event.task_id:
@@ -469,9 +491,15 @@ class AgentTelemetryStore:
             snapshot.phase = event.phase
         if event.message:
             snapshot.message = event.message
-        if event.duration_ms is not None:
-            snapshot.duration_ms = event.duration_ms
-        if event.status:
+        # Node status belongs exclusively to the latest node snapshot.  A
+        # completed author/reviewer must not make the whole workflow terminal
+        # before the coordinator emits its run-completed event.
+        if event.status and event.event_type in {
+            AgentEventType.RUN_STARTED,
+            AgentEventType.PHASE_CHANGED,
+            AgentEventType.RUN_COMPLETED,
+            AgentEventType.RUN_FAILED,
+        }:
             snapshot.status = event.status
 
         if event.event_type is AgentEventType.RUN_STARTED:
@@ -481,10 +509,18 @@ class AgentTelemetryStore:
             snapshot.status = "completed"
             snapshot.finished_at = now
             snapshot.phase = event.phase or "completed"
+            snapshot.duration_ms = event.duration_ms if event.duration_ms is not None else (
+                max(0, round((now - snapshot.started_at).total_seconds() * 1000))
+                if snapshot.started_at else None
+            )
         elif event.event_type is AgentEventType.RUN_FAILED:
             snapshot.status = "failed"
             snapshot.finished_at = now
             snapshot.phase = event.phase or "failed"
+            snapshot.duration_ms = event.duration_ms if event.duration_ms is not None else (
+                max(0, round((now - snapshot.started_at).total_seconds() * 1000))
+                if snapshot.started_at else None
+            )
         elif event.event_type is AgentEventType.PHASE_CHANGED and snapshot.status not in {"completed", "failed"}:
             snapshot.status = "running"
 
@@ -513,6 +549,7 @@ class AgentTelemetryStore:
                 node.provider_run_id = None
                 node.model = None
                 node.reasoning_effort = None
+                node.last_heartbeat_at = None
             if event.runner:
                 node.runner = event.runner
             if event.model:
@@ -556,6 +593,8 @@ class AgentTelemetryStore:
         event: AgentEvent,
         snapshot: AgentRunSnapshot,
         node: AgentNodeSnapshot | None,
+        *,
+        persist_lifecycle_event: bool,
     ) -> None:
         """Queue one run update in the already-open Redis transaction."""
 
@@ -565,7 +604,9 @@ class AgentTelemetryStore:
         events_key = self._key(self.EVENTS_KEY, run_id)
         sequence_key = self._key(self.SEQUENCE_KEY, run_id)
         summary = snapshot.model_copy(update={"nodes": []}).model_dump(mode="json")
-        event_json = json.dumps(event.model_dump(mode="json"), separators=(",", ":"), ensure_ascii=False)
+        # Refresh the sequence TTL even for heartbeats.  Otherwise a long
+        # active run could retain its summary through liveness updates while
+        # losing its cursor and reusing old sequence numbers later.
         await self._pipeline_call(
             pipeline,
             "set",
@@ -573,14 +614,16 @@ class AgentTelemetryStore:
             event.sequence,
             ex=self.retention_seconds,
         )
-        await self._pipeline_call(
-            pipeline,
-            "xadd",
-            events_key,
-            {"data": event_json},
-            maxlen=self.max_events,
-            approximate=False,
-        )
+        if persist_lifecycle_event:
+            event_json = json.dumps(event.model_dump(mode="json"), separators=(",", ":"), ensure_ascii=False)
+            await self._pipeline_call(
+                pipeline,
+                "xadd",
+                events_key,
+                {"data": event_json},
+                maxlen=self.max_events,
+                approximate=False,
+            )
         await self._pipeline_call(
             pipeline,
             "set",
@@ -597,7 +640,8 @@ class AgentTelemetryStore:
             "-inf",
             timestamp - self.retention_seconds,
         )
-        await self._pipeline_call(pipeline, "expire", events_key, self.retention_seconds)
+        if persist_lifecycle_event:
+            await self._pipeline_call(pipeline, "expire", events_key, self.retention_seconds)
         if node is not None:
             await self._pipeline_call(
                 pipeline,

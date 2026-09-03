@@ -179,6 +179,68 @@ async def test_new_node_attempt_resets_activation_scoped_snapshot_fields():
     assert node.finished_at is None
     assert node.duration_ms is None
     assert node.started_at == node.updated_at
+    assert node.last_heartbeat_at is None
+
+
+@pytest.mark.asyncio
+async def test_node_duration_does_not_overwrite_run_duration_and_terminal_run_sets_it():
+    store = AgentTelemetryStore(FakeRedis(), retention_seconds=60)
+    await store.start_run(run_id="duration-run", workflow="slides")
+    await store.emit(
+        run_id="duration-run",
+        event_type=AgentEventType.NODE_STARTED,
+        node_id="author",
+        attempt=1,
+    )
+    await store.emit(
+        run_id="duration-run",
+        event_type=AgentEventType.NODE_COMPLETED,
+        node_id="author",
+        duration_ms=123,
+    )
+    before_terminal = await store.get_run("duration-run")
+    assert before_terminal is not None
+    assert before_terminal.status == "running"
+    assert before_terminal.duration_ms is None
+    assert before_terminal.nodes[0].duration_ms == 123
+
+    await store.emit(run_id="duration-run", event_type=AgentEventType.RUN_COMPLETED, duration_ms=456)
+    completed = await store.get_run("duration-run")
+    assert completed is not None
+    assert completed.duration_ms == 456
+    assert completed.nodes[0].duration_ms == 123
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_updates_liveness_without_advancing_lifecycle_stream_or_mutating_node_state():
+    redis = FakeRedis()
+    store = AgentTelemetryStore(redis, retention_seconds=60)
+    await store.start_run(run_id="heartbeat-run", workflow="slides")
+    await store.emit(
+        run_id="heartbeat-run",
+        event_type=AgentEventType.NODE_STARTED,
+        node_id="author",
+        attempt=1,
+        message="Author is working.",
+    )
+    before = await store.get_run("heartbeat-run")
+    heartbeat = await store.emit(
+        run_id="heartbeat-run",
+        event_type=AgentEventType.HEARTBEAT,
+        node_id="author",
+        attempt=1,
+        message="Provider progress that must not replace the node message.",
+    )
+    after = await store.get_run("heartbeat-run")
+
+    assert before is not None and after is not None
+    assert heartbeat.sequence == before.last_sequence == after.last_sequence
+    assert len(await store.get_events("heartbeat-run")) == 2
+    assert after.last_heartbeat_at is not None
+    assert after.nodes[0].last_heartbeat_at is not None
+    assert after.nodes[0].status == "running"
+    assert after.nodes[0].message == "Author is working."
+    assert after.nodes[0].duration_ms is None
 
 
 def test_event_model_removes_unallowlisted_metadata_and_sanitizes_text():
@@ -231,7 +293,7 @@ async def test_telemetry_store_uses_bounded_event_limit():
     # The fake does not implement Redis trimming, but the stream command still
     # carries the required explicit maxlen/approximate policy.
     queued = redis.streams["agents:run:run-2:events"]
-    assert len(queued) == 3
+    assert len(queued) == 2
 
 
 @pytest.mark.asyncio

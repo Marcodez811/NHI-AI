@@ -287,6 +287,32 @@ async def _run_agent(
     return _as_execution_result(result)
 
 
+def _node_progress_callback(
+    progress_callback: Any,
+    request: AgentExecutionRequest,
+    runner_name: str,
+) -> Any:
+    """Attach activation identity to provider progress and heartbeat events."""
+
+    if progress_callback is None:
+        return None
+
+    async def report(event: dict[str, Any]) -> None:
+        enriched = {
+            **event,
+            "node_id": request.node_id,
+            "role": request.role,
+            "runner": runner_name,
+            "model": request.model,
+            "attempt": request.attempt,
+        }
+        result = progress_callback(enriched)
+        if inspect.isawaitable(result):
+            await result
+
+    return report
+
+
 def _runner_for_node(
     selected: Any,
     runner_name: str,
@@ -377,7 +403,11 @@ async def _execute_bounded_agents(
         )
         author_started = asyncio.get_running_loop().time()
         try:
-            author_result = await _run_agent(author_runner, author_request, progress_callback=progress_callback)
+            author_result = await _run_agent(
+                author_runner,
+                author_request,
+                progress_callback=_node_progress_callback(progress_callback, author_request, author_runner_name),
+            )
         except Exception as exc:
             await _emit_event(
                 event_callback,
@@ -581,7 +611,11 @@ async def _execute_bounded_agents(
         )
         reviewer_started = asyncio.get_running_loop().time()
         try:
-            review_result = await _run_agent(reviewer_runner, review_request, progress_callback=progress_callback)
+            review_result = await _run_agent(
+                reviewer_runner,
+                review_request,
+                progress_callback=_node_progress_callback(progress_callback, review_request, reviewer_runner_name),
+            )
         except Exception as exc:
             await _emit_event(
                 event_callback,
@@ -785,7 +819,11 @@ async def _execute_workflow(
             )
             author_started = asyncio.get_running_loop().time()
             try:
-                run = await _run_agent(author_runner, request, progress_callback=progress_callback)
+                run = await _run_agent(
+                    author_runner,
+                    request,
+                    progress_callback=_node_progress_callback(progress_callback, request, author_runner_name),
+                )
             except Exception:
                 await _emit_event(
                     event_callback,

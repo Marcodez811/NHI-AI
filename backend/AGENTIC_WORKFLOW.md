@@ -313,6 +313,7 @@ The task worker is started with `python -m app.worker tasks`. Defaults are:
 | `AGENT_REVIEWER_REASONING_EFFORT` | `high` | Semantic reviewer reasoning effort |
 | `OPENAI_MODEL` | `gpt-5.6-luna` | Deprecated alias for `AGENT_DEFAULT_MODEL` |
 | `AGENT_TIMEOUT_MINUTES` | `60` | Total workflow deadline |
+| `AGENT_HEARTBEAT_SECONDS` | `10` | Active-node liveness update interval; heartbeats do not enter the lifecycle timeline |
 | `AGENT_MAX_AUTHOR_ATTEMPTS` | `5` | Initial generation plus bounded corrections/reviews |
 | `AGENT_MAX_REVIEW_ROUNDS` | `5` | Deprecated alias for `AGENT_MAX_AUTHOR_ATTEMPTS` |
 | `AGENT_REVIEW_STAGNATION_LIMIT` | `2` | No-progress semantic-review transitions before early rejection |

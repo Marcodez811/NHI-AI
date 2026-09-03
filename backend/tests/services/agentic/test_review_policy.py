@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.agentic import (
     ReviewDecision,
     ReviewFinding,
@@ -9,16 +11,26 @@ from app.services.agentic import (
 )
 
 
-def finding(*, issue_key: str, finding_id: str | None = None, severity=ReviewSeverity.BLOCKING, status=ReviewFindingStatus.OPEN):
+def finding(
+    *,
+    issue_key: str,
+    finding_id: str | None = None,
+    severity=ReviewSeverity.BLOCKING,
+    status=ReviewFindingStatus.OPEN,
+    category="factual",
+    locations=("slide:1",),
+    description: str | None = None,
+    correction="correct it",
+):
     return ReviewFinding(
         finding_id=finding_id,
         status=status,
         severity=severity,
-        category="factual",
+        category=category,
         issue_key=issue_key,
-        locations=("slide:1",),
-        description=issue_key,
-        correction="correct it",
+        locations=locations,
+        description=description or issue_key,
+        correction=correction,
     )
 
 
@@ -116,3 +128,74 @@ def test_normalization_rejects_omitted_previous_blocker():
         assert "omitted" in str(exc)
     else:
         raise AssertionError("expected omitted blocker to be rejected")
+
+
+def test_normalization_allows_location_and_prose_updates_for_existing_finding():
+    first, _ = evaluate(review(finding(issue_key="unsupported-claim")), attempt=1)
+    updated = normalize_review_outcome(
+        review(
+            finding(
+                issue_key="unsupported-claim",
+                finding_id=first.findings[0].finding_id,
+                locations=("slide:4", "claim:C4"),
+                description="The revised claim still lacks a mapping.",
+                correction="Map the revised claim to evidence.",
+            )
+        ),
+        first,
+        attempt=2,
+    )
+    assert updated.findings[0].locations == ("slide:4", "claim:C4")
+    assert updated.findings[0].description == "The revised claim still lacks a mapping."
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"issue_key": "different-issue"}, "identity"),
+        ({"category": "visual"}, "identity"),
+        ({"severity": ReviewSeverity.ADVISORY}, "severity"),
+    ],
+)
+def test_normalization_rejects_mutating_existing_finding_identity_or_severity(change, error):
+    first, _ = evaluate(review(finding(issue_key="unsupported-claim")), attempt=1)
+    with pytest.raises(ValueError, match=error):
+        normalize_review_outcome(
+            review(finding(issue_key=change.pop("issue_key", "unsupported-claim"), finding_id=first.findings[0].finding_id, **change)),
+            first,
+            attempt=2,
+        )
+
+
+def test_normalization_rejects_severity_downgrade_when_reviewer_omits_an_existing_id():
+    first, _ = evaluate(review(finding(issue_key="unsupported-claim")), attempt=1)
+    with pytest.raises(ValueError, match="severity"):
+        normalize_review_outcome(
+            review(finding(issue_key="unsupported-claim", severity=ReviewSeverity.ADVISORY)),
+            first,
+            attempt=2,
+        )
+
+
+def test_real_progress_with_new_blockers_retries_without_stagnation():
+    first, _ = evaluate(
+        review(*(finding(issue_key=f"old-{index}") for index in range(4))),
+        attempt=1,
+    )
+    second, result = evaluate(
+        review(
+            *(finding(issue_key=f"old-{index}", finding_id=first.findings[index].finding_id, status=ReviewFindingStatus.RESOLVED) for index in range(3)),
+            finding(issue_key="old-3", finding_id=first.findings[3].finding_id),
+            finding(issue_key="new-1"),
+            finding(issue_key="new-2"),
+        ),
+        first,
+        attempt=2,
+    )
+    assert len(second.findings) == 6
+    assert result.decision is ReviewDecision.RETRY
+    assert result.resolved_count == 3
+    assert result.persistent_count == 1
+    assert result.new_count == 2
+    assert result.blocking_count == 3
+    assert result.stagnant_transitions == 0

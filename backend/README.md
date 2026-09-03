@@ -439,6 +439,7 @@ cp backend/.env.example backend/.env
 | `AGENT_JOBS_ROOT`                  | Temporary agent job workspaces.                                     | `/tmp/agents/jobs`                             |
 | `AGENT_OUTPUT_ROOT`                | Published agent artifacts (including PPTX).                         | `/tmp/agents/output`                           |
 | `AGENT_TIMEOUT_MINUTES`            | Total deadline for one agent workflow, including reviews.           | `60`                                          |
+| `AGENT_HEARTBEAT_SECONDS`          | Liveness update interval for an active agent node.                  | `10`                                          |
 | `AGENT_KEEP_WORKSPACE_ON_FAILURE`  | Retain failed workspaces for diagnosis.                             | `true`                                        |
 | `AGENT_MAX_AUTHOR_ATTEMPTS`        | Maximum independent author validation/review attempts.              | `5`                                           |
 | `AGENT_MAX_REVIEW_ROUNDS`          | Deprecated alias for `AGENT_MAX_AUTHOR_ATTEMPTS`.                  | `5`                                           |

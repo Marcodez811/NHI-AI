@@ -64,6 +64,11 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias=AliasChoices("AGENT_TIMEOUT_MINUTES", "SLIDES_TIMEOUT_MINUTES"),
     )
+    agent_heartbeat_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        validation_alias=AliasChoices("AGENT_HEARTBEAT_SECONDS"),
+    )
     agent_keep_workspace_on_failure: bool = Field(
         default=True,
         validation_alias=AliasChoices("AGENT_KEEP_WORKSPACE_ON_FAILURE", "SLIDES_KEEP_WORKSPACE_ON_FAILURE"),

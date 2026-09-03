@@ -22,13 +22,11 @@ ENV CI=true
 ARG BACKEND_INTERNAL_URL=http://localhost:8000
 ENV BACKEND_INTERNAL_URL=${BACKEND_INTERNAL_URL}
 
-RUN corepack enable
-
 COPY --from=deps /app/node_modules ./node_modules
 
 COPY . .
 
-RUN pnpm build
+RUN ./node_modules/.bin/next build
 
 
 FROM node:22-alpine AS runner

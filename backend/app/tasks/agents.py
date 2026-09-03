@@ -54,6 +54,7 @@ def _build_runner_registry() -> tuple[RunnerRegistry, float | None]:
             reasoning_effort=settings.agent_default_reasoning_effort,
             api_key=settings.openai_api_key,
             timeout_seconds=float(getattr(settings, "agent_timeout_minutes", 45)) * 60,
+            heartbeat_seconds=settings.agent_heartbeat_seconds,
         ),
     )
     return RunnerRegistry({"codex": codex_runner}), codex_runner.timeout_seconds
@@ -223,20 +224,23 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
                 logger.exception("Unable to persist durable slide job phase", job_id=job_id)
                 raise
         telemetry_type = _progress_telemetry_type(event)
-        await _emit_telemetry(
-            job_id,
-            telemetry_type,
-            workflow=payload.workflow,
-            node_id=event.get("node_id"),
-            role=event.get("role"),
-            runner=event.get("runner"),
-            model=event.get("model"),
-            attempt=event.get("attempt"),
-            status=WorkflowStatus.RUNNING,
-            phase=event.get("phase"),
-            message=event.get("message"),
-            metadata={"stage": event.get("stage"), "heartbeat": bool(event.get("heartbeat"))},
-        )
+        # Provider SDK progress is retained in the worker's audit/progress
+        # channel, but is too noisy for the public lifecycle timeline.
+        if telemetry_type is not AgentEventType.NODE_PROGRESS:
+            await _emit_telemetry(
+                job_id,
+                telemetry_type,
+                workflow=payload.workflow,
+                node_id=event.get("node_id"),
+                role=event.get("role"),
+                runner=event.get("runner"),
+                model=event.get("model"),
+                attempt=event.get("attempt"),
+                status=WorkflowStatus.RUNNING,
+                phase=event.get("phase"),
+                message=event.get("message"),
+                metadata={"stage": event.get("stage"), "heartbeat": bool(event.get("heartbeat"))},
+            )
 
     async def telemetry_event(event: dict[str, Any]) -> None:
         event_type = event.get("event_type")

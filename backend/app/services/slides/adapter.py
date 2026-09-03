@@ -200,6 +200,7 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             previous = [
                 {
                     "finding_id": item.finding_id,
+                    "severity": item.severity.value,
                     "category": item.category,
                     "issue_key": item.issue_key,
                     "locations": list(item.locations),
@@ -224,7 +225,10 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             "polish as advisory unless it changes a threshold, comparison, denominator, or meaning. "
             "Consolidate consequences under the independent root cause; for example, identical "
             "renders and repeated render hashes are one blocker. Use canonical locations such as "
-            "slide:13, artifact:evidence-map, or claim:<id>. Keep issue_key stable across rounds. "
+            "slide:13, artifact:evidence-map, or claim:<id>. For an existing finding, finding_id, "
+            "category, issue_key, and severity are immutable logical identity: keep all four exactly "
+            "unchanged. Status, locations, description, and correction may change as the deck changes. "
+            "Do not encode temporary claim IDs or locations in issue_key. "
             f"Prior blocking findings: {json.dumps(previous, ensure_ascii=False)}. "
             f"Artifacts: {json.dumps(review_context or {}, ensure_ascii=False)}"
         )

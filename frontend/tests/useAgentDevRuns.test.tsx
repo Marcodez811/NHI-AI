@@ -31,6 +31,7 @@ const snapshot = (overrides: Partial<AgentRunSnapshot> = {}): AgentRunSnapshot =
     finished_at: null,
     duration_ms: null,
     message: "Drafting presentation",
+    last_heartbeat_at: null,
     last_sequence: 0,
     nodes: [],
     ...overrides,
@@ -53,6 +54,7 @@ const event = (sequence: number, runId = "run-1"): AgentEvent => ({
     message: `Event ${sequence}`,
     occurred_at: "2026-01-01T00:00:01Z",
     duration_ms: null,
+    metadata: {},
 });
 
 describe("useAgentDevRuns", () => {
@@ -106,6 +108,32 @@ describe("useAgentDevRuns", () => {
             expect.objectContaining({ after: 2, limit: 200 }),
         );
         expect(result.current.events.map((item) => item.sequence)).toEqual([1, 2, 3]);
+    });
+
+    it("advances past old progress and heartbeat events without adding them to the lifecycle timeline", async () => {
+        const current = snapshot({ last_sequence: 3 });
+        vi.mocked(api.fetchAgentRuns).mockResolvedValue({ runs: [current] });
+        vi.mocked(api.fetchAgentRun).mockResolvedValue(current);
+        vi.mocked(api.fetchAgentRunEvents).mockResolvedValue({
+            events: [
+                { ...event(1), event_type: "node_progress" },
+                { ...event(2), event_type: "heartbeat" },
+                event(3),
+            ],
+            after: 0,
+            next_after: 3,
+        });
+        const { result } = renderHook(() => useAgentDevRuns({ pollIntervalMs: 500 }));
+
+        await waitFor(() => expect(result.current.events).toHaveLength(1));
+        expect(result.current.events[0].sequence).toBe(3);
+        await act(async () => {
+            await result.current.refresh();
+        });
+        expect(api.fetchAgentRunEvents).toHaveBeenLastCalledWith(
+            "run-1",
+            expect.objectContaining({ after: 3 }),
+        );
     });
 
     it("drains every event page before treating a terminal run as synchronized", async () => {

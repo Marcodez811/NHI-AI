@@ -162,7 +162,26 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertIn("authoritative requested presentation title", prompt)
         self.assertIn("ordinary rounding", prompt)
         self.assertIn("independent root cause", prompt)
+        self.assertIn("severity are immutable logical identity", prompt)
         self.assertNotIn("read-only sandbox", prompt)
+
+        previous = ReviewOutcome(
+            summary="prior",
+            findings=[
+                ReviewFinding(
+                    finding_id="review-1-finding-1",
+                    severity=ReviewSeverity.BLOCKING,
+                    category="factual",
+                    issue_key="unsupported-claim",
+                    locations=("slide:4",),
+                    description="Claim is unsupported.",
+                )
+            ],
+        )
+        prompt_with_history = slides_adapter.build_review_prompt(
+            _payload(uuid4()), Path("/tmp/workspace"), None, None, previous
+        )
+        self.assertIn('"severity": "blocking"', prompt_with_history)
 
     def test_revision_feedback_contains_only_blocking_findings(self):
         review = ReviewOutcome(

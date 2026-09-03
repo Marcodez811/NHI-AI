@@ -15,6 +15,8 @@ import {
 } from "./format";
 import { StatusIcon } from "./StatusIcon";
 import { Timeline } from "./Timeline";
+import { deriveAgentAttempts } from "./attempts";
+import { useNow } from "../../../lib/hooks/useNow";
 
 export function RunDetail({
     snapshot,
@@ -26,6 +28,11 @@ export function RunDetail({
     detailLoading: boolean;
 }) {
     const [copied, setCopied] = useState(false);
+    const now = useNow();
+    const attemptsByNode = useMemo(
+        () => deriveAgentAttempts(events, snapshot.nodes, now),
+        [events, now, snapshot.nodes],
+    );
     const nodes = useMemo(() => {
         const lifecycleOrder = ["author", "validator", "reviewer"];
         return snapshot.nodes
@@ -94,9 +101,10 @@ export function RunDetail({
                 <div className="text-left sm:text-right">
                     <p className="font-mono text-2xl font-semibold tabular-nums">
                         {formatElapsed(
-                            snapshot.duration_ms,
+                            null,
                             snapshot.started_at,
                             snapshot.finished_at,
+                            now,
                         )}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">總耗時</p>
@@ -153,7 +161,12 @@ export function RunDetail({
                 {snapshot.nodes.length ? (
                     <div className="grid gap-3 lg:grid-cols-3">
                         {nodes.map((node) => (
-                            <NodeCard key={node.node_id} node={node} />
+                            <NodeCard
+                                key={node.node_id}
+                                node={node}
+                                attempts={attemptsByNode.get(node.node_id) ?? []}
+                                now={now}
+                            />
                         ))}
                     </div>
                 ) : (

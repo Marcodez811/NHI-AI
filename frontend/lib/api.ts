@@ -226,6 +226,7 @@ export interface AgentRunSummary {
     finished_at: string | null;
     duration_ms: number | null;
     message: string | null;
+    last_heartbeat_at: string | null;
     last_sequence: number;
 }
 
@@ -245,6 +246,7 @@ export interface AgentNodeSnapshot {
     finished_at: string | null;
     duration_ms: number | null;
     message: string | null;
+    last_heartbeat_at: string | null;
 }
 
 export interface AgentRunSnapshot extends AgentRunSummary {
@@ -268,6 +270,7 @@ export interface AgentEvent {
     message: string | null;
     occurred_at: string;
     duration_ms: number | null;
+    metadata: Record<string, string | number | boolean | null>;
 }
 
 export interface AgentRunListResponse {
