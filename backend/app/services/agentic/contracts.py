@@ -288,7 +288,53 @@ def evaluate_review(
 
 
 class DeterministicValidationError(ValueError):
-    """Expected generated-artifact findings that a correction can address."""
+    """Expected generated-artifact findings that a correction can address.
+
+    This remains a ``ValueError`` for compatibility with callers that used the
+    original validation contract.  The coordinator only treats this explicit
+    exception as a retry signal; arbitrary ``ValueError`` instances are
+    terminal failures.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        findings: Sequence[Any] = (),
+        diagnostic_codes: Sequence[str] = (),
+        codes: Sequence[str] | None = None,
+    ) -> None:
+        self.findings = tuple(findings)
+        selected_codes = diagnostic_codes if codes is None else codes
+        self.diagnostic_codes = tuple(str(code) for code in selected_codes if str(code).strip())
+        # ``codes`` is a short compatibility alias useful to operational
+        # consumers that do not need to know the longer field name.
+        self.codes = self.diagnostic_codes
+        super().__init__(message)
+
+
+class ValidationInfrastructureError(RuntimeError):
+    """Validator infrastructure failed and the candidate must not be retried.
+
+    This deliberately does not inherit from ``ValueError``.  A provider or
+    validator outage is an operational failure, not author-correctable
+    feedback.  Stable diagnostic codes are retained for telemetry and safe
+    task results without exposing validator paths or raw exception details.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        findings: Sequence[Any] = (),
+        diagnostic_codes: Sequence[str] = (),
+        codes: Sequence[str] | None = None,
+    ) -> None:
+        self.findings = tuple(findings)
+        selected_codes = diagnostic_codes if codes is None else codes
+        self.diagnostic_codes = tuple(str(code) for code in selected_codes if str(code).strip())
+        self.codes = self.diagnostic_codes
+        super().__init__(message)
 
 
 class AgentTaskPayload(BaseModel):

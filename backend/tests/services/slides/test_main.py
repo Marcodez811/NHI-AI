@@ -11,7 +11,14 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from app.models.slides import JobStatus, SlidesTaskPayload
-from app.services.agentic.contracts import ReviewFinding, ReviewFindingStatus, ReviewOutcome, ReviewSeverity
+from app.services.agentic.contracts import (
+    DeterministicValidationError,
+    ReviewFinding,
+    ReviewFindingStatus,
+    ReviewOutcome,
+    ReviewSeverity,
+    ValidationInfrastructureError,
+)
 from app.services.slides import agent as slides
 from app.services.slides.adapter import slides_adapter
 from app.services.slides.artifacts import JobError, publish_output, verify_output
@@ -261,14 +268,61 @@ class SlidesServiceTests(unittest.TestCase):
         )
         self.assertIn("work/rendered/final/*.png", context["artifacts"])
 
-    def test_missing_author_artifact_is_a_workflow_failure(self):
+    def test_validator_candidate_findings_are_structured_retry_feedback(self):
         with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(JobError, "artifact was not generated"):
+            candidate_findings = (
+                SimpleNamespace(
+                    origin="candidate",
+                    as_dict=lambda: {"code": "pptx_missing", "message": "presentation.pptx is missing"},
+                ),
+                SimpleNamespace(
+                    origin="candidate",
+                    as_dict=lambda: {"code": "render_missing", "message": "slide render is missing"},
+                ),
+            )
+            validation = SimpleNamespace(status="FAIL", findings=candidate_findings)
+            with (
+                patch("app.services.slides.evidence.load_frozen_evidence", return_value={}),
+                patch("app.services.slides.validation.validate_candidate_deck", return_value=validation),
+            ):
+                with self.assertRaises(DeterministicValidationError) as raised:
+                    asyncio.run(slides_adapter.validate_generated(_payload(uuid4()), Path(temporary)))
+            self.assertIn('"code": "pptx_missing"', str(raised.exception))
+            self.assertIn('"code": "render_missing"', str(raised.exception))
+            self.assertEqual(raised.exception.diagnostic_codes, ("pptx_missing", "render_missing"))
+
+    def test_validator_infrastructure_origin_wins_mixed_findings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            findings = (
+                SimpleNamespace(
+                    origin="candidate",
+                    as_dict=lambda: {"code": "pptx_missing", "message": "presentation.pptx is missing"},
+                ),
+                SimpleNamespace(
+                    origin="infrastructure",
+                    as_dict=lambda: {"code": "libreoffice_unavailable", "message": "renderer unavailable"},
+                ),
+            )
+            validation = SimpleNamespace(status="FAIL", findings=findings)
+            with (
+                patch("app.services.slides.evidence.load_frozen_evidence", return_value={}),
+                patch("app.services.slides.validation.validate_candidate_deck", return_value=validation),
+            ):
+                with self.assertRaises(ValidationInfrastructureError) as raised:
+                    asyncio.run(slides_adapter.validate_generated(_payload(uuid4()), Path(temporary)))
+            self.assertEqual(raised.exception.diagnostic_codes, ("pptx_missing", "libreoffice_unavailable"))
+
+    def test_missing_author_artifact_is_deferred_to_deterministic_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # The coordinator must reach ``validate_generated`` so a missing
+            # PPTX is represented as a correctable ``pptx_missing`` finding.
+            self.assertIsNone(
                 slides_adapter.post_author_completion_check(
                     _payload(uuid4()),
                     None,
                     Path(temporary),
                 )
+            )
 
     def test_verify_output_rejects_requested_slide_count_mismatch(self):
         with tempfile.TemporaryDirectory() as temporary:

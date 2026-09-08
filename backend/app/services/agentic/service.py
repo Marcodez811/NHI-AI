@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
-
+from loguru import logger
 from pydantic import BaseModel
 from openai_codex import Sandbox
 
@@ -19,6 +19,7 @@ from .contracts import (
     AgentTaskPayload,
     AgentTaskResult,
     DeterministicValidationError,
+    ValidationInfrastructureError,
     ReviewDecision,
     ReviewOutcome,
     evaluate_review,
@@ -122,8 +123,35 @@ async def _check_author_completion(adapter: Any, value: Any, result: AgentExecut
 
 
 def _validation_telemetry(exc: BaseException) -> str:
-    finding = safe_error(str(exc), "Deterministic validation failed.")
-    return f"Deterministic validation failed: {finding}"[:12000]
+    """Render a safe validator diagnostic while retaining stable codes."""
+
+    codes = tuple(
+        str(code).strip()
+        for code in getattr(exc, "diagnostic_codes", getattr(exc, "codes", ())) or ()
+        if str(code).strip()
+    )
+    fallback = (
+        "Deterministic validator infrastructure failure."
+        if isinstance(exc, ValidationInfrastructureError)
+        else "Deterministic validation failed."
+    )
+    finding = safe_error(str(exc), fallback)
+    if codes:
+        finding = f"{finding} [diagnostic_codes: {', '.join(codes)}]"
+    return finding[:12000]
+
+
+def _validation_infrastructure_cause(exc: BaseException) -> ValidationInfrastructureError | None:
+    """Find an infrastructure validation error wrapped by a legacy runner."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ValidationInfrastructureError):
+            return current
+        current = current.__cause__
+    return None
 
 
 class SemanticReviewRejected(WorkflowExecutionError):
@@ -633,7 +661,7 @@ async def _execute_bounded_agents(
                 validation = await _call(validate_generated, value, workspace)
                 if validation is False:
                     raise DeterministicValidationError("deterministic validation failed")
-            except (DeterministicValidationError, ValueError) as exc:
+            except DeterministicValidationError as exc:
                 if author_attempt >= max_rounds:
                     await _emit_event(
                         event_callback,
@@ -670,44 +698,21 @@ async def _execute_bounded_agents(
                     )
                 )
                 continue
+            except ValidationInfrastructureError as exc:
+                await _emit_event(
+                    event_callback,
+                    "node_failed",
+                    node_id="validator",
+                    role="deterministic_validator",
+                    runner="system",
+                    attempt=author_attempt,
+                    status="failed",
+                    message=_validation_telemetry(exc),
+                    metadata={"error_code": ",".join(exc.diagnostic_codes)},
+                    duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
+                )
+                raise
             except Exception as exc:
-                if getattr(exc, "stage", None) in {"verify_output", "validation", "deterministic"}:
-                    if author_attempt >= max_rounds:
-                        await _emit_event(
-                            event_callback,
-                            "node_failed",
-                            node_id="validator",
-                            role="deterministic_validator",
-                            runner="system",
-                            attempt=author_attempt,
-                            status="failed",
-                            message=_validation_telemetry(exc),
-                            duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
-                        )
-                        raise WorkflowExecutionError("maximum author attempts exceeded") from exc
-                    feedback = str(exc).strip() or "deterministic validation failed"
-                    await _emit_event(
-                        event_callback,
-                        "node_completed",
-                        node_id="validator",
-                        role="deterministic_validator",
-                        runner="system",
-                        attempt=author_attempt,
-                        status="completed",
-                        message="Deterministic validation returned correctable findings.",
-                        duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
-                    )
-                    author_attempt += 1
-                    prompt = str(
-                        await _call(
-                            adapter.build_prompt,
-                            value,
-                            workspace,
-                            semantic_review_context=review_context,
-                            revision_feedback=feedback,
-                        )
-                    )
-                    continue
                 await _emit_event(
                     event_callback,
                     "node_failed",
@@ -1104,7 +1109,7 @@ async def _execute_workflow(
                             validation = await _call(validate_generated, value, workspace)
                             if validation is False:
                                 raise DeterministicValidationError("deterministic validation failed")
-                        except (DeterministicValidationError, ValueError) as exc:
+                        except DeterministicValidationError as exc:
                             # Deterministic failures skip semantic review for
                             # this round and go directly to correction while
                             # author attempts remain.
@@ -1112,16 +1117,20 @@ async def _execute_workflow(
                             if pending_feedback:
                                 details = f"{pending_feedback}\n\nDeterministic validator findings:\n{details}"
                             return await correction(details)
+                        except ValidationInfrastructureError as exc:
+                            await _emit_event(
+                                event_callback,
+                                "node_failed",
+                                node_id="validator",
+                                role="deterministic_validator",
+                                runner="system",
+                                attempt=review_round,
+                                status="failed",
+                                message=_validation_telemetry(exc),
+                                metadata={"error_code": ",".join(exc.diagnostic_codes)},
+                            )
+                            raise
                         except Exception as exc:
-                            # Domain validators may use a tagged JobError
-                            # without depending on the generic package. Treat
-                            # those expected findings like the shared error
-                            # type; unrelated runtime errors remain terminal.
-                            if getattr(exc, "stage", None) in {"verify_output", "validation", "deterministic"}:
-                                details = str(exc).strip() or "deterministic validation failed"
-                                if pending_feedback:
-                                    details = f"{pending_feedback}\n\nDeterministic validator findings:\n{details}"
-                                return await correction(details)
                             # A validator crash is an operational failure, not
                             # a user-correctable finding; fail closed without
                             # attempting another model turn.
@@ -1184,10 +1193,70 @@ async def _execute_workflow(
         message = safe_error(str(exc), "Publication rejected by semantic review.")
         await _emit_phase(progress_callback, AgentPhase.FAILED, message)
         return AgentTaskResult(job_id=getattr(payload, "job_id", "unknown"), workflow=getattr(payload, "workflow", "unknown"), status=WorkflowStatus.FAILED, phase=AgentPhase.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error=message)
+    except ValidationInfrastructureError as exc:
+        # Infrastructure findings stop immediately, but their stable codes
+        # remain visible in the safe operational result and validator event.
+        message = _validation_telemetry(exc)
+        await _emit_phase(progress_callback, AgentPhase.FAILED, message)
+        return AgentTaskResult(
+            job_id=getattr(payload, "job_id", "unknown"),
+            workflow=getattr(payload, "workflow", "unknown"),
+            status=WorkflowStatus.FAILED,
+            phase=AgentPhase.FAILED,
+            output=None,
+            started_at=started,
+            finished_at=datetime.now(timezone.utc),
+            error=message,
+        )
+    except WorkflowExecutionError as exc:
+        infrastructure = _validation_infrastructure_cause(exc)
+        if infrastructure is None:
+            logger.exception(
+                "Agent workflow failed",
+                workflow=getattr(payload, "workflow", "unknown"),
+                job_id=str(getattr(payload, "job_id", "unknown")),
+            )
+            await _emit_phase(progress_callback, AgentPhase.FAILED)
+            return AgentTaskResult(
+                job_id=getattr(payload, "job_id", "unknown"),
+                workflow=getattr(payload, "workflow", "unknown"),
+                status=WorkflowStatus.FAILED,
+                phase=AgentPhase.FAILED,
+                output=None,
+                started_at=started,
+                finished_at=datetime.now(timezone.utc),
+                error="Workflow execution failed.",
+            )
+        message = _validation_telemetry(infrastructure)
+        await _emit_phase(progress_callback, AgentPhase.FAILED, message)
+        return AgentTaskResult(
+            job_id=getattr(payload, "job_id", "unknown"),
+            workflow=getattr(payload, "workflow", "unknown"),
+            status=WorkflowStatus.FAILED,
+            phase=AgentPhase.FAILED,
+            output=None,
+            started_at=started,
+            finished_at=datetime.now(timezone.utc),
+            error=message,
+        )
     except Exception:
-        # Details are logged server-side only; callers get a stable sentence.
+        logger.exception(
+            "Agent workflow failed",
+            workflow=getattr(payload, "workflow", "unknown"),
+            job_id=str(getattr(payload, "job_id", "unknown")),
+        )
         await _emit_phase(progress_callback, AgentPhase.FAILED)
-        return AgentTaskResult(job_id=getattr(payload, "job_id", "unknown"), workflow=getattr(payload, "workflow", "unknown"), status=WorkflowStatus.FAILED, phase=AgentPhase.FAILED, output=None, started_at=started, finished_at=datetime.now(timezone.utc), error="Workflow execution failed.")
+
+        return AgentTaskResult(
+            job_id=getattr(payload, "job_id", "unknown"),
+            workflow=getattr(payload, "workflow", "unknown"),
+            status=WorkflowStatus.FAILED,
+            phase=AgentPhase.FAILED,
+            output=None,
+            started_at=started,
+            finished_at=datetime.now(timezone.utc),
+            error="Workflow execution failed.",
+        )
     finally:
         if adapter is not None and workspace is not None:
             try:

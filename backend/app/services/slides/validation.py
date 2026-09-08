@@ -21,6 +21,7 @@ import os
 import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 from xml.etree import ElementTree as ET
+import platform
 
 from .contracts import JobError
 
@@ -84,6 +86,14 @@ TRUSTED_RENDERER = (
     / "soffice.py"
 )
 TRUSTED_RENDER_DPI = 150
+RENDER_FILENAME_RE = re.compile(r"slide-([0-9]+)\.png")
+_RENDER_ENV_ALLOWLIST = (
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SAL_USE_VCLPLUGIN",
+    "TZ",
+)
 
 
 class ValidationStatus(str, Enum):
@@ -99,6 +109,7 @@ class ValidationFinding:
 
     code: str
     message: str
+    origin: Literal["candidate", "infrastructure"]
     severity: Literal["blocking", "error"] = "blocking"
     slide_number: int | None = None
     details: Mapping[str, Any] = field(default_factory=dict)
@@ -106,6 +117,7 @@ class ValidationFinding:
     def as_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "code": self.code,
+            "origin": self.origin,
             "severity": self.severity,
             "message": self.message,
         }
@@ -561,8 +573,13 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def _render_sort_key(path: Path) -> tuple[int, str]:
-    match = re.fullmatch(r"slide-(\d+)\.png", path.name)
-    return (int(match.group(1)) if match else 0, path.name)
+    match = RENDER_FILENAME_RE.fullmatch(path.name)
+    if not match:
+        return (0, path.name)
+    try:
+        return (int(match.group(1)), path.name)
+    except ValueError:
+        return (0, path.name)
 
 
 def _pixel_digest(image: Any) -> str:
@@ -586,63 +603,369 @@ def _validate_renders(
     slide_count: int,
 ) -> tuple[list[ValidationFinding], list[_RenderRecord]]:
     findings: list[ValidationFinding] = []
-    if not render_dir.is_dir():
-        return [ValidationFinding("renders_missing", f"render directory is missing: {render_dir}")], []
-    all_pngs = sorted(render_dir.glob("*.png"), key=_render_sort_key)
-    expected_names = {f"slide-{number}.png" for number in range(1, slide_count + 1)}
-    actual_names = {path.name for path in all_pngs}
-    extras = sorted(actual_names - expected_names)
-    missing = sorted(expected_names - actual_names)
-    if extras:
-        findings.append(ValidationFinding("render_extra", "unexpected PNG render(s)", details={"files": extras}))
-    if missing:
-        findings.append(ValidationFinding("render_missing", "one or more slide PNG renders are missing", details={"files": missing}))
+    if render_dir.is_symlink() or not render_dir.is_dir():
+        return [
+            ValidationFinding(
+                "renders_missing",
+                f"render directory is missing or is not a regular directory: {render_dir}",
+                details={"path": str(render_dir)},
+                origin="candidate",
+            )
+        ], []
+
+    # Iterate direct children rather than globbing.  A final-render stage is a
+    # strict boundary: malformed names, nested directories, and symlinks must
+    # not be silently ignored or followed into another stage.
+    entries = sorted(render_dir.iterdir(), key=lambda path: path.name)
+    parsed: dict[int, list[Path]] = {}
+    for path in entries:
+        match = RENDER_FILENAME_RE.fullmatch(path.name)
+        if match is None:
+            findings.append(
+                ValidationFinding(
+                    "render_malformed_name",
+                    "render entry does not use the slide-<number>.png naming scheme",
+                    details={"file": path.name},
+                    origin="candidate",
+                )
+            )
+            continue
+        try:
+            number = int(match.group(1))
+        except ValueError:
+            findings.append(
+                ValidationFinding(
+                    "render_out_of_range",
+                    "render filename contains an unrepresentable numeric slide ID",
+                    details={"file": path.name, "digits": len(match.group(1))},
+                    origin="candidate",
+                )
+            )
+            continue
+        parsed.setdefault(number, []).append(path)
+
+    expected_ids = set(range(1, slide_count + 1))
+    actual_ids = set(parsed)
+    out_of_range = sorted(actual_ids - expected_ids)
+    if out_of_range:
+        findings.append(
+            ValidationFinding(
+                "render_out_of_range",
+                "render filename contains a slide number outside the PPTX slide range",
+                details={
+                    "slide_numbers": out_of_range,
+                    "files": [path.name for number in out_of_range for path in parsed[number]],
+                },
+                origin="candidate",
+            )
+        )
+    duplicate_ids = sorted(number for number, paths in parsed.items() if len(paths) > 1)
+    for number in duplicate_ids:
+        findings.append(
+            ValidationFinding(
+                "render_duplicate_id",
+                "multiple PNG filenames resolve to the same numeric slide ID",
+                slide_number=number if number in expected_ids else None,
+                details={"slide_number": number, "files": [path.name for path in parsed[number]]},
+                origin="candidate",
+            )
+        )
+    missing_ids = sorted(expected_ids - actual_ids)
+    if missing_ids:
+        findings.append(
+            ValidationFinding(
+                "render_missing",
+                "one or more slide PNG renders are missing",
+                details={"slide_numbers": missing_ids, "files": [f"slide-{number}.png" for number in missing_ids]},
+                origin="candidate",
+            )
+        )
     records: list[_RenderRecord] = []
     pixel_hashes: list[str] = []
     dimensions: set[tuple[int, int]] = set()
-    for path in all_pngs:
-        match = re.fullmatch(r"slide-(\d+)\.png", path.name)
-        if not match or path.is_symlink() or not path.is_file():
-            continue
-        number = int(match.group(1))
-        if number < 1 or number > slide_count:
-            continue
-        raw = path.read_bytes()
-        if len(raw) <= len(PNG_SIGNATURE) or raw[: len(PNG_SIGNATURE)] != PNG_SIGNATURE:
-            findings.append(ValidationFinding("render_invalid_png", f"invalid PNG render: {path.name}", slide_number=number))
-            continue
-        if Image is None:
-            findings.append(ValidationFinding("renderer_dependency_missing", "Pillow is required to decode PNG renders"))
-            continue
-        try:
-            with Image.open(path) as image:
-                image.verify()
-            with Image.open(path) as image:
-                image.load()
-                width, height = image.size
-                if width < 2 or height < 2:
-                    findings.append(ValidationFinding("render_invalid_dimensions", f"render has invalid dimensions: {path.name}", slide_number=number, details={"width": width, "height": height}))
-                if _is_solid(image):
-                    findings.append(ValidationFinding("render_blank", f"render is a solid blank image: {path.name}", slide_number=number))
-                pixel_hash = _pixel_digest(image)
-                pixel_hashes.append(pixel_hash)
-                dimensions.add((width, height))
-                records.append(_RenderRecord(number, path.name, _sha256_bytes(raw), pixel_hash, width, height, len(raw)))
-        except Exception as exc:
-            findings.append(ValidationFinding("render_decode_error", f"PNG render could not be decoded: {path.name}", slide_number=number, details={"error": str(exc)}))
+    successful_by_slide: dict[int, list[str]] = {}
+    for number, paths in sorted(parsed.items()):
+        for path in paths:
+            if path.is_symlink() or not path.is_file() or not stat.S_ISREG(path.stat(follow_symlinks=False).st_mode):
+                findings.append(
+                    ValidationFinding(
+                        "render_non_regular",
+                        "render must be a regular, non-symlink file",
+                        slide_number=number if number in expected_ids else None,
+                        details={"file": path.name, "kind": "symlink" if path.is_symlink() else "directory_or_non_regular"},
+                        origin="candidate",
+                    )
+                )
+                continue
+            if number < 1 or number > slide_count:
+                continue
+            try:
+                raw = path.read_bytes()
+            except Exception as exc:
+                findings.append(
+                    ValidationFinding(
+                        "render_read_error",
+                        f"PNG render could not be read: {path.name}",
+                        slide_number=number,
+                        details={"error": str(exc)},
+                        origin="candidate",
+                    )
+                )
+                continue
+            if len(raw) <= len(PNG_SIGNATURE) or raw[: len(PNG_SIGNATURE)] != PNG_SIGNATURE:
+                findings.append(
+                    ValidationFinding(
+                        "render_invalid_png",
+                        f"invalid PNG render: {path.name}",
+                        slide_number=number,
+                        origin="candidate",
+                    )
+                )
+                continue
+            if Image is None:
+                findings.append(
+                    ValidationFinding(
+                        "renderer_dependency_missing",
+                        "Pillow is required to decode PNG renders",
+                        origin="infrastructure",
+                    )
+                )
+                continue
+            try:
+                with Image.open(path) as image:
+                    image.verify()
+                with Image.open(path) as image:
+                    image.load()
+                    if image.format != "PNG":
+                        raise ValueError(f"decoded format is {image.format or 'unknown'}, not PNG")
+                    width, height = image.size
+                    if width < 2 or height < 2:
+                        findings.append(
+                            ValidationFinding(
+                                "render_invalid_dimensions",
+                                f"render has invalid dimensions: {path.name}",
+                                slide_number=number,
+                                details={"width": width, "height": height},
+                                origin="candidate",
+                            )
+                        )
+                    if _is_solid(image):
+                        findings.append(
+                            ValidationFinding(
+                                "render_blank",
+                                f"render is a solid blank image: {path.name}",
+                                slide_number=number,
+                                origin="candidate",
+                            )
+                        )
+                    pixel_hash = _pixel_digest(image)
+                    pixel_hashes.append(pixel_hash)
+                    dimensions.add((width, height))
+                    successful_by_slide.setdefault(number, []).append(path.name)
+                    records.append(_RenderRecord(number, path.name, _sha256_bytes(raw), pixel_hash, width, height, len(raw)))
+            except Exception as exc:
+                findings.append(
+                    ValidationFinding(
+                        "render_decode_error",
+                        f"PNG render could not be decoded: {path.name}",
+                        slide_number=number,
+                        details={"error": str(exc)},
+                        origin="candidate",
+                    )
+                )
+    incomplete_ids = sorted(expected_ids - set(successful_by_slide))
+    if incomplete_ids:
+        findings.append(
+            ValidationFinding(
+                "render_incomplete",
+                "each expected slide must have exactly one successfully decoded regular PNG",
+                details={
+                    "expected_slide_numbers": sorted(expected_ids),
+                    "decoded_slide_numbers": sorted(successful_by_slide),
+                    "missing_or_undecoded": incomplete_ids,
+                },
+                origin="candidate",
+            )
+        )
+    if any(len(names) != 1 for names in successful_by_slide.values()):
+        findings.append(
+            ValidationFinding(
+                "render_decoded_duplicate",
+                "each expected slide must have exactly one successfully decoded PNG",
+                details={"decoded_files": successful_by_slide},
+                origin="candidate",
+            )
+        )
     if len(dimensions) > 1:
-        findings.append(ValidationFinding("render_dimensions_mismatch", "slide renders do not share dimensions", details={"dimensions": sorted(dimensions)}))
+        findings.append(ValidationFinding("render_dimensions_mismatch", "slide renders do not share dimensions", details={"dimensions": sorted(dimensions)}, origin="candidate"))
     if slide_count > 1 and len(pixel_hashes) == slide_count and len(set(pixel_hashes)) == 1:
-        findings.append(ValidationFinding("render_all_identical", "all slide renders contain identical decoded pixels"))
+        findings.append(ValidationFinding("render_all_identical", "all slide renders contain identical decoded pixels", origin="candidate"))
     records.sort(key=lambda item: item.slide_number)
     return findings, records
+
+
+def _is_regular_file(path: Path) -> bool:
+    """Return true only for an ordinary non-symlink filesystem file."""
+
+    try:
+        return (
+            not path.is_symlink()
+            and path.is_file()
+            and stat.S_ISREG(path.stat(follow_symlinks=False).st_mode)
+        )
+    except OSError:
+        return False
+
+
+def _canonicalize_pdftoppm_output(source_dir: Path, destination_dir: Path) -> Path:
+    """Copy pdftoppm output into a strict, unpadded slide-name directory.
+
+    ``pdftoppm`` normally emits ``slide-1.png`` but its output naming can be
+    influenced by the input/prefix.  Numeric IDs are intentionally parsed
+    rather than string-compared, then copied to a fresh directory using one
+    canonical name per page.  Padded/unpadded collisions are rejected before
+    any output is accepted by the validator.
+    """
+
+    if source_dir.is_symlink() or not source_dir.is_dir():
+        raise RuntimeError(f"pdftoppm output directory is missing: {source_dir}")
+    if destination_dir.exists() or destination_dir.is_symlink():
+        raise RuntimeError(f"canonical render directory is not fresh: {destination_dir}")
+    destination_dir.mkdir(parents=True, exist_ok=False)
+    by_number: dict[int, Path] = {}
+    try:
+        for path in sorted(source_dir.iterdir(), key=lambda item: item.name):
+            match = RENDER_FILENAME_RE.fullmatch(path.name)
+            if match is None:
+                raise RuntimeError(f"pdftoppm emitted a malformed PNG name: {path.name}")
+            if not _is_regular_file(path):
+                raise RuntimeError(f"pdftoppm emitted a non-regular PNG: {path.name}")
+            number = int(match.group(1))
+            previous = by_number.get(number)
+            if previous is not None:
+                raise RuntimeError(
+                    "pdftoppm emitted colliding numeric slide IDs: "
+                    f"{previous.name}, {path.name}"
+                )
+            by_number[number] = path
+        for number, source in sorted(by_number.items()):
+            target = destination_dir / f"slide-{number}.png"
+            if target.exists() or target.is_symlink():
+                raise RuntimeError(f"canonical render path collision: {target.name}")
+            shutil.copyfile(source, target, follow_symlinks=False)
+        return destination_dir
+    except Exception:
+        shutil.rmtree(destination_dir, ignore_errors=True)
+        raise
+
+
+def _tool_version(executable: str, *, version_args: Sequence[str]) -> str | None:
+    """Read a short tool version without capturing arbitrary environment data."""
+
+    resolved = shutil.which(executable)
+    if not resolved:
+        return None
+    try:
+        result = subprocess.run(
+            [resolved, *version_args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    output = (result.stdout or result.stderr or "").strip().splitlines()
+    return output[0][:200] if output else None
+
+
+def _allowlisted_render_env() -> dict[str, str]:
+    return {
+        key: os.environ[key]
+        for key in _RENDER_ENV_ALLOWLIST
+        if key in os.environ
+    }
+
+
+def _reset_render_diagnostics(path: Path) -> None:
+    """Remove only the job-local, latest-only diagnostics directory."""
+
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _copy_regular_file(source: Path, target: Path) -> None:
+    if not _is_regular_file(source):
+        raise OSError(f"refusing to copy non-regular render artifact: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target, follow_symlinks=False)
+
+
+def _write_render_diagnostics(
+    diagnostics_dir: Path,
+    deck: Path,
+    submitted_dir: Path,
+    trusted_dir: Path,
+    submitted_records: Sequence[_RenderRecord],
+    trusted_records: Sequence[_RenderRecord],
+    findings: Sequence[ValidationFinding],
+    render_context: Mapping[str, Any],
+) -> None:
+    """Persist a bounded, secret-free snapshot of a trusted-render mismatch."""
+
+    _reset_render_diagnostics(diagnostics_dir)
+    staging = diagnostics_dir.with_name(f".{diagnostics_dir.name}.{uuid4().hex}.tmp")
+    staging.mkdir(parents=True, exist_ok=False)
+    try:
+        if _is_regular_file(deck):
+            _copy_regular_file(deck, staging / "presentation.pptx")
+        for record in submitted_records:
+            _copy_regular_file(submitted_dir / record.filename, staging / "submitted" / record.filename)
+        for record in trusted_records:
+            _copy_regular_file(trusted_dir / record.filename, staging / "trusted" / record.filename)
+        author_metadata_path = submitted_dir.parent / "render_metadata.json"
+        author_metadata: Mapping[str, Any] | None = None
+        if _is_regular_file(author_metadata_path) and author_metadata_path.stat().st_size <= 64 * 1024:
+            try:
+                loaded = json.loads(author_metadata_path.read_text(encoding="utf-8"))
+                author_metadata = loaded if isinstance(loaded, dict) else None
+            except (OSError, UnicodeError, ValueError):
+                author_metadata = None
+        payload = {
+            "format_version": "RenderDiagnostics v1",
+            "reason": "submitted render does not match the independent trusted render",
+            "presentation": {
+                "filename": "presentation.pptx",
+                "sha256": sha256_file(deck) if _is_regular_file(deck) else None,
+            },
+            "submitted_renders": [record.as_dict() for record in submitted_records],
+            "trusted_renders": [record.as_dict() for record in trusted_records],
+            "findings": [finding.as_dict() for finding in findings],
+            "tools": {
+                **dict(render_context.get("tools", {})),
+                "python": {
+                    "executable": Path(sys.executable).name,
+                    "version": platform.python_version(),
+                },
+            },
+            "render_env": _allowlisted_render_env(),
+            # Author-owned and diagnostic only. It never affects validation.
+            "submitted_render_metadata": author_metadata,
+        }
+        _write_json_atomic(staging / "diagnostics.json", payload)
+        os.replace(staging, diagnostics_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
 
 def _default_trusted_renderer(
     deck: Path,
     output_dir: Path,
     command_runner: Callable[..., subprocess.CompletedProcess[str]],
-) -> None:
+) -> Path:
     """Render a deck using the backend's fixed LibreOffice/PDF toolchain.
 
     The author render directory is never passed to this function.  The
@@ -658,18 +981,22 @@ def _default_trusted_renderer(
     output_dir.mkdir(parents=True, exist_ok=True)
     pdf_dir = output_dir / "pdf"
     pdf_dir.mkdir(parents=True, exist_ok=True)
+    ppm_dir = output_dir / "pdftoppm"
+    ppm_dir.mkdir(parents=True, exist_ok=False)
+    canonical_dir = output_dir / "canonical"
+    office_args = [
+        sys.executable,
+        str(TRUSTED_RENDERER),
+        "--headless",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        str(pdf_dir),
+        str(deck),
+    ]
     try:
         office_result = command_runner(
-            [
-                sys.executable,
-                str(TRUSTED_RENDERER),
-                "--headless",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                str(pdf_dir),
-                str(deck),
-            ],
+            office_args,
             cwd=deck.parent,
             capture_output=True,
             text=True,
@@ -683,16 +1010,17 @@ def _default_trusted_renderer(
     pdfs = sorted(pdf_dir.glob("*.pdf"))
     if len(pdfs) != 1:
         raise RuntimeError(f"trusted LibreOffice renderer produced {len(pdfs)} PDF files")
+    image_args = [
+        "pdftoppm",
+        "-png",
+        "-r",
+        str(TRUSTED_RENDER_DPI),
+        str(pdfs[0]),
+        str(ppm_dir / "slide"),
+    ]
     try:
         image_result = command_runner(
-            [
-                "pdftoppm",
-                "-png",
-                "-r",
-                str(TRUSTED_RENDER_DPI),
-                str(pdfs[0]),
-                str(output_dir / "slide"),
-            ],
+            image_args,
             cwd=deck.parent,
             capture_output=True,
             text=True,
@@ -703,6 +1031,7 @@ def _default_trusted_renderer(
     if image_result.returncode:
         details = (getattr(image_result, "stderr", "") or getattr(image_result, "stdout", "") or "").strip()
         raise RuntimeError(f"trusted PNG renderer failed: {details or 'no details'}")
+    return _canonicalize_pdftoppm_output(ppm_dir, canonical_dir)
 
 
 def _validate_against_trusted_renders(
@@ -712,17 +1041,29 @@ def _validate_against_trusted_renders(
     *,
     command_runner: Callable[..., subprocess.CompletedProcess[str]],
     trusted_render: Callable[[Path, Path], Any] | None,
+    submitted_dir: Path | None = None,
+    diagnostics_dir: Path | None = None,
 ) -> tuple[list[ValidationFinding], list[_RenderRecord]]:
     """Independently render and compare decoded pixels slide by slide."""
 
     findings: list[ValidationFinding] = []
     submitted_by_slide = {record.slide_number: record for record in submitted_records}
+    render_context: dict[str, Any] = {
+        "tools": {
+            "trusted_renderer": {
+                "path": TRUSTED_RENDERER.name,
+                "args": ["--headless", "--convert-to", "pdf", "--outdir", "<temporary>", "<deck>"],
+            },
+            "pdftoppm": {
+                "args": ["-png", "-r", str(TRUSTED_RENDER_DPI), "<pdf>", "<temporary>/slide"],
+            },
+        }
+    }
     with tempfile.TemporaryDirectory(prefix="slides_validator_trusted_render_") as temporary:
         output_dir = Path(temporary)
         try:
             if trusted_render is None:
-                _default_trusted_renderer(deck, output_dir, command_runner)
-                trusted_dir = output_dir
+                trusted_dir = _default_trusted_renderer(deck, output_dir, command_runner)
             else:
                 returned = trusted_render(deck, output_dir)
                 if isinstance(returned, (str, Path)):
@@ -730,12 +1071,17 @@ def _validate_against_trusted_renders(
                     trusted_dir = returned_path if returned_path.is_dir() else returned_path.parent
                 else:
                     trusted_dir = output_dir
+                render_context["tools"]["trusted_renderer"] = {
+                    "kind": "injected",
+                    "callable": getattr(trusted_render, "__qualname__", repr(trusted_render))[:200],
+                }
         except Exception as exc:
             findings.append(
                 ValidationFinding(
                     "trusted_renderer_error",
                     "backend trusted renderer could not independently render the deck",
                     details={"error": str(exc)},
+                    origin="infrastructure",
                 )
             )
             return findings, []
@@ -747,6 +1093,7 @@ def _validate_against_trusted_renders(
             ValidationFinding(
                 f"trusted_{finding.code}",
                 finding.message,
+                "infrastructure",
                 finding.severity,
                 finding.slide_number,
                 finding.details,
@@ -775,6 +1122,33 @@ def _validate_against_trusted_renders(
                             "submitted_dimensions": [submitted.width, submitted.height],
                             "trusted_dimensions": [trusted.width, trusted.height],
                         },
+                        origin="candidate",
+                    )
+                )
+        if diagnostics_dir is not None and submitted_dir is not None and any(
+            finding.code == "render_stale_or_mismatch" for finding in findings
+        ):
+            try:
+                if trusted_render is None:
+                    render_context["tools"]["trusted_renderer"]["version"] = _tool_version("soffice", version_args=("--version",))
+                    render_context["tools"]["pdftoppm"]["version"] = _tool_version("pdftoppm", version_args=("-v",))
+                _write_render_diagnostics(
+                    diagnostics_dir,
+                    deck,
+                    submitted_dir,
+                    trusted_dir,
+                    submitted_records,
+                    trusted_records,
+                    findings,
+                    render_context,
+                )
+            except Exception as exc:
+                findings.append(
+                    ValidationFinding(
+                        "render_diagnostics_error",
+                        "trusted-render mismatch diagnostics could not be written",
+                        details={"error": str(exc)},
+                        origin="infrastructure",
                     )
                 )
         return findings, trusted_records
@@ -789,7 +1163,7 @@ def _logo_image_parts(
     expected_paths = [logo_dir / "nhi_logo_large.png", logo_dir / "nhi_logo_small.png"]
     missing = [str(path) for path in expected_paths if not path.is_file()]
     if missing:
-        return [ValidationFinding("logo_assets_missing", "official logo asset(s) are unavailable", details={"files": missing})], []
+        return [ValidationFinding("logo_assets_missing", "official logo asset(s) are unavailable", details={"files": missing}, origin="infrastructure")], []
     logo_hashes = [_sha256_bytes(path.read_bytes()) for path in expected_paths]
     with zipfile.ZipFile(pptx_path) as archive:
         root = package.slide_roots[0]
@@ -805,7 +1179,7 @@ def _logo_image_parts(
             if image_hash in logo_hashes:
                 matches.append((target, image_hash, blip))
         if len(matches) != 1:
-            findings.append(ValidationFinding("logo_count", "first slide must embed exactly one unmodified official NHI logo", slide_number=1, details={"count": len(matches)}))
+            findings.append(ValidationFinding("logo_count", "first slide must embed exactly one unmodified official NHI logo", slide_number=1, details={"count": len(matches)}, origin="candidate"))
             return findings, logo_hashes
         target, _, blip = matches[0]
         # A srcRect means the source image is cropped.  The hash check above
@@ -820,7 +1194,7 @@ def _logo_image_parts(
         )
         crop = picture.find(f".//{_A}srcRect") if picture is not None else None
         if crop is not None and any(int(crop.get(edge, "0")) != 0 for edge in ("l", "t", "r", "b")):
-            findings.append(ValidationFinding("logo_cropped", "official logo is cropped on the cover", slide_number=1, details={"target": target}))
+            findings.append(ValidationFinding("logo_cropped", "official logo is cropped on the cover", slide_number=1, details={"target": target}, origin="candidate"))
         if Image is not None:
             asset_path = expected_paths[logo_hashes.index(_sha256_bytes(archive.read(target)))]
             try:
@@ -835,10 +1209,10 @@ def _logo_image_parts(
                         break
                     cx, cy = int(ext.get("cx", "0")), int(ext.get("cy", "0"))
                     if cx > 0 and cy > 0 and abs((cx / cy) - native_ratio) > max(native_ratio * 0.02, 0.01):
-                        findings.append(ValidationFinding("logo_aspect_ratio", "official logo aspect ratio was changed", slide_number=1, details={"target": target, "native_ratio": native_ratio, "displayed_ratio": cx / cy}))
+                        findings.append(ValidationFinding("logo_aspect_ratio", "official logo aspect ratio was changed", slide_number=1, details={"target": target, "native_ratio": native_ratio, "displayed_ratio": cx / cy}, origin="candidate"))
                     break
             except Exception as exc:
-                findings.append(ValidationFinding("logo_asset_unreadable", "official logo asset could not be inspected", slide_number=1, details={"error": str(exc)}))
+                findings.append(ValidationFinding("logo_asset_unreadable", "official logo asset could not be inspected", slide_number=1, details={"error": str(exc)}, origin="infrastructure"))
     return findings, logo_hashes
 
 
@@ -898,7 +1272,11 @@ def _run_content_checker(
             return report, ValidationFinding(
                 "content_check_failed",
                 "trusted deterministic PPTX content checker found problems",
-                details={"finding_count": len(report.get("findings", [])) if isinstance(report.get("findings"), list) else None},
+                details={
+                    "finding_count": len(report.get("findings", [])) if isinstance(report.get("findings"), list) else None,
+                    "content_findings": report.get("findings", []),
+                },
+                origin="candidate",
             )
         return report, None
     except Exception as exc:
@@ -909,7 +1287,7 @@ def _run_content_checker(
             "validator_binding": {"pptx_sha256": sha256_file(pptx_path)},
             "error": str(exc),
         }
-        return report, ValidationFinding("content_checker_error", "trusted deterministic content checker could not run", details={"error": str(exc)})
+        return report, ValidationFinding("content_checker_error", "trusted deterministic content checker could not run", details={"error": str(exc)}, origin="infrastructure")
 
 
 def _check_office(
@@ -932,9 +1310,9 @@ def _check_office(
                     pdf_candidates = sorted(output_dir.glob("*.pdf"))
                 return _check_converted_pdf(pdf_candidates, slide_count)
         except Exception as exc:
-            return ValidationFinding("libreoffice_error", "LibreOffice could not open or render the deck", details={"error": str(exc)})
+            return ValidationFinding("libreoffice_error", "LibreOffice could not open or render the deck", details={"error": str(exc)}, origin="infrastructure")
     if shutil.which("soffice") is None:
-        return ValidationFinding("libreoffice_unavailable", "LibreOffice is required to validate the candidate deck")
+        return ValidationFinding("libreoffice_unavailable", "LibreOffice is required to validate the candidate deck", origin="infrastructure")
     try:
         with tempfile.TemporaryDirectory(prefix="slides_validator_office_") as temporary:
             output_dir = Path(temporary)
@@ -948,23 +1326,27 @@ def _check_office(
             )
             if result.returncode:
                 details = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
-                return ValidationFinding("libreoffice_failed", "LibreOffice failed to render the deck", details={"error": details or "no details"})
+                return ValidationFinding("libreoffice_failed", "LibreOffice failed to render the deck", details={"error": details or "no details"}, origin="infrastructure")
             return _check_converted_pdf(sorted(output_dir.glob("*.pdf")), slide_count)
     except (OSError, subprocess.SubprocessError) as exc:
-        return ValidationFinding("libreoffice_error", "LibreOffice could not be executed", details={"error": str(exc)})
+        return ValidationFinding("libreoffice_error", "LibreOffice could not be executed", details={"error": str(exc)}, origin="infrastructure")
 
 
 def _check_converted_pdf(pdf_candidates: Sequence[Path], slide_count: int) -> ValidationFinding | None:
     if len(pdf_candidates) != 1 or not pdf_candidates[0].is_file() or pdf_candidates[0].stat().st_size == 0:
-        return ValidationFinding("libreoffice_no_pdf", "LibreOffice produced no unambiguous PDF render")
+        return ValidationFinding("libreoffice_no_pdf", "LibreOffice produced no unambiguous PDF render", origin="infrastructure")
     try:
         from pypdf import PdfReader
 
         page_count = len(PdfReader(str(pdf_candidates[0])).pages)
     except Exception as exc:
-        return ValidationFinding("libreoffice_invalid_pdf", "LibreOffice produced an unreadable PDF", details={"error": str(exc)})
+        return ValidationFinding("libreoffice_invalid_pdf", "LibreOffice produced an unreadable PDF", details={"error": str(exc)}, origin="infrastructure")
     if page_count != slide_count:
-        return ValidationFinding("libreoffice_slide_count", "LibreOffice render page count does not match PPTX slide count", details={"pages": page_count, "slides": slide_count})
+        # LibreOffice successfully rendered the submitted deck, but the
+        # resulting page count disagrees with its package structure. The
+        # candidate must be corrected; retrying the renderer alone cannot
+        # repair that inconsistency.
+        return ValidationFinding("libreoffice_slide_count", "LibreOffice render page count does not match PPTX slide count", details={"pages": page_count, "slides": slide_count}, origin="candidate")
     return None
 
 
@@ -1008,6 +1390,11 @@ def validate_candidate_deck(
     artifact_dir = job_dir / "work" / "intermediate"
     content_path = artifact_dir / "content_check.json"
     snapshot_path = artifact_dir / "deck_snapshot.json"
+    diagnostics_path = artifact_dir / "render_diagnostics"
+    # Diagnostics are a latest-only aid for an independently observed render
+    # mismatch.  Remove a prior bundle before this attempt so a successful
+    # validation cannot leave stale evidence attached to a new candidate.
+    _reset_render_diagnostics(diagnostics_path)
     findings: list[ValidationFinding] = []
     if runner is not None:
         # ``runner`` is the spelling used by the older artifacts helper.  It
@@ -1027,9 +1414,9 @@ def validate_candidate_deck(
         package = _load_pptx_package(deck)
         slide_count = len(package.ordered_slides)
         if expected_slide_count is not None and slide_count != expected_slide_count:
-            findings.append(ValidationFinding("slide_count", "PPTX slide count does not match the requested count", details={"expected": expected_slide_count, "actual": slide_count}))
+            findings.append(ValidationFinding("slide_count", "PPTX slide count does not match the requested count", details={"expected": expected_slide_count, "actual": slide_count}, origin="candidate"))
     except PptxPackageError as exc:
-        findings.append(ValidationFinding("pptx_invalid", str(exc)))
+        findings.append(ValidationFinding("pptx_invalid", str(exc), origin="candidate"))
 
     render_records: list[_RenderRecord] = []
     trusted_render_records: list[_RenderRecord] = []
@@ -1037,7 +1424,7 @@ def validate_candidate_deck(
         render_findings, render_records = _validate_renders(renders, slide_count)
         findings.extend(render_findings)
     else:
-        findings.append(ValidationFinding("renders_unchecked", "renders could not be checked because the PPTX is invalid"))
+        findings.append(ValidationFinding("renders_unchecked", "renders could not be checked because the PPTX is invalid", origin="candidate"))
 
     content_report: dict[str, Any]
     if deck.is_file() and not deck.is_symlink():
@@ -1052,7 +1439,7 @@ def validate_candidate_deck(
             "error": "presentation.pptx is missing",
             "validator_binding": {"pptx_sha256": None},
         }
-        findings.append(ValidationFinding("pptx_missing", "presentation.pptx is missing"))
+        findings.append(ValidationFinding("pptx_missing", "presentation.pptx is missing", origin="candidate"))
 
     if package is not None and require_logo:
         findings.extend(_logo_image_parts(deck, package, Path(logo_dir) if logo_dir else DEFAULT_LOGO_ASSET_DIR)[0])
@@ -1064,7 +1451,7 @@ def validate_candidate_deck(
                 evidence_sha256=evidence_sha256,
             )
             if not _title_present(provisional_snapshot, requested_title):
-                findings.append(ValidationFinding("title_missing", "requested title is not visible on the cover slide", slide_number=1, details={"requested_title": requested_title}))
+                findings.append(ValidationFinding("title_missing", "requested title is not visible on the cover slide", slide_number=1, details={"requested_title": requested_title}, origin="candidate"))
         except Exception:
             # The canonical snapshot below records the parse error; avoid a
             # duplicate title failure when the package itself is malformed.
@@ -1082,6 +1469,8 @@ def validate_candidate_deck(
             slide_count or 0,
             command_runner=command_runner,
             trusted_render=trusted_render,
+            submitted_dir=renders,
+            diagnostics_dir=diagnostics_path,
         )
         findings.extend(trusted_findings)
 
@@ -1095,7 +1484,7 @@ def validate_candidate_deck(
             )
         except Exception as exc:
             snapshot = _unavailable_snapshot(pptx_sha256, evidence_sha256, str(exc))
-            findings.append(ValidationFinding("snapshot_error", "deck snapshot could not be generated", details={"error": str(exc)}))
+            findings.append(ValidationFinding("snapshot_error", "deck snapshot could not be generated", details={"error": str(exc)}, origin="infrastructure"))
     else:
         snapshot = _unavailable_snapshot(pptx_sha256, evidence_sha256, "PPTX package validation failed")
 

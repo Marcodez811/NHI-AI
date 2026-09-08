@@ -128,6 +128,10 @@ services:
                 condition: service_healthy
             migrate:
                 condition: service_completed_successfully
+        cap_add:
+            - SYS_ADMIN
+        security_opt:
+            - seccomp=unconfined
 
     scheduler:
         image: nhi-ai-backend:local

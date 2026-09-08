@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
-
+from pydantic import SecretStr
 from loguru import logger
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox, SkillInput, TextInput
 
@@ -354,7 +354,7 @@ class CodexRunner:
         codex_factory: Any = AsyncCodex,
         model: str | None = None,
         reasoning_effort: AgentReasoningEffort | None = AgentReasoningEffort.HIGH,
-        api_key: str | None = None,
+        api_key: SecretStr | None = None,
         timeout_seconds: float = 2700.0,
         heartbeat_seconds: float = 10.0,
         backend_root: Path | None = None,
@@ -423,7 +423,8 @@ class CodexRunner:
             async with self.codex_factory(CodexConfig(**config_kwargs)) as codex:
                 if not self.api_key:
                     raise WorkflowExecutionError("Codex provider is not configured")
-                await codex.login_api_key(self.api_key)
+                api_key = self.api_key.get_secret_value()
+                await codex.login_api_key(api_key)
                 # The first turn determines the session's baseline capability.
                 # Reviewer requests therefore start read-only sessions instead
                 # of relying only on a per-turn hint.

@@ -17,6 +17,7 @@ from .contracts import (
     AgentRunner,
     BaseWorkflowAdapter,
     DeterministicValidationError,
+    ValidationInfrastructureError,
     TurnAudit,
     TurnRequest,
     WorkflowPlan,
@@ -81,7 +82,7 @@ def __getattr__(name: str):
 
 __all__ = [
     "AgentExecutionRequest", "AgentExecutionResult", "AgentNode", "AgentPhase", "AgentReasoningEffort", "AgentTaskPayload", "AgentTaskResult",
-    "AgentRunner", "BaseWorkflowAdapter", "DeterministicValidationError", "ReviewDecision", "ReviewEvaluation", "ReviewFinding", "ReviewFindingStatus", "ReviewOutcome", "ReviewSeverity", "TurnAudit", "TurnRequest", "WorkflowPlan",
+    "AgentRunner", "BaseWorkflowAdapter", "DeterministicValidationError", "ValidationInfrastructureError", "ReviewDecision", "ReviewEvaluation", "ReviewFinding", "ReviewFindingStatus", "ReviewOutcome", "ReviewSeverity", "TurnAudit", "TurnRequest", "WorkflowPlan",
     "WorkflowAdapter", "WorkflowStatus", "WorkflowRegistry", "evaluate_review", "normalize_review_outcome", "review_finding_identity",
     "WorkflowRegistryError", "UnknownWorkflowError", "default_registry",
     "workflow_registry", "register_workflow", "SkillStagingError",

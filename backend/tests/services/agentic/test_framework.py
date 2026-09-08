@@ -18,6 +18,7 @@ from app.services.agentic import (
     AgentTaskPayload,
     BaseWorkflowAdapter,
     DeterministicValidationError,
+    ValidationInfrastructureError,
     ReviewFinding,
     ReviewFindingStatus,
     ReviewOutcome,
@@ -819,3 +820,65 @@ async def test_unexpected_validator_exception_fails_closed(tmp_path):
     assert result.phase is AgentPhase.FAILED
     assert not adapter.published
     assert [turn.kind for turn in runner.turns] == ["initial"]
+
+
+@pytest.mark.asyncio
+async def test_generic_value_error_is_not_a_retry_signal_in_both_runner_paths(tmp_path):
+    modern_adapter = LoopAdapter()
+
+    async def invalid_candidate(value, workspace):
+        raise ValueError("malformed validator configuration")
+
+    modern_adapter.validate_generated = invalid_candidate
+    modern_runner = ModernRunner()
+    modern_result = await execute_workflow(
+        AgentTaskPayload(job_id="generic-value-modern", workflow="loop", input={}),
+        registry=WorkflowRegistry({"loop": modern_adapter}),
+        runner=modern_runner,
+        workspace_root=tmp_path / "modern",
+    )
+    assert modern_result.status is WorkflowStatus.FAILED
+    assert [(request.node_id, request.attempt) for request in modern_runner.requests] == [("author", 1)]
+
+    legacy_adapter = LoopAdapter()
+    legacy_adapter.validate_generated = invalid_candidate
+    legacy_runner = ScriptedRunner()
+    legacy_result = await execute_workflow(
+        AgentTaskPayload(job_id="generic-value-legacy", workflow="loop", input={}),
+        registry=WorkflowRegistry({"loop": legacy_adapter}),
+        runner=legacy_runner,
+        workspace_root=tmp_path / "legacy",
+    )
+    assert legacy_result.status is WorkflowStatus.FAILED
+    assert [turn.kind for turn in legacy_runner.turns] == ["initial"]
+
+
+@pytest.mark.asyncio
+async def test_validation_infrastructure_failure_stops_and_preserves_codes(tmp_path):
+    adapter = LoopAdapter()
+
+    async def unavailable(value, workspace):
+        raise ValidationInfrastructureError(
+            "validator backend unavailable",
+            diagnostic_codes=("libreoffice_unavailable", "renderer_dependency_missing"),
+        )
+
+    adapter.validate_generated = unavailable
+    runner = ModernRunner()
+    events = []
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="infra-validation", workflow="loop", input={}),
+        registry=WorkflowRegistry({"loop": adapter}),
+        runner=runner,
+        workspace_root=tmp_path,
+        event_callback=events.append,
+    )
+
+    assert result.status is WorkflowStatus.FAILED
+    assert "libreoffice_unavailable" in (result.error or "")
+    assert [(request.node_id, request.attempt) for request in runner.requests] == [("author", 1)]
+    validator_failure = next(
+        event for event in events
+        if event["event_type"] == "node_failed" and event["node_id"] == "validator"
+    )
+    assert validator_failure["metadata"]["error_code"] == "libreoffice_unavailable,renderer_dependency_missing"

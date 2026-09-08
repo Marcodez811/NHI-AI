@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
-from app.services.slides.validation import ValidationStatus, validate_candidate_deck
+from app.services.slides.validation import (
+    ValidationStatus,
+    _canonicalize_pdftoppm_output,
+    validate_candidate_deck,
+)
 
 
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -154,3 +160,172 @@ def test_candidate_fails_when_submitted_renders_differ_from_trusted_render(
         finding for finding in result.findings if finding.code == "render_stale_or_mismatch"
     ]
     assert [finding.slide_number for finding in mismatches] == [1, 2]
+
+
+def test_padded_numeric_names_are_valid_but_numeric_collisions_are_rejected(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+    render_dir = tmp_path / "work" / "rendered" / "final"
+    render_dir.mkdir(parents=True)
+    (render_dir / "slide-01.png").write_bytes(_png_bytes((40, 100, 150)))
+    (render_dir / "slide-1.png").write_bytes(_png_bytes((40, 100, 150)))
+    (render_dir / "slide-2.png").write_bytes(_png_bytes((80, 100, 150)))
+    result = validate_candidate_deck(
+        tmp_path,
+        expected_slide_count=2,
+        content_checker=_pass_checker,
+        require_logo=False,
+        check_libreoffice=False,
+        check_trusted_renders=False,
+    )
+
+    assert result.status is ValidationStatus.FAIL
+    assert "render_duplicate_id" in {finding.code for finding in result.findings}
+
+
+@pytest.mark.parametrize("slide_count", [1, 9, 10, 20, 100])
+def test_zero_padded_render_names_cover_page_count_boundaries(tmp_path: Path, slide_count: int) -> None:
+    _write_deck(tmp_path, slide_count=slide_count)
+    render_dir = tmp_path / "work" / "rendered" / "final"
+    render_dir.mkdir(parents=True)
+    width = len(str(slide_count))
+    for number in range(1, slide_count + 1):
+        color = ((number * 37) % 255, (number * 61) % 255, (number * 83) % 255)
+        (render_dir / f"slide-{number:0{width}d}.png").write_bytes(_png_bytes(color))
+
+    result = validate_candidate_deck(
+        tmp_path,
+        expected_slide_count=slide_count,
+        content_checker=_pass_checker,
+        require_logo=False,
+        check_libreoffice=False,
+        check_trusted_renders=False,
+    )
+
+    assert result.status is ValidationStatus.PASS
+
+
+def test_expected_slide_broken_symlink_cannot_pass_with_trusted_renders(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+    render_dir = tmp_path / "work" / "rendered" / "final"
+    render_dir.mkdir(parents=True)
+    (render_dir / "slide-1.png").symlink_to(tmp_path / "missing-1.png")
+    (render_dir / "slide-2.png").symlink_to(tmp_path / "missing-2.png")
+
+    def trusted_renderer(deck: Path, output_dir: Path) -> None:
+        del deck
+        (output_dir / "slide-1.png").write_bytes(_png_bytes((40, 100, 150)))
+        (output_dir / "slide-2.png").write_bytes(_png_bytes((80, 100, 150)))
+
+    result = validate_candidate_deck(
+        tmp_path,
+        expected_slide_count=2,
+        content_checker=_pass_checker,
+        require_logo=False,
+        check_libreoffice=False,
+        trusted_render=trusted_renderer,
+    )
+
+    codes = {finding.code for finding in result.findings}
+    assert result.status is ValidationStatus.FAIL
+    assert {"render_non_regular", "render_incomplete"} <= codes
+
+
+def test_render_stage_rejects_malformed_out_of_range_and_non_regular_entries(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+    render_dir = tmp_path / "work" / "rendered" / "final"
+    render_dir.mkdir(parents=True)
+    (render_dir / "slide-1.png").write_bytes(_png_bytes((40, 100, 150)))
+    (render_dir / "slide-2.png").write_bytes(_png_bytes((80, 100, 150)))
+    (render_dir / "slide-3.png").write_bytes(_png_bytes((90, 100, 150)))
+    (render_dir / "not-a-slide.png").write_bytes(_png_bytes((100, 100, 150)))
+    (render_dir / "slide-4.png").symlink_to(render_dir / "slide-2.png")
+    (render_dir / "slide-5.png").mkdir()
+
+    result = validate_candidate_deck(
+        tmp_path,
+        expected_slide_count=2,
+        content_checker=_pass_checker,
+        require_logo=False,
+        check_libreoffice=False,
+        check_trusted_renders=False,
+    )
+
+    codes = {finding.code for finding in result.findings}
+    assert result.status is ValidationStatus.FAIL
+    assert {"render_malformed_name", "render_out_of_range", "render_non_regular"} <= codes
+
+
+def test_pdftoppm_canonicalization_rejects_padded_name_collisions(tmp_path: Path) -> None:
+    source = tmp_path / "pdftoppm"
+    destination = tmp_path / "canonical"
+    source.mkdir()
+    (source / "slide-1.png").write_bytes(_png_bytes((40, 100, 150)))
+    (source / "slide-01.png").write_bytes(_png_bytes((80, 100, 150)))
+
+    with pytest.raises(RuntimeError, match="colliding numeric slide IDs"):
+        _canonicalize_pdftoppm_output(source, destination)
+    assert not destination.exists()
+
+
+def test_content_checker_findings_and_origins_are_forwardable(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+    _write_renders(tmp_path)
+
+    def checker(path: Path) -> dict[str, object]:
+        return {
+            "format_version": "trusted-test-checker",
+            "presentation": {"path": str(path), "sha256": "test", "slide_count": 2},
+            "status": "fail",
+            "findings": [{"type": "placeholder_todo", "slide_number": 2, "match": "TODO"}],
+        }
+
+    result = validate_candidate_deck(
+        tmp_path,
+        expected_slide_count=2,
+        content_checker=checker,
+        require_logo=False,
+        check_libreoffice=False,
+        check_trusted_renders=False,
+    )
+
+    finding = next(finding for finding in result.findings if finding.code == "content_check_failed")
+    assert finding.origin == "candidate"
+    assert finding.details["content_findings"] == [{"type": "placeholder_todo", "slide_number": 2, "match": "TODO"}]
+    assert finding.as_dict()["origin"] == "candidate"
+
+
+def test_render_mismatch_writes_latest_secret_free_diagnostics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_deck(tmp_path)
+    _write_renders(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-appear")
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    author_metadata = tmp_path / "work" / "rendered" / "render_metadata.json"
+    author_metadata.write_text(json.dumps({"format_version": "AuthorRenderMetadata v1", "dpi": 150}), encoding="utf-8")
+
+    def trusted_renderer(deck: Path, output_dir: Path) -> None:
+        del deck
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "slide-1.png").write_bytes(_png_bytes((10, 20, 30)))
+        (output_dir / "slide-2.png").write_bytes(_png_bytes((20, 30, 40)))
+
+    result = validate_candidate_deck(
+        tmp_path,
+        expected_slide_count=2,
+        content_checker=_pass_checker,
+        require_logo=False,
+        check_libreoffice=False,
+        trusted_render=trusted_renderer,
+    )
+
+    diagnostics = tmp_path / "work" / "intermediate" / "render_diagnostics"
+    payload = json.loads((diagnostics / "diagnostics.json").read_text(encoding="utf-8"))
+    assert result.status is ValidationStatus.FAIL
+    assert (diagnostics / "presentation.pptx").is_file()
+    assert (diagnostics / "submitted" / "slide-1.png").is_file()
+    assert (diagnostics / "trusted" / "slide-1.png").is_file()
+    assert payload["submitted_renders"][0]["width"] == 32
+    assert payload["trusted_renders"][0]["pixel_sha256"]
+    assert payload["render_env"]["LANG"] == "C.UTF-8"
+    assert payload["submitted_render_metadata"]["dpi"] == 150
+    assert set(payload["render_env"]) <= {"LANG", "LC_ALL", "LC_CTYPE", "SAL_USE_VCLPLUGIN", "TZ"}
+    assert "must-not-appear" not in json.dumps(payload)

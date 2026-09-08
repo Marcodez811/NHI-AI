@@ -21,6 +21,7 @@ from app.services.agentic.contracts import (
     AgentReasoningEffort,
     BaseWorkflowAdapter,
     DeterministicValidationError,
+    ValidationInfrastructureError,
     ReviewFindingStatus,
     ReviewOutcome,
     ReviewSeverity,
@@ -39,6 +40,43 @@ from .artifacts import (
 )
 from .contracts import JobError
 from .runtime import build_job_environment, build_prompt
+
+
+_VALIDATION_ORIGINS = frozenset({"candidate", "infrastructure"})
+
+
+def _validation_finding_payload(finding: Any) -> dict[str, Any]:
+    """Return a JSON-safe diagnostic without depending on validator internals."""
+
+    as_dict = getattr(finding, "as_dict", None)
+    if callable(as_dict):
+        payload = as_dict()
+    elif isinstance(finding, dict):
+        payload = dict(finding)
+    else:
+        payload = {"code": str(getattr(finding, "code", "validation_failure")), "message": str(finding)}
+    if not isinstance(payload, dict):
+        payload = {"code": "validation_failure", "message": str(payload)}
+    return payload
+
+
+def _validation_finding_origin(finding: Any, payload: dict[str, Any]) -> str:
+    """Read the validator's explicit origin; old findings remain candidates."""
+
+    origin = getattr(finding, "origin", None)
+    if origin is None:
+        origin = payload.get("origin")
+    if origin is None:
+        # Compatibility with validators emitted before ``origin`` was added.
+        # This is deliberately not inferred from a stage or diagnostic code.
+        origin = "candidate"
+    origin = str(getattr(origin, "value", origin)).strip().lower()
+    if origin not in _VALIDATION_ORIGINS:
+        raise ValidationInfrastructureError(
+            "deterministic validator returned an invalid finding origin",
+            diagnostic_codes=("validation_origin_invalid",),
+        )
+    return origin
 
 
 class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskResult]):
@@ -265,16 +303,6 @@ the frozen `work/evidence.json` store after this activation.
             ],
         }
 
-    def post_author_completion_check(
-        self,
-        value: SlidesTaskPayload,
-        result: Any,
-        workspace: Path,
-    ) -> None:
-        del value, result
-        if not (workspace / "output" / "presentation.pptx").is_file():
-            raise JobError("author", "presentation artifact was not generated")
-
     async def build_prompt(self, value: SlidesTaskPayload, workspace: Path, *, semantic_review_context: Any = None, revision_feedback: str | None = None) -> str:
         context_path = workspace / "work" / "slide_context.json"
         context = json.loads(await asyncio.to_thread(context_path.read_text, encoding="utf-8"))
@@ -334,13 +362,22 @@ the frozen `work/evidence.json` store after this activation.
 
         try:
             from .evidence import load_frozen_evidence
-            from .validation import validate_candidate_deck
-
             await asyncio.to_thread(
                 load_frozen_evidence,
                 workspace / "work" / "evidence.json",
                 extracted_dir=workspace / "work" / "extracted",
             )
+        except ValidationInfrastructureError:
+            raise
+        except Exception as exc:
+            raise ValidationInfrastructureError(
+                "deterministic validator infrastructure failure",
+                diagnostic_codes=("evidence_unavailable",),
+            ) from exc
+
+        try:
+            from .validation import validate_candidate_deck
+
             validation = await asyncio.to_thread(
                 validate_candidate_deck,
                 workspace,
@@ -348,15 +385,38 @@ the frozen `work/evidence.json` store after this activation.
                 requested_title=value.title,
                 evidence_path=workspace / "work" / "evidence.json",
             )
+        except ValidationInfrastructureError:
+            raise
         except Exception as exc:
-            raise JobError("validator", "deterministic validator could not run") from exc
+            raise ValidationInfrastructureError(
+                "deterministic validator infrastructure failure",
+                diagnostic_codes=("validator_unavailable",),
+            ) from exc
+
         if str(getattr(validation.status, "value", validation.status)).lower() != "pass":
             findings = getattr(validation, "findings", ())
-            rendered = []
-            for finding in findings:
-                as_dict = finding.as_dict() if hasattr(finding, "as_dict") else str(finding)
-                rendered.append(as_dict if isinstance(as_dict, str) else json.dumps(as_dict, ensure_ascii=False))
-            raise DeterministicValidationError("deterministic validation failed: " + "; ".join(rendered))
+            rendered = [_validation_finding_payload(finding) for finding in findings]
+            origins = [_validation_finding_origin(finding, payload) for finding, payload in zip(findings, rendered)]
+            diagnostic_codes = tuple(
+                str(payload.get("code", "validation_failure"))
+                for payload in rendered
+                if str(payload.get("code", "")).strip()
+            )
+            if any(origin == "infrastructure" for origin in origins):
+                raise ValidationInfrastructureError(
+                    "deterministic validator infrastructure failure",
+                    findings=rendered,
+                    diagnostic_codes=diagnostic_codes,
+                )
+            if not rendered:
+                rendered = [{"code": "validation_failed", "message": "validator returned FAIL without findings"}]
+                diagnostic_codes = ("validation_failed",)
+            feedback = json.dumps({"findings": rendered}, ensure_ascii=False, sort_keys=True)
+            raise DeterministicValidationError(
+                "deterministic validation failed: " + feedback,
+                findings=rendered,
+                diagnostic_codes=diagnostic_codes,
+            )
 
     def parse_review(
         self,

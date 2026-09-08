@@ -1,14 +1,13 @@
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, SecretStr, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 from app.services.agentic.contracts import AgentReasoningEffort
 
 
 class Settings(BaseSettings):
     redis_url: str
-    openai_api_key: str
+    openai_api_key: SecretStr
     # Agent model policy is separate from the chat/vector-store settings. The
     # old OPENAI_MODEL variable remains an input alias for the generic default
     # during migration.

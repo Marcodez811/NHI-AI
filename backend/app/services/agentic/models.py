@@ -9,6 +9,7 @@ from .contracts import (
     AgentTaskPayload,
     AgentTaskResult,
     DeterministicValidationError,
+    ValidationInfrastructureError,
     TurnAudit,
     TurnRequest,
     WorkflowPlan,
@@ -17,6 +18,6 @@ from .contracts import (
 
 __all__ = [
     "AgentExecutionRequest", "AgentExecutionResult", "AgentNode", "AgentPhase", "AgentReasoningEffort",
-    "AgentTaskPayload", "AgentTaskResult", "DeterministicValidationError",
+    "AgentTaskPayload", "AgentTaskResult", "DeterministicValidationError", "ValidationInfrastructureError",
     "TurnAudit", "TurnRequest", "WorkflowPlan", "WorkflowStatus",
 ]

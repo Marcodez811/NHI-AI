@@ -22,12 +22,10 @@ Create formal, editable, Traditional-Chinese policy briefings. Keep the final ar
 4. Render the complete deck with the backend-compatible pipeline below. Inspect the sequence and every slide for clipping, overlap, unreadable text, weak hierarchy, inconsistent layout, and visual defects. Fix problems and regenerate the deck and every render until the candidate is visually sound.
 
    ```bash
-   mkdir -p work/rendered/pdf work/rendered/final
-   python .agents/skills/pptx-nhi-tw/scripts/office/soffice.py --headless --convert-to pdf --outdir work/rendered/pdf output/presentation.pptx
-   pdftoppm -png -r 150 work/rendered/pdf/presentation.pdf work/rendered/final/slide
+   python .agents/skills/pptx-nhi-tw/scripts/render_slides.py output/presentation.pptx
    ```
 
-5. Finish with exactly one `work/rendered/final/slide-<number>.png` per slide. Remove stale renders after slide-count or ordering changes.
+5. Finish with exactly one `work/rendered/final/slide-<number>.png` per slide. The bundled renderer accepts `pdftoppm`'s padded names, writes canonical unpadded names, removes stale renders, and records non-authoritative diagnostics in `work/rendered/render_metadata.json`.
 
 The backend owns deterministic validation, `content_check.json`, `deck_snapshot.json`, semantic review, retry decisions, and publication. Do not create or edit those artifacts.
 
