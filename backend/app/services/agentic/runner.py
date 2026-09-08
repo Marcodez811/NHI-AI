@@ -11,6 +11,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
@@ -39,6 +40,124 @@ class WorkflowExecutionError(RuntimeError):
 
 class WorkflowTimeoutError(WorkflowExecutionError):
     """The total workflow deadline elapsed."""
+
+
+class ProcessIsolationError(WorkflowExecutionError):
+    """Raised when a requested provider process isolation boundary is unavailable."""
+
+
+def bwrap_available() -> bool:
+    """Return whether the Linux bubblewrap executable is available."""
+
+    return sys.platform.startswith("linux") and shutil.which("bwrap") is not None
+
+
+def build_bwrap_launch_args(
+    workspace: Path,
+    *,
+    codex_bin: Path,
+    writable: bool,
+    backend_root: Path | None = None,
+    skill_names: Sequence[str] = (),
+    hidden_paths: Sequence[Path] = (),
+    read_only_paths: Sequence[Path] = (),
+    writable_paths: Sequence[Path] = (),
+    restrict_workspace: bool = False,
+) -> tuple[str, ...]:
+    """Build a closed launch command for the Codex app-server.
+
+    Bubblewrap receives the provider command directly through
+    ``CodexConfig.launch_args_override``.  The base filesystem is read-only,
+    while only the stage workspace is writable for author/extraction turns.
+    Reviewer turns use a read-only workspace and mask source/history paths.
+    A missing executable or an out-of-workspace hidden path is rejected by the
+    caller instead of silently falling back to ``full_access``.
+    """
+
+    workspace = workspace.resolve(strict=True)
+    backend = Path(backend_root).resolve(strict=True) if backend_root is not None else None
+
+    def contained(path: Path, root: Path, label: str) -> Path:
+        resolved = path.resolve(strict=True)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ProcessIsolationError(f"{label} escapes the workflow workspace") from exc
+        return resolved
+
+    args: list[str] = [
+        "/usr/bin/bwrap",
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-pid",
+        "--ro-bind",
+        "/",
+        "/",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+    ]
+
+    # Hide common host data roots before selectively remounting the backend
+    # runtime and this activation's allowlisted workspace paths. This prevents
+    # a stage from discovering sibling jobs or the shared document volume.
+    masked_roots = ("/home", "/root", "/data", "/mnt", "/media", "/workspace", "/tmp", "/run")
+    for root in masked_roots:
+        if Path(root).exists():
+            args.extend(("--tmpfs", root))
+    args.extend(("--dir", "/tmp/codex-home"))
+
+    if backend is not None:
+        args.extend(("--dir", str(backend.parent)))
+        args.extend(("--ro-bind", str(backend), str(backend)))
+        skill_root = backend / ".agents"
+        if skill_root.exists():
+            args.extend(("--tmpfs", str(skill_root)))
+
+    if restrict_workspace:
+        # The workspace directory itself is an empty mount point. Only the
+        # paths listed below become visible inside the namespace.
+        args.extend(("--dir", str(workspace.parent)))
+        args.extend(("--tmpfs", str(workspace)))
+        for raw_path in read_only_paths:
+            path = contained(Path(raw_path), workspace, "read-only stage path")
+            args.extend(("--dir", str(path.parent)))
+            args.extend(("--ro-bind", str(path), str(path)))
+        for raw_path in writable_paths:
+            path = contained(Path(raw_path), workspace, "writable stage path")
+            args.extend(("--dir", str(path.parent)))
+            args.extend(("--bind", str(path), str(path)))
+        for name in skill_names:
+            skill_path = contained(workspace / ".agents" / "skills" / name, workspace, "skill path")
+            args.extend(("--dir", str(skill_path.parent)))
+            args.extend(("--ro-bind", str(skill_path), str(skill_path)))
+    elif writable:
+        args.extend(("--bind", str(workspace), str(workspace)))
+    else:
+        args.extend(("--ro-bind", str(workspace), str(workspace)))
+
+    if not restrict_workspace:
+        for raw_path in hidden_paths:
+            path = Path(raw_path).resolve()
+            if not path.exists():
+                continue
+            # Masking a directory avoids accidentally exposing new files created
+            # between policy construction and process launch.
+            if path.is_dir():
+                args.extend(("--tmpfs", str(path)))
+            else:
+                args.extend(("--ro-bind", "/dev/null", str(path)))
+    if not restrict_workspace:
+        for raw_path in read_only_paths:
+            path = Path(raw_path).resolve()
+            if not path.exists():
+                continue
+            # A later mount overrides the writable workspace bind, protecting
+            # immutable evidence and extracted assets from author revisions.
+            args.extend(("--ro-bind", str(path), str(path)))
+    args.extend((str(codex_bin), "app-server", "--listen", "stdio://"))
+    return tuple(args)
 
 
 _SECRET = re.compile(
@@ -229,7 +348,18 @@ class CodexRunResult:
 class CodexRunner:
     """Run labeled streamed turns under one total workflow deadline."""
 
-    def __init__(self, *, codex_factory: Any = AsyncCodex, model: str | None = None, reasoning_effort: AgentReasoningEffort | None = AgentReasoningEffort.HIGH, api_key: str | None = None, timeout_seconds: float = 2700.0, heartbeat_seconds: float = 10.0, backend_root: Path | None = None):
+    def __init__(
+        self,
+        *,
+        codex_factory: Any = AsyncCodex,
+        model: str | None = None,
+        reasoning_effort: AgentReasoningEffort | None = AgentReasoningEffort.HIGH,
+        api_key: str | None = None,
+        timeout_seconds: float = 2700.0,
+        heartbeat_seconds: float = 10.0,
+        backend_root: Path | None = None,
+        require_process_isolation: bool = False,
+    ):
         self.codex_factory = codex_factory
         self.model = model
         self.reasoning_effort = reasoning_effort
@@ -237,8 +367,24 @@ class CodexRunner:
         self.timeout_seconds = timeout_seconds
         self.heartbeat_seconds = heartbeat_seconds
         self.backend_root = backend_root or Path(__file__).resolve().parents[3]
+        self.require_process_isolation = require_process_isolation
 
-    async def run(self, workspace: Path, turns: Sequence[TurnRequest], *, model: str | None = None, reasoning_effort: AgentReasoningEffort | None = None, skill_names: Sequence[str] = (), progress_callback: ProgressCallback | None = None, audit_path: Path | None = None, turn_callback: Callable[[TurnAudit, str | None], Any] | None = None) -> CodexRunResult:
+    async def run(
+        self,
+        workspace: Path,
+        turns: Sequence[TurnRequest],
+        *,
+        model: str | None = None,
+        reasoning_effort: AgentReasoningEffort | None = None,
+        skill_names: Sequence[str] = (),
+        progress_callback: ProgressCallback | None = None,
+        audit_path: Path | None = None,
+        turn_callback: Callable[[TurnAudit, str | None], Any] | None = None,
+        hidden_paths: Sequence[Path] = (),
+        read_only_paths: Sequence[Path] = (),
+        writable_paths: Sequence[Path] = (),
+        restrict_workspace: bool = False,
+    ) -> CodexRunResult:
         if not turns:
             raise WorkflowExecutionError("workflow did not provide a prompt")
         reporter = ProgressReporter(callback=progress_callback, path=audit_path.with_name("progress.jsonl") if audit_path else None, heartbeat_seconds=self.heartbeat_seconds)
@@ -248,8 +394,33 @@ class CodexRunner:
 
         async def execute() -> CodexRunResult:
             environment = os.environ.copy()
+            # The API key is supplied through the explicit login call. Do not
+            # inherit ambient credentials into a stage process.
+            for key in tuple(environment):
+                if any(token in key.upper() for token in ("API_KEY", "TOKEN", "PASSWORD", "SECRET", "CREDENTIAL")):
+                    environment.pop(key, None)
             environment["PYTHONPATH"] = os.pathsep.join(str(self.backend_root) for _ in [0]) + (os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else "")
-            async with self.codex_factory(CodexConfig(env=environment, cwd=str(workspace))) as codex:
+            config_kwargs: dict[str, Any] = {"env": environment, "cwd": str(workspace)}
+            if self.require_process_isolation:
+                if not bwrap_available():
+                    raise ProcessIsolationError("provider process isolation is unavailable")
+                bundled = sorted(self.backend_root.glob(".venv/lib/python*/site-packages/codex_cli_bin/bin/codex"))
+                codex_bin = bundled[0] if bundled else Path(shutil.which("codex") or "")
+                if not codex_bin.is_file():
+                    raise ProcessIsolationError("Codex provider binary is unavailable for isolated launch")
+                config_kwargs["launch_args_override"] = build_bwrap_launch_args(
+                    workspace,
+                    codex_bin=codex_bin,
+                    writable=turns[0].sandbox is not Sandbox.read_only,
+                    backend_root=self.backend_root,
+                    skill_names=skill_names,
+                    hidden_paths=hidden_paths,
+                    read_only_paths=read_only_paths,
+                    writable_paths=writable_paths,
+                    restrict_workspace=restrict_workspace,
+                )
+                environment["HOME"] = "/tmp/codex-home"
+            async with self.codex_factory(CodexConfig(**config_kwargs)) as codex:
                 if not self.api_key:
                     raise WorkflowExecutionError("Codex provider is not configured")
                 await codex.login_api_key(self.api_key)
@@ -477,6 +648,10 @@ class CodexAgentRunner:
             skill_names=request.skill_names,
             progress_callback=forward_progress,
             audit_path=request.audit_path,
+            hidden_paths=request.hidden_paths,
+            read_only_paths=request.read_only_paths,
+            writable_paths=request.writable_paths,
+            restrict_workspace=request.restrict_workspace,
         )
         duration_ms = round((asyncio.get_running_loop().time() - started) * 1000)
         usage = result.last_turn.usage if result.last_turn is not None else None
@@ -547,5 +722,6 @@ __all__ = [
     "AgentRunner", "CodexAgentRunner", "CodexRunner", "CodexRunResult",
     "ProgressReporter", "RunnerRegistry", "RunnerRegistryError",
     "UnknownRunnerError", "runner_registry", "WorkflowExecutionError",
-    "WorkflowTimeoutError", "safe_error", "run_codex_workflow",
+    "WorkflowTimeoutError", "ProcessIsolationError", "bwrap_available",
+    "build_bwrap_launch_args", "safe_error", "run_codex_workflow",
 ]

@@ -546,6 +546,68 @@ async def test_modern_coordinator_uses_independent_author_and_reviewer_sessions(
 
 
 @pytest.mark.asyncio
+async def test_stage_workflow_extracts_once_and_uses_stage_specific_skills(tmp_path):
+    class StagedAdapter(ModernReviewAdapter):
+        name = "staged-review"
+        declared_skills = ("extractor", "authoring", "semantic-review")
+        extraction_skills = ("extractor",)
+        author_skills = ("authoring",)
+        reviewer_skills = ("semantic-review",)
+        independent_semantic_review = True
+        stage_isolation = True
+
+        def __init__(self):
+            self.extractions = 0
+
+        def build_extraction_prompt(self, value, workspace):
+            return "extract once"
+
+        def post_extraction(self, value, workspace):
+            self.extractions += 1
+
+    skills_root = tmp_path / "skills"
+    for name in ("extractor", "authoring", "semantic-review"):
+        skill = skills_root / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"# {name}", encoding="utf-8")
+
+    adapter = StagedAdapter()
+    runner = ModernRunner()
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="staged-job", workflow=adapter.name, input={}),
+        registry=WorkflowRegistry({adapter.name: adapter}),
+        runner=runner,
+        workspace_root=tmp_path / "jobs",
+        skills_root=skills_root,
+    )
+
+    assert result.status is WorkflowStatus.COMPLETED
+    assert adapter.extractions == 1
+    assert [(request.node_id, request.attempt) for request in runner.requests] == [
+        ("extraction", 1),
+        ("author", 1),
+        ("reviewer", 1),
+        ("author", 2),
+        ("reviewer", 2),
+    ]
+    assert [request.skill_names for request in runner.requests] == [
+        ("extractor",),
+        ("authoring",),
+        ("semantic-review",),
+        ("authoring",),
+        ("semantic-review",),
+    ]
+    assert [request.sandbox for request in runner.requests] == [
+        Sandbox.workspace_write,
+        Sandbox.workspace_write,
+        Sandbox.read_only,
+        Sandbox.workspace_write,
+        Sandbox.read_only,
+    ]
+    assert all(request.restrict_workspace for request in runner.requests)
+
+
+@pytest.mark.asyncio
 async def test_modern_coordinator_emits_node_events_without_affecting_result(tmp_path):
     adapter = ModernReviewAdapter()
     runner = ModernRunner()

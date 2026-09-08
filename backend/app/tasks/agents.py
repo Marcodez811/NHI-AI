@@ -19,7 +19,13 @@ from app.broker import result_backend, tasks_broker as broker
 from app.config import settings
 from app.services.agentic import AgentPhase, AgentTaskPayload, AgentTaskResult, WorkflowStatus, workflow_registry
 from app.services.agentic.service import execute_workflow
-from app.services.agentic.runner import CodexAgentRunner, CodexRunner, RunnerRegistry, safe_error
+from app.services.agentic.runner import (
+    CodexAgentRunner,
+    CodexRunner,
+    RunnerRegistry,
+    bwrap_available,
+    safe_error,
+)
 from app.services.agentic.events import AgentEventType, AgentTelemetryStore
 from app.services.slides.adapter import slides_adapter  # noqa: F401 - registers the built-in workflow
 from app.db import engine
@@ -48,6 +54,9 @@ def _build_runner_registry() -> tuple[RunnerRegistry, float | None]:
     exposing either choice through the task payload.
     """
 
+    if settings.agent_require_process_isolation and not bwrap_available():
+        raise RuntimeError("AGENT_REQUIRE_PROCESS_ISOLATION is enabled but bubblewrap is unavailable")
+
     codex_runner = CodexAgentRunner(
         CodexRunner(
             model=settings.agent_default_model,
@@ -55,6 +64,7 @@ def _build_runner_registry() -> tuple[RunnerRegistry, float | None]:
             api_key=settings.openai_api_key,
             timeout_seconds=float(getattr(settings, "agent_timeout_minutes", 45)) * 60,
             heartbeat_seconds=settings.agent_heartbeat_seconds,
+            require_process_isolation=settings.agent_require_process_isolation,
         ),
     )
     return RunnerRegistry({"codex": codex_runner}), codex_runner.timeout_seconds

@@ -7,7 +7,7 @@ import inspect
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from pydantic import BaseModel
 from openai_codex import Sandbox
@@ -52,6 +52,7 @@ async def _call(value: Any, *args: Any, **kwargs: Any) -> Any:
 _PHASE_MESSAGES = {
     AgentPhase.QUEUED: "Agent workflow is queued.",
     AgentPhase.PREPARING: "Preparing the agent workflow.",
+    AgentPhase.EXTRACTING: "Extracting source documents into the frozen evidence store.",
     AgentPhase.DRAFTING: "Drafting the presentation.",
     AgentPhase.VALIDATING: "Validating the generated presentation.",
     AgentPhase.REVIEWING: "Reviewing the generated presentation.",
@@ -334,6 +335,158 @@ def _attempt_audit_path(workspace: Path, node_id: str, attempt: int) -> Path:
     return workspace / "work" / "agents" / node_id / f"attempt-{attempt}.json"
 
 
+def _stage_skills(adapter: Any, stage: str, staged: Sequence[str]) -> tuple[str, ...]:
+    """Resolve the adapter's allowlisted skill set for one activation."""
+
+    configured = getattr(adapter, f"{stage}_skills", ())
+    if stage == "extraction":
+        return tuple(configured)
+    return tuple(configured or staged)
+
+
+def _stage_hidden_paths(adapter: Any, stage: str, workspace: Path) -> tuple[Path, ...]:
+    """Ask the adapter which source/history paths a stage must not inspect."""
+
+    hook = getattr(adapter, "stage_hidden_paths", None)
+    if hook is None:
+        return ()
+    try:
+        values = hook(stage, workspace)
+    except TypeError:
+        values = hook(workspace, stage)
+    return tuple(Path(item) for item in (values or ()))
+
+
+def _stage_read_only_paths(adapter: Any, stage: str, workspace: Path) -> tuple[Path, ...]:
+    """Resolve immutable artifacts that must stay readable but never writable."""
+
+    hook = getattr(adapter, "stage_read_only_paths", None)
+    if hook is None:
+        return ()
+    try:
+        values = hook(stage, workspace)
+    except TypeError:
+        values = hook(workspace, stage)
+    return tuple(Path(item) for item in (values or ()))
+
+
+def _stage_writable_paths(adapter: Any, stage: str, workspace: Path) -> tuple[Path, ...]:
+    """Resolve the narrow writable surface for an isolated activation."""
+
+    hook = getattr(adapter, "stage_writable_paths", None)
+    if hook is None:
+        return ()
+    try:
+        values = hook(stage, workspace)
+    except TypeError:
+        values = hook(workspace, stage)
+    return tuple(Path(item) for item in (values or ()))
+
+
+def _stage_sandbox(adapter: Any, stage: str) -> Any:
+    """Keep existing workflows compatible unless they opt into stage isolation."""
+
+    if not bool(getattr(adapter, "stage_isolation", False)):
+        return Sandbox.full_access
+    return Sandbox.read_only if stage == "reviewer" else Sandbox.workspace_write
+
+
+async def _execute_extraction(
+    *,
+    run_id: str,
+    adapter: Any,
+    value: Any,
+    workspace: Path,
+    staged: list[str],
+    selected_runner: Any,
+    progress_callback: Any,
+    event_callback: Any = None,
+) -> AgentExecutionResult | None:
+    """Run source extraction exactly once, then freeze its EvidenceStore."""
+
+    skills = _stage_skills(adapter, "extraction", staged)
+    if not skills:
+        return None
+    await _emit_phase(progress_callback, AgentPhase.EXTRACTING)
+    prompt_hook = getattr(adapter, "build_extraction_prompt", None)
+    prompt = str(await _call(prompt_hook, value, workspace)) if prompt_hook else (
+        "Extract every staged source document into work/extracted/. Return only "
+        "after the extraction artifacts have been written and validated."
+    )
+    runner_name = str(getattr(adapter, "extraction_runner", getattr(adapter, "author_runner", "codex")))
+    runner = _runner_for_node(selected_runner, runner_name)
+    request = AgentExecutionRequest(
+        run_id=run_id,
+        node_id="extraction",
+        role=str(getattr(adapter, "extraction_role", "source_document_extractor")),
+        attempt=1,
+        model=getattr(adapter, "extraction_model", None) or getattr(adapter, "author_model", None),
+        reasoning_effort=getattr(adapter, "extraction_reasoning_effort", None) or getattr(adapter, "author_reasoning_effort", None),
+        workspace=workspace,
+        prompt=prompt,
+        sandbox=_stage_sandbox(adapter, "extraction"),
+        skill_names=skills,
+        audit_path=_attempt_audit_path(workspace, "extraction", 1),
+        hidden_paths=_stage_hidden_paths(adapter, "extraction", workspace),
+        read_only_paths=_stage_read_only_paths(adapter, "extraction", workspace),
+        writable_paths=_stage_writable_paths(adapter, "extraction", workspace),
+        restrict_workspace=bool(getattr(adapter, "stage_isolation", False)),
+    )
+    await _emit_event(
+        event_callback,
+        "node_started",
+        node_id="extraction",
+        role=request.role,
+        model=request.model,
+        reasoning_effort=request.reasoning_effort,
+        runner=runner_name,
+        attempt=1,
+        status="running",
+        message="Source extraction agent started.",
+    )
+    started = asyncio.get_running_loop().time()
+    try:
+        result = await _run_agent(
+            runner,
+            request,
+            progress_callback=_node_progress_callback(progress_callback, request, runner_name),
+        )
+        finalize = getattr(adapter, "post_extraction", None) or getattr(adapter, "consolidate_extraction", None)
+        if finalize is None:
+            raise WorkflowExecutionError("extraction consolidation hook is missing")
+        await _call(finalize, value, workspace)
+    except Exception:
+        await _emit_event(
+            event_callback,
+            "node_failed",
+            node_id="extraction",
+            role=request.role,
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
+            runner=runner_name,
+            attempt=1,
+            status="failed",
+            message="Source extraction failed.",
+            duration_ms=round((asyncio.get_running_loop().time() - started) * 1000),
+        )
+        raise
+    await _emit_event(
+        event_callback,
+        "node_completed",
+        node_id="extraction",
+        role=request.role,
+        model=request.model,
+        reasoning_effort=request.reasoning_effort,
+        runner=runner_name,
+        attempt=1,
+        status="completed",
+        provider_run_id=result.provider_run_id,
+        message="Source extraction was consolidated into the frozen evidence store.",
+        duration_ms=result.duration_ms or round((asyncio.get_running_loop().time() - started) * 1000),
+    )
+    return result
+
+
 async def _execute_bounded_agents(
     *,
     run_id: str,
@@ -365,6 +518,9 @@ async def _execute_bounded_agents(
     reviewer_reasoning_effort = getattr(adapter, "reviewer_reasoning_effort", None)
     author_role = str(getattr(adapter, "author_role", "presentation_author"))
     reviewer_role = str(getattr(adapter, "reviewer_role", "presentation_reviewer"))
+    author_skills = _stage_skills(adapter, "author", staged)
+    reviewer_skills = _stage_skills(adapter, "reviewer", staged)
+    independent_review = bool(getattr(adapter, "independent_semantic_review", False))
     author_attempt = 1
     reviewer_attempt = 0
     prompt = str(initial_prompt)
@@ -384,9 +540,13 @@ async def _execute_bounded_agents(
             reasoning_effort=author_reasoning_effort,
             workspace=workspace,
             prompt=prompt,
-            sandbox=Sandbox.full_access,
-            skill_names=tuple(staged),
+            sandbox=_stage_sandbox(adapter, "author"),
+            skill_names=author_skills,
             audit_path=_attempt_audit_path(workspace, "author", author_attempt),
+            hidden_paths=_stage_hidden_paths(adapter, "author", workspace),
+            read_only_paths=_stage_read_only_paths(adapter, "author", workspace),
+            writable_paths=_stage_writable_paths(adapter, "author", workspace),
+            restrict_workspace=bool(getattr(adapter, "stage_isolation", False)),
         )
         author_runner = _runner_for_node(selected_runner, author_runner_name)
         await _emit_event(
@@ -487,7 +647,7 @@ async def _execute_bounded_agents(
                         duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
                     )
                     raise WorkflowExecutionError("maximum author attempts exceeded") from exc
-                feedback = str(exc).strip()[:12000] or "deterministic validation failed"
+                feedback = str(exc).strip() or "deterministic validation failed"
                 await _emit_event(
                     event_callback,
                     "node_completed",
@@ -525,7 +685,7 @@ async def _execute_bounded_agents(
                             duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
                         )
                         raise WorkflowExecutionError("maximum author attempts exceeded") from exc
-                    feedback = str(exc).strip()[:12000] or "deterministic validation failed"
+                    feedback = str(exc).strip() or "deterministic validation failed"
                     await _emit_event(
                         event_callback,
                         "node_completed",
@@ -580,7 +740,7 @@ async def _execute_bounded_agents(
             workspace,
             author_result.last_audit or author_result,
             review_context,
-            previous_review,
+            None if independent_review else previous_review,
         )
         review_request = AgentExecutionRequest(
             run_id=run_id,
@@ -591,10 +751,14 @@ async def _execute_bounded_agents(
             reasoning_effort=reviewer_reasoning_effort,
             workspace=workspace,
             prompt=str(review_prompt),
-            sandbox=Sandbox.full_access,
+            sandbox=_stage_sandbox(adapter, "reviewer"),
             output_schema=getattr(adapter, "review_output_schema", None),
-            skill_names=tuple(staged),
+            skill_names=reviewer_skills,
             audit_path=_attempt_audit_path(workspace, "reviewer", reviewer_attempt),
+            hidden_paths=_stage_hidden_paths(adapter, "reviewer", workspace),
+            read_only_paths=_stage_read_only_paths(adapter, "reviewer", workspace),
+            writable_paths=_stage_writable_paths(adapter, "reviewer", workspace),
+            restrict_workspace=bool(getattr(adapter, "stage_isolation", False)),
         )
         reviewer_runner = _runner_for_node(selected_runner, reviewer_runner_name)
         await _emit_event(
@@ -632,14 +796,18 @@ async def _execute_bounded_agents(
             )
             raise
         try:
-            review = await _parse_review(adapter, review_result.response, workspace, previous_review, reviewer_attempt)
+            continuity = None if independent_review else previous_review
+            review = await _parse_review(adapter, review_result.response, workspace, continuity, reviewer_attempt)
             evaluation = evaluate_review(
                 review,
-                previous_review,
+                continuity,
                 attempt=author_attempt,
                 max_attempts=max_rounds,
                 stagnant_transitions=stagnant_transitions,
-                stagnation_limit=stagnation_limit,
+                # Slides reviews are independent observations of the current
+                # candidate.  Repeated blockers still consume attempts, but
+                # never trip a semantic stagnation shortcut.
+                stagnation_limit=(10**9 if independent_review else stagnation_limit),
             )
         except Exception as exc:
             await _emit_event(
@@ -681,8 +849,9 @@ async def _execute_bounded_agents(
             duration_ms=review_result.duration_ms or round((asyncio.get_running_loop().time() - reviewer_started) * 1000),
         )
         await _persist_review_history(workspace, reviewer_attempt, review, evaluation)
-        previous_review = review
-        stagnant_transitions = evaluation.stagnant_transitions
+        if not independent_review:
+            previous_review = review
+            stagnant_transitions = evaluation.stagnant_transitions
         if evaluation.decision is ReviewDecision.PUBLISH:
             return author_result
         if evaluation.decision in {ReviewDecision.REJECT_MAX_ATTEMPTS, ReviewDecision.REJECT_STAGNATED}:
@@ -695,7 +864,10 @@ async def _execute_bounded_agents(
             raise SemanticReviewRejected(review_count, reason=evaluation.decision)
         feedback_hook = getattr(adapter, "revision_feedback", None) or getattr(adapter, "build_revision_feedback", None)
         feedback = await _call(feedback_hook, value, review, author_result) if feedback_hook is not None else str(review)
-        feedback = str(feedback)[:12000]
+        # Do not silently discard findings when the reviewer returned a large
+        # structured response. The adapter may provide a JSON file path or a
+        # compact string; the full value is passed through unchanged.
+        feedback = str(feedback)
         author_attempt += 1
         await _emit_phase(progress_callback, AgentPhase.REVISING)
         prompt = str(
@@ -759,21 +931,40 @@ async def _execute_workflow(
             getattr(adapter, "declared_skills", ()),
             skills_root=skills_root,
         )
-        context_hook = getattr(adapter, "semantic_review_context", None) or getattr(adapter, "build_semantic_review_context", None)
-        review_context = await _call(context_hook, value, workspace) if context_hook is not None else None
-        prompt = await _call(adapter.build_prompt, value, workspace, semantic_review_context=review_context)
-        turns = [TurnRequest(kind="initial", prompt=prompt, sandbox=Sandbox.full_access)]
-        build_review = getattr(adapter, "build_review_prompt", None)
         selected_runner = runner
         # The default registry and all provider-neutral implementations use
         # one request per logical activation.  Legacy test doubles are kept on
         # the compatibility callback path below.
-        modern_runner = selected_runner is None or isinstance(selected_runner, RunnerRegistry)
+        modern_runner = (
+            selected_runner is None
+            or isinstance(selected_runner, RunnerRegistry)
+            or bool(getattr(adapter, "extraction_skills", ()))
+        )
         if selected_runner is not None and not isinstance(selected_runner, RunnerRegistry):
             if callable(getattr(selected_runner, "resolve", None)) and not callable(getattr(selected_runner, "run", None)):
                 modern_runner = True
             else:
                 modern_runner = isinstance(selected_runner, CodexRunner) or _uses_execution_request(selected_runner)
+
+        # Extraction is a distinct, one-time activation.  It is intentionally
+        # completed before the author prompt is built so author revisions can
+        # never cause a source document to be reinterpreted.
+        if getattr(adapter, "extraction_skills", ()):
+            await _execute_extraction(
+                run_id=str(payload.job_id),
+                adapter=adapter,
+                value=value,
+                workspace=workspace,
+                staged=staged,
+                selected_runner=selected_runner,
+                progress_callback=progress_callback,
+                event_callback=event_callback,
+            )
+        context_hook = getattr(adapter, "semantic_review_context", None) or getattr(adapter, "build_semantic_review_context", None)
+        review_context = await _call(context_hook, value, workspace) if context_hook is not None else None
+        prompt = await _call(adapter.build_prompt, value, workspace, semantic_review_context=review_context)
+        turns = [TurnRequest(kind="initial", prompt=prompt, sandbox=Sandbox.workspace_write)]
+        build_review = getattr(adapter, "build_review_prompt", None)
         if build_review is not None and modern_runner:
             run = await _execute_bounded_agents(
                 run_id=str(payload.job_id),
@@ -888,7 +1079,7 @@ async def _execute_workflow(
                 if review_round >= max_rounds:
                     raise WorkflowExecutionError("maximum author attempts exceeded")
                 review_round += 1
-                pending_feedback = str(feedback)[:12000]
+                pending_feedback = str(feedback)
                 await _emit_phase(progress_callback, AgentPhase.REVISING)
                 revision_prompt = await _call(
                     adapter.build_prompt,

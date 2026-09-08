@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evidence_store_v1.json",
+  "title": "Frozen EvidenceStore v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format_version", "frozen", "status", "manifest", "documents", "blocks", "assets", "warnings", "errors", "integrity"],
+  "properties": {
+    "format_version": {"const": "EvidenceStore v1"},
+    "frozen": {"const": true},
+    "status": {"enum": ["ok", "warning"]},
+    "manifest": {"$ref": "#/$defs/manifest"},
+    "documents": {"type": "array", "items": {"$ref": "#/$defs/document"}},
+    "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}},
+    "assets": {"type": "array", "items": {"$ref": "#/$defs/asset"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "errors": {"const": []},
+    "integrity": {"$ref": "#/$defs/integrity"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format_version", "path", "sha256"],
+      "properties": {
+        "format_version": {"const": "1.0"},
+        "path": {"type": "string"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["document_id", "source", "source_type", "source_sha256", "status", "warnings", "errors", "index", "assets"],
+      "properties": {
+        "document_id": {"$ref": "#/$defs/sha256"},
+        "source": {"type": "string"},
+        "source_type": {"type": "string"},
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "status": {"enum": ["ok", "warning"]},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "errors": {"const": []},
+        "index": {"type": "string"},
+        "assets": {"type": "array", "items": {"$ref": "#/$defs/asset"}}
+      }
+    },
+    "block": {
+      "type": "object",
+      "required": ["id", "kind", "text", "locator", "document_id", "provenance"],
+      "properties": {
+        "id": {"$ref": "#/$defs/sha256"},
+        "kind": {"enum": ["heading", "paragraph", "list_item", "table", "figure", "footnote"]},
+        "text": {"type": "string"},
+        "locator": {"type": "object"},
+        "document_id": {"$ref": "#/$defs/sha256"},
+        "provenance": {"type": "object"},
+        "asset_refs": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "asset": {
+      "type": "object",
+      "required": ["id", "sha256", "document_id", "path"],
+      "properties": {
+        "id": {"$ref": "#/$defs/sha256"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "document_id": {"$ref": "#/$defs/sha256"},
+        "path": {"type": "string"}
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest_sha256", "source_hashes", "asset_hashes", "content_sha256"],
+      "properties": {
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "source_hashes": {"type": "object", "additionalProperties": {"$ref": "#/$defs/sha256"}},
+        "asset_hashes": {"type": "object", "additionalProperties": {"$ref": "#/$defs/sha256"}},
+        "content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

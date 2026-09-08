@@ -189,6 +189,7 @@ export interface ChatResponse {
 export type AgentJobPhase =
     | "queued"
     | "preparing"
+    | "extracting"
     | "drafting"
     | "validating"
     | "reviewing"

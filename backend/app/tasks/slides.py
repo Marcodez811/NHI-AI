@@ -12,7 +12,7 @@ from taskiq.depends.progress_tracker import TaskProgress
 from app.broker import result_backend
 from app.config import settings
 from app.models.slides import JobStatus, SlidesTaskPayload, SlidesTaskResult
-from app.services.virtual_fs import DocumentResolutionError, SharedVolumeDocumentResolver
+from app.services.slides.contracts import JobError
 
 _SAFE_STAGE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SENSITIVE_TEXT = re.compile(r"sk-[a-zA-Z0-9_-]{8,}|api[_ -]?key|authorization|traceback", re.I)
@@ -101,27 +101,32 @@ async def generate_slides_task(payload: SlidesTaskPayload) -> SlidesTaskResult:
         )
 
     try:
-        source_paths = await SharedVolumeDocumentResolver(
-            settings.documents_root,
-        ).resolve_many(payload.document_ids)
+        # Compatibility callers use the same registered, staged workflow as
+        # the queue entrypoint. This prevents the old helper from bypassing
+        # frozen extraction, deterministic validation, or semantic review.
+        from app.services.agentic import AgentTaskPayload, WorkflowStatus
+        from app.services.agentic.runner import CodexAgentRunner, CodexRunner, RunnerRegistry
+        from app.services.agentic.service import execute_workflow
+        from app.services.slides.adapter import slides_adapter  # noqa: F401
 
-        # Imported here so an API process can start before the optional slide
-        # generation runtime is loaded; workers are the only callers.
-        from app.services.slides.agent import JobError, generate_slides
-
-        generated = await generate_slides(
-            job_id=payload.job_id,
-            source_paths=source_paths,
-            request=payload,
-            jobs_root=settings.agent_jobs_root,
-            output_root=settings.agent_output_root,
+        codex = CodexRunner(
+            model=settings.agent_default_model,
+            reasoning_effort=settings.agent_default_reasoning_effort,
             api_key=settings.openai_api_key,
-            model=settings.openai_model,
-            timeout_minutes=settings.agent_timeout_minutes,
-            keep_workspace_on_failure=settings.agent_keep_workspace_on_failure,
-            progress_callback=report_progress,
+            timeout_seconds=settings.agent_timeout_minutes * 60,
+            heartbeat_seconds=settings.agent_heartbeat_seconds,
+            require_process_isolation=settings.agent_require_process_isolation,
         )
-        result = SlidesTaskResult.model_validate(generated)
+        workflow_result = await execute_workflow(
+            AgentTaskPayload(job_id=payload.job_id, workflow="slides", input=payload),
+            runner=RunnerRegistry({"codex": CodexAgentRunner(codex)}),
+            workspace_root=settings.agent_jobs_root,
+            progress_callback=report_progress,
+            timeout_seconds=settings.agent_timeout_minutes * 60,
+        )
+        if workflow_result.status is not WorkflowStatus.COMPLETED or workflow_result.output is None:
+            raise RuntimeError("presentation workflow did not complete")
+        result = SlidesTaskResult.model_validate(workflow_result.output)
         artifact_key = _relative_artifact_key(result.artifact_key)
         if result.job_id != payload.job_id or result.status is not JobStatus.COMPLETED or not artifact_key:
             raise JobError("publish", "presentation could not be published")

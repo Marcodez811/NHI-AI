@@ -14,35 +14,30 @@ Create formal, editable, Traditional-Chinese policy briefings. Keep the final ar
 - Treat the title slide as a deliberate cover, not a content slide: clear title hierarchy, generous whitespace, readable date/office metadata, and no decorative element competing with the logo.
 - Keep typography, grid, margins, palette, icon/chart treatment, and information density coherent from cover through conclusion.
 
-## Required evidence-first workflow
+## Author workflow
 
-1. Run `$source-document-extraction` first and require `work/extracted/manifest.json`. Do not create factual claims, figures, dates, or policy statements without source blocks.
+1. Treat `work/evidence.json` as the frozen, authoritative factual source. Do not open original source documents or extraction chunks, and do not modify the EvidenceStore. Referenced source images are available under `work/extracted/assets/`.
 2. Read `references/nhi-zh-tw.md` before drafting. Read `references/generation-gotchas.md` before generating, and `references/template-editing.md` before modifying a template.
-3. Create `work/intermediate/evidence_map.json` conforming to `schemas/evidence_map_v1.json`. Cite each claim with `{document_id, block_id}` from the extracted manifest; use exact official terminology and mark a claim as an interpretation when it is not verbatim.
-4. Validate the map before generation:
+3. Design the narrative and generate or edit `output/presentation.pptx`. Preserve native PowerPoint text, tables, and charts; use `addChart()` for chartable data. Keep factual synthesis traceable to block IDs from the EvidenceStore in your working reasoning.
+4. Render the complete deck with the backend-compatible pipeline below. Inspect the sequence and every slide for clipping, overlap, unreadable text, weak hierarchy, inconsistent layout, and visual defects. Fix problems and regenerate the deck and every render until the candidate is visually sound.
 
    ```bash
-   python .agents/skills/pptx-nhi-tw/scripts/validate_evidence_map.py work/extracted/manifest.json work/intermediate/evidence_map.json
+   mkdir -p work/rendered/pdf work/rendered/final
+   python .agents/skills/pptx-nhi-tw/scripts/office/soffice.py --headless --convert-to pdf --outdir work/rendered/pdf output/presentation.pptx
+   pdftoppm -png -r 150 work/rendered/pdf/presentation.pdf work/rendered/final/slide
    ```
 
-5. Generate or edit the deck. Preserve native PowerPoint text, tables, and charts; use `addChart()` for chartable data. Use the provided upstream tooling for thumbnails, safe slide duplication/cleanup, Office validation, and LibreOffice conversion.
-6. Render the complete deck and perform the mandatory review-and-revision loop in `references/qa.md`. Review the deck both as a sequence and slide by slide for narrative/factual coherence, visual coherence, title branding, and aesthetic quality. Fix every blocking finding, then regenerate the PPTX and all final renders. Repeat until the final review passes.
-7. Write `work/intermediate/review_report.json` conforming to `schemas/review_report_v1.json`, then validate it. The report must describe the final review round, bind every reviewed PNG and the PPTX by SHA-256, and contain no open blocking findings.
-8. Create and validate `work/intermediate/qa_report.json` only after the review report passes. Both reports bind their SHA-256 and slide count to `output/presentation.pptx`; regenerate both after every deck change. Completion is forbidden until every deterministic check and every review check passes.
+5. Finish with exactly one `work/rendered/final/slide-<number>.png` per slide. Remove stale renders after slide-count or ordering changes.
+
+The backend owns deterministic validation, `content_check.json`, `deck_snapshot.json`, semantic review, retry decisions, and publication. Do not create or edit those artifacts.
 
 ## Bundled commands
 
-```bash
-python .agents/skills/pptx-nhi-tw/scripts/check_pptx_content.py output/presentation.pptx --output work/intermediate/content_check.json --fail-on-findings
-python .agents/skills/pptx-nhi-tw/scripts/office/validate.py output/presentation.pptx [--original template/example.pptx]
-python .agents/skills/pptx-nhi-tw/scripts/review_report.py validate --pptx output/presentation.pptx --renders work/rendered/final --report work/intermediate/review_report.json
-python .agents/skills/pptx-nhi-tw/scripts/qa_report.py create --pptx output/presentation.pptx --evidence-map work/intermediate/evidence_map.json --content-check work/intermediate/content_check.json --office-status pass --visual-status pass --output work/intermediate/qa_report.json
-python .agents/skills/pptx-nhi-tw/scripts/qa_report.py validate --pptx output/presentation.pptx --evidence-map work/intermediate/evidence_map.json --report work/intermediate/qa_report.json
-```
+The validation scripts remain bundled for backend use. The author must not generate validator-owned reports.
 
 - `scripts/thumbnail.py`, `scripts/add_slide.py`, `scripts/clean.py`, and `scripts/office/` retain the authorized upstream PPTX tooling. Pass a named thumbnail prefix; run `clean.py` only after slide ordering is final.
 - Content and report validators use Python’s ZIP/XML support and do not depend on MarkItDown. MarkItDown remains useful for human text review.
-- Read `references/qa.md` for the review loop, report fields, visual QA, and limitations.
+- Use the visual-inspection guidance in `references/qa.md`; ignore its legacy report-writing steps because reports are now backend-owned.
 
 ## References
 

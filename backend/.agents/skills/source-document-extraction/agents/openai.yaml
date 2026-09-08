@@ -1,4 +1,4 @@
 interface:
   display_name: "Source Document Extraction"
-  short_description: "Extract DOCX/PDF sources for slides"
-  default_prompt: "Use $source-document-extraction to extract these source documents into structured slide-planning artifacts."
+  short_description: "Extract source documents for slides"
+  default_prompt: "Use $source-document-extraction to extract PDF, DOCX, Markdown, and text sources into work/extracted/ artifacts for the frozen EvidenceStore."

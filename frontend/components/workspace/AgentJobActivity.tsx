@@ -17,6 +17,7 @@ import type {
 export const AGENT_JOB_PHASES: readonly AgentJobPhase[] = [
     "queued",
     "preparing",
+    "extracting",
     "drafting",
     "validating",
     "reviewing",
@@ -28,6 +29,7 @@ export const AGENT_JOB_PHASES: readonly AgentJobPhase[] = [
 export const AGENT_JOB_PHASE_LABELS: Record<AgentJobPhase, string> = {
     queued: "等待中",
     preparing: "準備中",
+    extracting: "整理來源中",
     drafting: "撰寫中",
     validating: "驗證中",
     reviewing: "檢查中",
@@ -40,6 +42,7 @@ export const AGENT_JOB_PHASE_LABELS: Record<AgentJobPhase, string> = {
 const PHASE_COPY: Partial<Record<AgentJobPhase, string>> = {
     queued: "工作正在等待可用容量。",
     preparing: "正在準備來源與工作環境。",
+    extracting: "正在抽取來源並建立固定的證據資料。",
     drafting: "正在根據來源撰寫簡報。",
     validating: "正在驗證簡報內容與格式。",
     reviewing: "正在檢查簡報是否符合需求。",

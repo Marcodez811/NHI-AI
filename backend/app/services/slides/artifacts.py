@@ -203,7 +203,15 @@ def create_job_workspace(job_id: str, jobs_root: Path) -> Path:
         resolved.relative_to(jobs_root)
     except ValueError as exc:
         raise JobError("workspace", "job workspace is invalid") from exc
-    for relative_path in ("input", "template", "work/extracted", "work/images", "work/intermediate", "output"):
+    for relative_path in (
+        "input",
+        "template",
+        "work/extracted/assets",
+        "work/images",
+        "work/intermediate",
+        "work/rendered/final",
+        "output",
+    ):
         (job_dir / relative_path).mkdir(parents=True, exist_ok=True)
     return job_dir
 

@@ -12,7 +12,29 @@
     "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}}
   },
   "$defs": {
-    "document": {"type": "object", "required": ["document_id", "status", "source", "index"], "properties": {"document_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "status": {"enum": ["ok", "warning", "error"]}, "source": {"type": "string"}, "index": {"type": "string"}}},
-    "block": {"type": "object", "required": ["id", "kind", "text", "locator"], "properties": {"id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "kind": {"enum": ["heading", "paragraph", "list_item", "table", "figure", "footnote"]}, "text": {"type": "string"}, "locator": {"type": "object"}}}
+    "document": {
+      "type": "object",
+      "required": ["document_id", "status", "source", "index"],
+      "properties": {
+        "document_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "status": {"enum": ["ok", "warning", "error"]},
+        "source": {"type": "string"},
+        "source_type": {"enum": ["docx", "pdf", "md", "markdown", "txt", "text", "unknown"]},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "errors": {"type": "array", "items": {"type": "string"}},
+        "index": {"type": "string"}
+      }
+    },
+    "block": {
+      "type": "object",
+      "required": ["id", "kind", "text", "locator"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "kind": {"enum": ["heading", "paragraph", "list_item", "table", "figure", "footnote"]},
+        "text": {"type": "string"},
+        "locator": {"type": "object"},
+        "relationship_ids": {"type": "array", "items": {"type": "string"}}
+      }
+    }
   }
 }

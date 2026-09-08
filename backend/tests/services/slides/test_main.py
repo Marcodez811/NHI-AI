@@ -144,8 +144,17 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertNotIn("blocking_findings", schema["properties"])
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
+            evidence = workspace / "work" / "evidence.json"
+            evidence.parent.mkdir(parents=True)
+            evidence.write_text(
+                json.dumps({"blocks": [{"id": "evidence_123"}], "assets": []}),
+                encoding="utf-8",
+            )
+            snapshot = workspace / "work" / "intermediate" / "deck_snapshot.json"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text(json.dumps({"slide_count": 8}), encoding="utf-8")
             review = slides_adapter.parse_review(
-                '{"summary":"Two issues found.","findings":[{"finding_id":null,"status":"open","severity":"blocking","category":"evidence","issue_key":"unsupported-claim","locations":["slide:4","claim:C4"],"description":"Slide 4 is unsupported.","correction":"Add the source mapping."},{"finding_id":null,"status":"open","severity":"advisory","category":"cosmetic","issue_key":"title-clarity","locations":["slide:2"],"description":"Slide 2 title could be clearer.","correction":"Clarify the title."}]}',
+                '{"summary":"Two issues found.","findings":[{"severity":"blocking","category":"contradicted_claim","slide_number":4,"claim":"Growth is 8.2%.","judgement":"contradicted","evidence_refs":["evidence_123"],"reason":"The evidence states 4.1%.","correction":"Change the value to 4.1%."},{"severity":"advisory","category":"other","slide_number":2,"claim":"The title is vague.","judgement":"unclear","evidence_refs":[],"reason":"The wording is broad.","correction":"Clarify the title."}]}',
                 workspace,
             )
             self.assertIsInstance(review, ReviewOutcome)
@@ -157,13 +166,17 @@ class SlidesServiceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 slides_adapter.parse_review('{"summary":"bad"}', workspace)
             self.assertFalse((workspace / "work/intermediate/semantic_review.json").exists())
+            with self.assertRaisesRegex(ValueError, "malformed"):
+                slides_adapter.parse_review(
+                    '{"summary":"bad","findings":[{"severity":"blocking","category":"other","slide_number":"four","claim":"Claim","judgement":"unclear","evidence_refs":[],"reason":"Reason","correction":"Fix"}]}',
+                    workspace,
+                )
 
         prompt = slides_adapter.build_review_prompt(_payload(uuid4()), Path("/tmp/workspace"), None, None)
         self.assertIn("authoritative requested presentation title", prompt)
         self.assertIn("ordinary rounding", prompt)
-        self.assertIn("independent root cause", prompt)
-        self.assertIn("severity are immutable logical identity", prompt)
-        self.assertNotIn("read-only sandbox", prompt)
+        self.assertIn("fresh semantic-only review", prompt)
+        self.assertNotIn("Prior blocking findings", prompt)
 
         previous = ReviewOutcome(
             summary="prior",
@@ -181,7 +194,7 @@ class SlidesServiceTests(unittest.TestCase):
         prompt_with_history = slides_adapter.build_review_prompt(
             _payload(uuid4()), Path("/tmp/workspace"), None, None, previous
         )
-        self.assertIn('"severity": "blocking"', prompt_with_history)
+        self.assertEqual(prompt_with_history, prompt)
 
     def test_revision_feedback_contains_only_blocking_findings(self):
         review = ReviewOutcome(
@@ -238,7 +251,14 @@ class SlidesServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             context = asyncio.run(slides_adapter.semantic_review_context(_payload(uuid4()), Path(temporary)))
         self.assertEqual(context["requested_title"], "2026 / Taiwan: NHI briefing")
-        self.assertIn("work/intermediate/evidence_map.json", context["artifacts"])
+        self.assertEqual(
+            context["artifacts"],
+            [
+                "work/evidence.json",
+                "work/intermediate/deck_snapshot.json",
+                "work/rendered/final/*.png",
+            ],
+        )
         self.assertIn("work/rendered/final/*.png", context["artifacts"])
 
     def test_missing_author_artifact_is_a_workflow_failure(self):
@@ -316,15 +336,16 @@ class SlidesServiceTests(unittest.TestCase):
             request = _payload(uuid4())
             observed = []
 
-            def fake_verify(job_dir, *, expected_slide_count=None):
+            def fake_validate(job_dir, *, expected_slide_count=None, **kwargs):
                 observed.append(expected_slide_count)
                 deck = job_dir / "output" / "presentation.pptx"
                 deck.parent.mkdir(parents=True, exist_ok=True)
                 deck.write_bytes(b"deck")
-                return deck
+                return SimpleNamespace(status="PASS", findings=())
 
             with (
-                patch("app.services.slides.adapter.verify_output", fake_verify),
+                patch("app.services.slides.evidence.load_frozen_evidence", return_value={}),
+                patch("app.services.slides.validation.validate_candidate_deck", fake_validate),
                 patch("app.services.slides.adapter.publish_output", return_value=root / "published.pptx"),
             ):
                 asyncio.run(slides_adapter.validate_generated(request, root))

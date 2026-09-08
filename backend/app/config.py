@@ -27,6 +27,11 @@ class Settings(BaseSettings):
         min_length=1,
         validation_alias=AliasChoices("AGENT_REVIEWER_MODEL"),
     )
+    agent_extraction_model: str | None = Field(
+        default=None,
+        min_length=1,
+        validation_alias=AliasChoices("AGENT_EXTRACTION_MODEL"),
+    )
     agent_default_reasoning_effort: AgentReasoningEffort = Field(
         default=AgentReasoningEffort.HIGH,
         validation_alias=AliasChoices("AGENT_DEFAULT_REASONING_EFFORT"),
@@ -38,6 +43,10 @@ class Settings(BaseSettings):
     agent_reviewer_reasoning_effort: AgentReasoningEffort | None = Field(
         default=AgentReasoningEffort.HIGH,
         validation_alias=AliasChoices("AGENT_REVIEWER_REASONING_EFFORT"),
+    )
+    agent_extraction_reasoning_effort: AgentReasoningEffort | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AGENT_EXTRACTION_REASONING_EFFORT"),
     )
     openai_chat_model: str = "gpt-5.6-luna"
     openai_vector_store_id: str | None = None
@@ -82,6 +91,10 @@ class Settings(BaseSettings):
         default=2,
         ge=1,
         validation_alias=AliasChoices("AGENT_REVIEW_STAGNATION_LIMIT"),
+    )
+    agent_require_process_isolation: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("AGENT_REQUIRE_PROCESS_ISOLATION"),
     )
     # Agent telemetry is short-lived diagnostic data, not workflow history.
     agent_event_retention_seconds: int = Field(

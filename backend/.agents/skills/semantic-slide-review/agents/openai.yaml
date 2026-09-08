@@ -1,0 +1,4 @@
+interface:
+  display_name: "Semantic Slide Reviewer"
+  short_description: "Check slide claims against frozen evidence"
+  default_prompt: "Use $semantic-slide-review to review the candidate only against work/evidence.json, deck_snapshot.json, and final renders."

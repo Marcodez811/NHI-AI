@@ -35,7 +35,7 @@ from .artifacts import (
     preflight,
     stage_uploads,
     validate_source_paths,
-    verify_output,
+    verify_output,  # compatibility export for legacy callers; validator owns new checks
 )
 from .contracts import JobError
 from .runtime import build_job_environment, build_prompt
@@ -43,7 +43,14 @@ from .runtime import build_job_environment, build_prompt
 
 class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskResult]):
     name = "slides"
-    declared_skills = ("source-document-extraction", "pptx-nhi-tw")
+    # Skills are staged once, but each fresh activation receives only the
+    # bundle required for its responsibility.
+    declared_skills = ("source-document-extraction", "pptx-nhi-tw", "semantic-slide-review")
+    extraction_skills = ("source-document-extraction",)
+    author_skills = ("pptx-nhi-tw",)
+    reviewer_skills = ("semantic-slide-review",)
+    independent_semantic_review = True
+    stage_isolation = True
     input_type = SlidesTaskPayload
     output_type = SlidesTaskResult
 
@@ -63,6 +70,14 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
     def reviewer_reasoning_effort(self) -> AgentReasoningEffort:
         return settings.agent_reviewer_reasoning_effort or settings.agent_default_reasoning_effort
 
+    @property
+    def extraction_model(self) -> str:
+        return settings.agent_extraction_model or settings.agent_default_model
+
+    @property
+    def extraction_reasoning_effort(self) -> AgentReasoningEffort:
+        return settings.agent_extraction_reasoning_effort or settings.agent_default_reasoning_effort
+
     # The parser below remains authoritative so malformed provider responses
     # fail closed even when an older SDK ignores output_schema.
     review_output_schema = {
@@ -74,15 +89,28 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["finding_id", "status", "severity", "category", "issue_key", "locations", "description", "correction"],
+                    "required": ["severity", "category", "slide_number", "claim", "judgement", "evidence_refs", "reason", "correction"],
                     "properties": {
-                        "finding_id": {"type": ["string", "null"]},
-                        "status": {"type": "string", "enum": ["open", "resolved"]},
                         "severity": {"type": "string", "enum": ["blocking", "advisory"]},
-                        "category": {"type": "string"},
-                        "issue_key": {"type": "string"},
-                        "locations": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "description": {"type": "string"},
+                        "category": {
+                            "type": "string",
+                            "enum": [
+                                "unsupported_claim",
+                                "contradicted_claim",
+                                "misleading_synthesis",
+                                "material_omission",
+                                "unreadable_claim",
+                                "other",
+                            ],
+                        },
+                        "slide_number": {"type": ["integer", "null"], "minimum": 1},
+                        "claim": {"type": "string"},
+                        "judgement": {
+                            "type": "string",
+                            "enum": ["supported", "unsupported", "contradicted", "misleading", "unclear"],
+                        },
+                        "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                        "reason": {"type": "string"},
                         "correction": {"type": "string"},
                     },
                     "additionalProperties": False,
@@ -94,7 +122,9 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
 
     @property
     def max_author_attempts(self) -> int:
-        return settings.agent_max_author_attempts
+        # Five write-capable author activations is the hard slides-workflow
+        # ceiling; deployment settings can only lower it.
+        return min(5, settings.agent_max_author_attempts)
 
     @property
     def max_review_rounds(self) -> int:
@@ -134,22 +164,105 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             environment=build_job_environment(fontconfig_file=fontconfig),
         )
         staged_names = await asyncio.to_thread(stage_uploads, workspace, validated)
-        context.update({"staged_names": staged_names, "font": font})
+        context.update({
+            "staged_names": staged_names,
+            "source_paths": [str(path) for path in validated],
+            "font": font,
+        })
         await asyncio.to_thread(context_path.write_text, json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    def stage_hidden_paths(self, stage: str, workspace: Path) -> tuple[Path, ...]:
+        """Return originals and review history hidden from downstream stages."""
+
+        if stage == "extraction":
+            return ()
+        hidden: list[Path] = [workspace / "input"]
+        try:
+            context = json.loads((workspace / "work" / "slide_context.json").read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            context = {}
+        hidden.extend(Path(path) for path in context.get("source_paths", ()) if isinstance(path, str))
+        hidden.extend(
+            (
+                workspace / "work" / "intermediate" / "semantic_review_history.json",
+                workspace / "work" / "intermediate" / "semantic_review.json",
+            )
+        )
+        return tuple(hidden)
+
+    def stage_read_only_paths(self, stage: str, workspace: Path) -> tuple[Path, ...]:
+        """Expose only the immutable inputs needed by each stage."""
+
+        if stage == "extraction":
+            return (workspace / "input",)
+        if stage == "author":
+            return (
+                workspace / "work" / "evidence.json",
+                workspace / "work" / "extracted" / "assets",
+                workspace / "template",
+            )
+        if stage == "reviewer":
+            return (
+                workspace / "work" / "evidence.json",
+                workspace / "work" / "intermediate" / "deck_snapshot.json",
+                workspace / "work" / "rendered" / "final",
+            )
+        return ()
+
+    def stage_writable_paths(self, stage: str, workspace: Path) -> tuple[Path, ...]:
+        """Limit write-capable agents to their owned artifact directories."""
+
+        if stage == "extraction":
+            return (workspace / "work" / "extracted",)
+        if stage == "author":
+            return (
+                workspace / "output",
+                workspace / "work" / "rendered",
+                workspace / "work" / "images",
+            )
+        return ()
+
+    async def build_extraction_prompt(self, value: SlidesTaskPayload, workspace: Path) -> str:
+        context = json.loads(await asyncio.to_thread((workspace / "work" / "slide_context.json").read_text, encoding="utf-8"))
+        sources = "\n".join(f"- input/{name}" for name in context.get("staged_names", ()))
+        return f"""# Source extraction stage
+
+Extract each staged source below into `work/extracted/` using `$source-document-extraction`.
+This is the only stage allowed to open the original source files. Preserve every factual
+block, table, figure, locator, warning, and copied asset without curating claims.
+
+{sources}
+
+Run the extraction validator before finishing. Do not create slides, interpret evidence,
+or write files outside `work/extracted/`. The backend will consolidate the artifacts into
+the frozen `work/evidence.json` store after this activation.
+"""
+
+    def post_extraction(self, value: SlidesTaskPayload, workspace: Path) -> None:
+        """Validate and atomically freeze the extractor's output."""
+
+        del value
+        from .evidence import EvidenceError, consolidate_evidence
+
+        try:
+            consolidate_evidence(workspace / "work" / "extracted", workspace / "work" / "evidence.json")
+        except EvidenceError as exc:
+            raise JobError("extraction", "extraction artifacts could not be consolidated") from exc
 
     async def semantic_review_context(self, value: SlidesTaskPayload, workspace: Path) -> Any:
         return {
             "requested_title": value.title,
             "requested_slide_count": value.slides_count,
             "artifacts": [
-                "output/presentation.pptx",
-                "work/intermediate/evidence_map.json",
-                "work/intermediate/content_check.json",
-                "work/intermediate/review_report.json",
-                "work/intermediate/qa_report.json",
-                "work/intermediate/semantic_review_history.json",
+                "work/evidence.json",
+                "work/intermediate/deck_snapshot.json",
                 "work/rendered/final/*.png",
-            ]
+            ],
+            "review_inputs": [
+                "work/evidence.json",
+                "work/intermediate/deck_snapshot.json",
+                "work/rendered/final/*.png",
+            ],
         }
 
     def post_author_completion_check(
@@ -170,13 +283,14 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             prompt += (
                 "\n\n## Corrective revision instructions\n"
                 "This is a corrective revision, not a regeneration. The workspace already contains "
-                "the previous candidate presentation and its evidence/QA artifacts. Modify the "
+                "the previous candidate presentation and its deterministic validation artifacts. Modify the "
                 "existing presentation and affected artifacts in place. Preserve the requested "
                 f"title exactly as `{value.title}` and the requested slide count of {value.slides_count}; "
                 "do not redesign or rewrite unaffected slides.\n"
                 "Address every blocking finding below. After changes, regenerate affected renders, "
-                "update EvidenceMap, regenerate content_check/review_report/qa_report, and rerun all "
-                "deterministic checks. Before finishing, verify each blocking finding individually "
+                "then stop; the backend validator owns content_check.json and deck_snapshot.json. "
+                "The frozen evidence.json and work/extracted/ tree are read-only and authoritative. "
+                "Before finishing, verify each blocking finding individually "
                 "and state which slide or artifact change resolves it.\n\n"
                 "## Blocking review findings to correct\n"
                 + revision_feedback
@@ -194,61 +308,55 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
         review_context: Any,
         previous_review: ReviewOutcome | None = None,
     ) -> str:
+        del audit, previous_review
         requested_title = getattr(value, "title", "") or "(not provided)"
-        previous = []
-        if previous_review is not None:
-            previous = [
-                {
-                    "finding_id": item.finding_id,
-                    "severity": item.severity.value,
-                    "category": item.category,
-                    "issue_key": item.issue_key,
-                    "locations": list(item.locations),
-                    "description": item.description,
-                }
-                for item in previous_review.findings
-                if item.finding_id and item.status is ReviewFindingStatus.OPEN and item.severity is ReviewSeverity.BLOCKING
-            ]
         return (
-            "Perform semantic review of the generated presentation now. Do not modify any file. "
-            "Inspect the PPTX and validation artifacts listed below. "
+            "Perform a fresh semantic-only review of the current candidate. Do not modify any file. "
+            "Use only the frozen evidence.json, deck_snapshot.json, and final PNG renders listed below. "
+            "Do not open source PDF, DOCX, Markdown, or text files. Do not inspect prior semantic-review "
+            "responses, review history, author prompts, or hidden workspace files. "
             f"The authoritative requested presentation title is `{requested_title}`; do not classify "
-            "that exact requested title as template/test residue solely because it looks unusual. "
+            "that exact requested title as template/test residue solely because it looks unusual.\n"
             "Return ONLY valid JSON with exactly these top-level fields: summary (string), "
-            "findings (array of structured findings). Each finding must include finding_id (reuse "
-            "the supplied ID for an existing issue, or null for a new issue), status (open or "
-            "resolved), severity (blocking or advisory), category, issue_key, locations, "
-            "description, and correction. Reassess every prior blocker below exactly once; do not "
-            "omit it. A blocking finding "
+            "findings (array). Every finding must include severity (blocking or advisory), category, "
+            "slide_number (integer or null), claim, judgement, evidence_refs (array of evidence IDs), "
+            "reason, and correction. Use an empty findings array when there are no issues. A blocking finding "
             "must prevent publication because it is materially incorrect, misleading, unsupported, "
             "missing, unreadable, or internally inconsistent. Treat ordinary rounding or wording "
             "polish as advisory unless it changes a threshold, comparison, denominator, or meaning. "
-            "Consolidate consequences under the independent root cause; for example, identical "
-            "renders and repeated render hashes are one blocker. Use canonical locations such as "
-            "slide:13, artifact:evidence-map, or claim:<id>. For an existing finding, finding_id, "
-            "category, issue_key, and severity are immutable logical identity: keep all four exactly "
-            "unchanged. Status, locations, description, and correction may change as the deck changes. "
-            "Do not encode temporary claim IDs or locations in issue_key. "
-            f"Prior blocking findings: {json.dumps(previous, ensure_ascii=False)}. "
-            f"Artifacts: {json.dumps(review_context or {}, ensure_ascii=False)}"
+            "Every factual claim must be supported by one or more evidence_refs. For a contradiction, "
+            "identify the correct value in reason and provide a concrete correction. "
+            f"Review inputs: {json.dumps(review_context or {}, ensure_ascii=False)}"
         )
 
     async def validate_generated(self, value: SlidesTaskPayload, workspace: Path) -> None:
+        """Run the trusted deterministic validator and expose all findings."""
+
         try:
+            from .evidence import load_frozen_evidence
+            from .validation import validate_candidate_deck
+
             await asyncio.to_thread(
-                verify_output,
+                load_frozen_evidence,
+                workspace / "work" / "evidence.json",
+                extracted_dir=workspace / "work" / "extracted",
+            )
+            validation = await asyncio.to_thread(
+                validate_candidate_deck,
                 workspace,
                 expected_slide_count=value.slides_count,
+                requested_title=value.title,
+                evidence_path=workspace / "work" / "evidence.json",
             )
         except Exception as exc:
-            # ``verify_output`` reports expected, correctable artifact findings
-            # as JobError. Other exceptions indicate a validator/runtime fault
-            # and must remain terminal failures.
-            from .contracts import JobError
-
-            if isinstance(exc, JobError):
-                raise DeterministicValidationError(str(exc)) from exc
-            raise
+            raise JobError("validator", "deterministic validator could not run") from exc
+        if str(getattr(validation.status, "value", validation.status)).lower() != "pass":
+            findings = getattr(validation, "findings", ())
+            rendered = []
+            for finding in findings:
+                as_dict = finding.as_dict() if hasattr(finding, "as_dict") else str(finding)
+                rendered.append(as_dict if isinstance(as_dict, str) else json.dumps(as_dict, ensure_ascii=False))
+            raise DeterministicValidationError("deterministic validation failed: " + "; ".join(rendered))
 
     def parse_review(
         self,
@@ -270,10 +378,66 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             raise ValueError("semantic review response was malformed") from exc
         if not isinstance(review, dict) or set(review) != {"summary", "findings"}:
             raise ValueError("semantic review response was malformed")
+        required_finding_fields = {
+            "severity",
+            "category",
+            "slide_number",
+            "claim",
+            "judgement",
+            "evidence_refs",
+            "reason",
+            "correction",
+        }
+        findings = review.get("findings")
+        if not isinstance(findings, list):
+            raise ValueError("semantic review response was malformed")
+        allowed_categories = {
+            "unsupported_claim",
+            "contradicted_claim",
+            "misleading_synthesis",
+            "material_omission",
+            "unreadable_claim",
+            "other",
+        }
+        for finding in findings:
+            if not isinstance(finding, dict) or set(finding) != required_finding_fields:
+                raise ValueError("semantic review response was malformed")
+            if finding["category"] not in allowed_categories:
+                raise ValueError("semantic review response was malformed")
+            if finding["judgement"] not in {"supported", "unsupported", "contradicted", "misleading", "unclear"}:
+                raise ValueError("semantic review response was malformed")
+            if finding["judgement"] == "contradicted" and not finding["evidence_refs"]:
+                raise ValueError("contradicted findings must cite evidence")
         try:
+            # Parse types before applying cross-artifact checks. This turns a
+            # wrong provider type into a controlled schema failure instead of
+            # leaking a comparison TypeError from the coordinator.
             outcome = ReviewOutcome.model_validate(review)
         except Exception as exc:
             raise ValueError("semantic review response was malformed") from exc
+        evidence_path = workspace / "work" / "evidence.json"
+        snapshot_path = workspace / "work" / "intermediate" / "deck_snapshot.json"
+        try:
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            slide_count = snapshot.get("slide_count")
+            if not isinstance(slide_count, int) or slide_count < 1:
+                raise ValueError
+            evidence_ids = {
+                str(item.get("id"))
+                for key in ("blocks", "assets")
+                for item in evidence.get(key, [])
+                if isinstance(item, dict) and item.get("id")
+            }
+        except (OSError, TypeError, ValueError):
+            raise ValueError("semantic review inputs were missing or malformed")
+        if any(
+            item.slide_number is not None and item.slide_number > slide_count
+            for item in outcome.findings
+        ):
+            raise ValueError("semantic review referenced an unknown slide")
+        if any(ref not in evidence_ids for item in outcome.findings for ref in item.evidence_refs):
+            raise ValueError("semantic review referenced unknown evidence")
         semantic_review_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = semantic_review_path.with_suffix(".json.tmp")
         temporary_path.write_text(outcome.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -287,7 +451,7 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             for item in review.findings
             if item.status is ReviewFindingStatus.OPEN and item.severity is ReviewSeverity.BLOCKING
         ]
-        return json.dumps(findings, ensure_ascii=False)[:12000]
+        return json.dumps(findings, ensure_ascii=False)
 
     async def publish(self, value: SlidesTaskPayload, result: Any, workspace: Path) -> SlidesTaskResult:
         response = getattr(result, "response", None)
@@ -297,12 +461,11 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
                 response,
                 encoding="utf-8",
             )
-        verified = await asyncio.to_thread(
-            verify_output,
-            workspace,
-            expected_slide_count=value.slides_count,
-        )
-        published = await asyncio.to_thread(publish_output, verified, str(value.job_id), settings.agent_output_root)
+        # Recheck immediately before publication so the bytes that leave the
+        # workspace are exactly the candidate that passed validation/review.
+        await self.validate_generated(value, workspace)
+        deck = workspace / "output" / "presentation.pptx"
+        published = await asyncio.to_thread(publish_output, deck, str(value.job_id), settings.agent_output_root)
         return SlidesTaskResult(
             job_id=value.job_id,
             status=JobStatus.COMPLETED,

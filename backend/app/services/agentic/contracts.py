@@ -36,6 +36,7 @@ class AgentPhase(StrEnum):
 
     QUEUED = "queued"
     PREPARING = "preparing"
+    EXTRACTING = "extracting"
     DRAFTING = "drafting"
     VALIDATING = "validating"
     REVIEWING = "reviewing"
@@ -94,10 +95,48 @@ class ReviewFinding(BaseModel):
     status: ReviewFindingStatus = ReviewFindingStatus.OPEN
     severity: ReviewSeverity = ReviewSeverity.BLOCKING
     category: str = Field(min_length=1, max_length=80)
-    issue_key: str = Field(min_length=1, max_length=120)
-    locations: tuple[str, ...] = Field(min_length=1, max_length=20)
-    description: str = Field(min_length=1, max_length=4000)
+    # ``issue_key`` and ``locations`` are retained for the generic workflow
+    # contract.  Slides reviewers use the more useful domain fields below;
+    # the model validator derives the generic values when they are omitted.
+    issue_key: str = Field(default="", max_length=120)
+    locations: tuple[str, ...] = Field(default=(), max_length=20)
+    description: str = Field(default="", max_length=4000)
     correction: str = Field(default="", max_length=4000)
+    slide_number: int | None = Field(default=None, ge=1)
+    claim: str = Field(default="", max_length=4000)
+    judgement: str = Field(default="", max_length=80)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
+    reason: str = Field(default="", max_length=4000)
+
+    @model_validator(mode="after")
+    def complete_domain_fields(self) -> "ReviewFinding":
+        """Make the slide-facing response ergonomic without weakening identity.
+
+        The coordinator still compares canonical ``category``/``issue_key``
+        pairs.  A semantic reviewer may instead return the fields from the
+        public slide-review schema, so derive those compatibility fields once
+        at the trust boundary.
+        """
+
+        claim = self.claim.strip()
+        reason = self.reason.strip()
+        description = self.description.strip() or reason or claim
+        issue_key = self.issue_key.strip()
+        if not issue_key:
+            issue_key = f"slide-{self.slide_number or 'unknown'}::{claim[:96] or self.category}"
+        locations = self.locations
+        if not locations and self.slide_number is not None:
+            locations = (f"slide:{self.slide_number}",)
+        if not reason:
+            reason = description
+        # Mutate the instance so Pydantic's ``__init__`` path and
+        # ``model_validate`` expose the same normalized values.
+        self.claim = claim
+        self.reason = reason
+        self.description = description
+        self.issue_key = issue_key
+        self.locations = locations
+        return self
 
 
 class ReviewOutcome(BaseModel):
@@ -319,10 +358,10 @@ class TurnRequest(BaseModel):
 
     kind: str = Field(min_length=1, max_length=40)
     prompt: str = Field(min_length=1)
-    # Sandbox is deliberately part of the turn contract.  The current Docker
-    # MVP grants author, correction, and reviewer turns full access; workflow
-    # prompts still keep semantic review non-mutating.  Keeping this on the
-    # request makes the policy visible to test doubles and audit consumers.
+    # Sandbox is deliberately part of the turn contract. Workflow adapters may
+    # narrow provider access further with the stage path policy carried by
+    # ``AgentExecutionRequest``. Keeping this field visible also lets test
+    # doubles and audit consumers verify the requested provider sandbox.
     sandbox: Any = None
     output_schema: dict[str, Any] | None = None
 
@@ -353,6 +392,13 @@ class AgentExecutionRequest(BaseModel):
     output_schema: dict[str, Any] | None = None
     skill_names: tuple[str, ...] = Field(default=(), validation_alias=AliasChoices("skill_names", "staged_skills"))
     audit_path: Path | None = None
+    # Paths the provider process must not be able to inspect for this stage.
+    # The coordinator populates these from an allowlisted adapter policy;
+    # callers cannot provide them through the public task payload.
+    hidden_paths: tuple[Path, ...] = ()
+    read_only_paths: tuple[Path, ...] = ()
+    writable_paths: tuple[Path, ...] = ()
+    restrict_workspace: bool = False
 
     @property
     def staged_skills(self) -> tuple[str, ...]:
@@ -533,6 +579,13 @@ class BaseWorkflowAdapter(Generic[InputT, OutputT]):
     reviewer_reasoning_effort: AgentReasoningEffort | None = None
     author_role = "presentation_author"
     reviewer_role = "presentation_reviewer"
+    # Stages opt in explicitly.  Generic workflows continue to use their
+    # declared skill set as one bundle for the legacy path.
+    extraction_skills: Sequence[str] = ()
+    author_skills: Sequence[str] = ()
+    reviewer_skills: Sequence[str] = ()
+    independent_semantic_review = False
+    stage_isolation = False
 
     def validate_input(self, value: Any) -> InputT:
         if self.input_type is None:
@@ -561,6 +614,31 @@ class BaseWorkflowAdapter(Generic[InputT, OutputT]):
 
     def prepare_input(self, value: InputT, workspace: Path) -> None:
         return None
+
+    def build_extraction_prompt(self, value: InputT, workspace: Path) -> str:
+        """Return the prompt for the one-time source extraction activation."""
+
+        return str(value)
+
+    def post_extraction(self, value: InputT, workspace: Path) -> Any:
+        """Validate and freeze extraction artifacts into the EvidenceStore."""
+
+        return None
+
+    def stage_hidden_paths(self, stage: str, workspace: Path) -> Sequence[Path]:
+        """Return source/history paths hidden from one provider activation."""
+
+        return ()
+
+    def stage_read_only_paths(self, stage: str, workspace: Path) -> Sequence[Path]:
+        """Return artifacts mounted read-only for one provider activation."""
+
+        return ()
+
+    def stage_writable_paths(self, stage: str, workspace: Path) -> Sequence[Path]:
+        """Return the only workspace paths writable by an isolated activation."""
+
+        return ()
 
     def post_author_completion_check(self, value: InputT, result: Any, workspace: Path) -> None:
         return None

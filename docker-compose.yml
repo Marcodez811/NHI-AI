@@ -1,155 +1,180 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: nhi_ai
-      POSTGRES_USER: nhi_ai
-      POSTGRES_PASSWORD: nhi_ai_local
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nhi_ai -d nhi_ai"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    volumes:
-      - nhi-ai-postgres:/var/lib/postgresql/data
+    postgres:
+        image: postgres:16-alpine
+        environment:
+            POSTGRES_DB: nhi_ai
+            POSTGRES_USER: nhi_ai
+            POSTGRES_PASSWORD: nhi_ai_local
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U nhi_ai -d nhi_ai"]
+            interval: 5s
+            timeout: 5s
+            retries: 10
+        volumes:
+            - nhi-ai-postgres:/var/lib/postgresql/data
 
-  redis:
-    image: redis:7-alpine
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    redis:
+        image: redis:7-alpine
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 5s
+            timeout: 5s
+            retries: 5
 
-  backend:
-    image: nhi-ai-backend:local
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    env_file: ./backend/.env
-    ports:
-      - "${HOST_BIND_ADDRESS:-127.0.0.1}:8000:8000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-    environment:
-      DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
-      DOCUMENTS_ROOT: /data/documents
-      AGENT_JOBS_ROOT: /data/jobs
-      AGENT_OUTPUT_ROOT: /data/output
-      DOCUMENTS_QUEUE_NAME: documents
-      TASKS_QUEUE_NAME: tasks
-      ENABLE_AGENT_DEV_ROUTES: ${ENABLE_AGENT_DEV_ROUTES:-false}
-    volumes:
-      - slides-data:/data
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+    backend:
+        image: nhi-ai-backend:local
+        build:
+            context: ./backend
+            dockerfile: Dockerfile
+        env_file: ./backend/.env
+        ports:
+            - "${HOST_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "python",
+                    "-c",
+                    "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')",
+                ]
+            interval: 5s
+            timeout: 5s
+            retries: 12
+        environment:
+            DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
+            DOCUMENTS_ROOT: /data/documents
+            AGENT_JOBS_ROOT: /data/jobs
+            AGENT_OUTPUT_ROOT: /data/output
+            DOCUMENTS_QUEUE_NAME: documents
+            TASKS_QUEUE_NAME: tasks
+            ENABLE_AGENT_DEV_ROUTES: ${ENABLE_AGENT_DEV_ROUTES:-false}
+        volumes:
+            - slides-data:/data
+        depends_on:
+            redis:
+                condition: service_healthy
+            postgres:
+                condition: service_healthy
+            migrate:
+                condition: service_completed_successfully
 
-  migrate:
-    image: nhi-ai-backend:local
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    env_file: ./backend/.env
-    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
-    environment:
-      DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
-    depends_on:
-      postgres:
-        condition: service_healthy
+    migrate:
+        image: nhi-ai-backend:local
+        build:
+            context: ./backend
+            dockerfile: Dockerfile
+        env_file: ./backend/.env
+        command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+        environment:
+            DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
+        depends_on:
+            postgres:
+                condition: service_healthy
 
-  documents-worker:
-    image: nhi-ai-backend:local
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    env_file: ./backend/.env
-    command: ["uv", "run", "--no-sync", "python", "-m", "app.worker", "documents"]
-    environment:
-      DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
-      DOCUMENTS_ROOT: /data/documents
-      AGENT_JOBS_ROOT: /data/jobs
-      AGENT_OUTPUT_ROOT: /data/output
-      DOCUMENTS_QUEUE_NAME: documents
-      TASKS_QUEUE_NAME: tasks
-    volumes:
-      - slides-data:/data
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+    documents-worker:
+        image: nhi-ai-backend:local
+        build:
+            context: ./backend
+            dockerfile: Dockerfile
+        env_file: ./backend/.env
+        command:
+            [
+                "uv",
+                "run",
+                "--no-sync",
+                "python",
+                "-m",
+                "app.worker",
+                "documents",
+            ]
+        environment:
+            DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
+            DOCUMENTS_ROOT: /data/documents
+            AGENT_JOBS_ROOT: /data/jobs
+            AGENT_OUTPUT_ROOT: /data/output
+            DOCUMENTS_QUEUE_NAME: documents
+            TASKS_QUEUE_NAME: tasks
+        volumes:
+            - slides-data:/data
+        depends_on:
+            redis:
+                condition: service_healthy
+            postgres:
+                condition: service_healthy
+            migrate:
+                condition: service_completed_successfully
 
-  tasks-worker:
-    image: nhi-ai-backend:local
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    env_file: ./backend/.env
-    command: ["uv", "run", "--no-sync", "python", "-m", "app.worker", "tasks"]
-    environment:
-      DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
-      DOCUMENTS_ROOT: /data/documents
-      AGENT_JOBS_ROOT: /data/jobs
-      AGENT_OUTPUT_ROOT: /data/output
-      DOCUMENTS_QUEUE_NAME: documents
-      TASKS_QUEUE_NAME: tasks
-    volumes:
-      - slides-data:/data
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+    tasks-worker:
+        image: nhi-ai-backend:local
+        build:
+            context: ./backend
+            dockerfile: Dockerfile
+        env_file: ./backend/.env
+        command:
+            ["uv", "run", "--no-sync", "python", "-m", "app.worker", "tasks"]
+        environment:
+            DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
+            DOCUMENTS_ROOT: /data/documents
+            AGENT_JOBS_ROOT: /data/jobs
+            AGENT_OUTPUT_ROOT: /data/output
+            DOCUMENTS_QUEUE_NAME: documents
+            TASKS_QUEUE_NAME: tasks
+        volumes:
+            - slides-data:/data
+        depends_on:
+            redis:
+                condition: service_healthy
+            postgres:
+                condition: service_healthy
+            migrate:
+                condition: service_completed_successfully
 
-  scheduler:
-    image: nhi-ai-backend:local
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    env_file: ./backend/.env
-    command: ["uv", "run", "--no-sync", "python", "-m", "app.worker", "scheduler"]
-    environment:
-      DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
-      DOCUMENTS_ROOT: /data/documents
-      DOCUMENT_CLEANUP_RECONCILE_INTERVAL_SECONDS: ${DOCUMENT_CLEANUP_RECONCILE_INTERVAL_SECONDS:-900}
-    volumes:
-      - slides-data:/data
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+    scheduler:
+        image: nhi-ai-backend:local
+        build:
+            context: ./backend
+            dockerfile: Dockerfile
+        env_file: ./backend/.env
+        command:
+            [
+                "uv",
+                "run",
+                "--no-sync",
+                "python",
+                "-m",
+                "app.worker",
+                "scheduler",
+            ]
+        environment:
+            DATABASE_URL: postgresql+psycopg://nhi_ai:nhi_ai_local@postgres:5432/nhi_ai
+            DOCUMENTS_ROOT: /data/documents
+            DOCUMENT_CLEANUP_RECONCILE_INTERVAL_SECONDS: ${DOCUMENT_CLEANUP_RECONCILE_INTERVAL_SECONDS:-900}
+        volumes:
+            - slides-data:/data
+        depends_on:
+            redis:
+                condition: service_healthy
+            postgres:
+                condition: service_healthy
+            migrate:
+                condition: service_completed_successfully
 
-  frontend:
-    image: nhi-ai-frontend:local
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        BACKEND_INTERNAL_URL: http://backend:8000
-    ports:
-      - "${HOST_BIND_ADDRESS:-127.0.0.1}:3000:3000"
-    environment:
-      BACKEND_INTERNAL_URL: http://backend:8000
-      ENABLE_AGENT_DEV_ROUTES: ${ENABLE_AGENT_DEV_ROUTES:-false}
-    depends_on:
-      backend:
-        condition: service_healthy
+    frontend:
+        image: nhi-ai-frontend:local
+        build:
+            context: ./frontend
+            dockerfile: Dockerfile
+            args:
+                BACKEND_INTERNAL_URL: http://backend:8000
+        ports:
+            - "${HOST_BIND_ADDRESS:-127.0.0.1}:3000:3000"
+        environment:
+            BACKEND_INTERNAL_URL: http://backend:8000
+            ENABLE_AGENT_DEV_ROUTES: ${ENABLE_AGENT_DEV_ROUTES:-false}
+        depends_on:
+            backend:
+                condition: service_healthy
 
 volumes:
-  slides-data:
-  nhi-ai-postgres:
+    slides-data:
+    nhi-ai-postgres:

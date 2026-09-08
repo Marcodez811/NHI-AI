@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import posixpath
 import re
 import stat
 import sys
@@ -24,6 +25,8 @@ NS = {"w": W, "r": R}
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 NS["a"] = A
 KINDS = {"heading", "paragraph", "list_item", "table", "figure", "footnote"}
+TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".text"}
+SUPPORTED_SUFFIXES = {".docx", ".pdf", *TEXT_SUFFIXES}
 
 
 def sha(value: bytes | str) -> str:
@@ -72,6 +75,25 @@ def relationship_targets(archive: zipfile.ZipFile, part: str) -> dict[str, str]:
     root = xml_from(archive, part)
     if root is None: return {}
     return {r.get("Id", ""): r.get("Target", "") for r in root.findall(f"{{{REL}}}Relationship") if r.get("TargetMode") == "External"}
+
+
+def relationship_targets_all(archive: zipfile.ZipFile, part: str) -> dict[str, str]:
+    """Return internal and external relationship targets for asset linking."""
+
+    root = xml_from(archive, part)
+    if root is None:
+        return {}
+    return {
+        relationship.get("Id", ""): relationship.get("Target", "")
+        for relationship in root.findall(f"{{{REL}}}Relationship")
+        if relationship.get("Id") and relationship.get("Target")
+    }
+
+
+def relationship_part(part: str, target: str) -> str:
+    """Resolve an OOXML relationship target to a normalized package part."""
+
+    return posixpath.normpath(posixpath.join(posixpath.dirname(part), target)).lstrip("/")
 
 
 def accepted_text(element: ET.Element) -> tuple[str, list[dict[str, str]]]:
@@ -150,7 +172,10 @@ def extract_docx(path: Path, output: Path, document_id: str) -> tuple[list[dict[
     with safe_docx(path) as archive:
         document = xml_from(archive, "word/document.xml")
         if document is None: raise ValueError("invalid DOCX: word/document.xml is missing")
-        targets = relationship_targets(archive, "word/_rels/document.xml.rels"); body = document.find("w:body", NS)
+        rels_part = "word/_rels/document.xml.rels"
+        targets = relationship_targets(archive, rels_part)
+        all_relationships = relationship_targets_all(archive, rels_part)
+        body = document.find("w:body", NS)
         if body is None: raise ValueError("invalid DOCX: document body is missing")
         for index, element in enumerate(list(body)):
             locator = {"type": "docx", "part": "word/document.xml", "path": f"/w:document/w:body/*[{index + 1}]"}
@@ -198,9 +223,27 @@ def extract_docx(path: Path, output: Path, document_id: str) -> tuple[list[dict[
                     if text.strip() and not note_id.startswith("-"): blocks.append(make_block(document_id, "footnote", text, {"type": "docx", "part": part, "note_id": note_id}))
         asset_dir = output / "assets" / document_id.split(":", 1)[1]
         for name in sorted(n for n in archive.namelist() if n.startswith("word/media/") and not n.endswith("/")):
-            content = archive.read(name); digest = sha(content).split(":", 1)[1]; suffix = Path(name).suffix.lower() or ".bin"; target = asset_dir / f"{digest}{suffix}"
-            target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(content)
-            assets.append({"id": sha(content), "kind": "embedded_media", "source_part": name, "path": str(target.relative_to(output)), "mime_hint": suffix.lstrip(".")})
+            content = archive.read(name)
+            digest = sha(content).split(":", 1)[1]
+            suffix = Path(name).suffix.lower() or ".bin"
+            target = asset_dir / f"{digest}{suffix}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            relationship_ids = [
+                relationship_id
+                for relationship_id, relationship_target in all_relationships.items()
+                if relationship_part("word/document.xml", relationship_target) == name
+            ]
+            assets.append(
+                {
+                    "id": sha(content),
+                    "kind": "embedded_media",
+                    "source_part": name,
+                    "path": str(target.relative_to(output)),
+                    "mime_hint": suffix.lstrip("."),
+                    "relationship_ids": relationship_ids,
+                }
+            )
     return blocks, assets, warnings, []
 
 
@@ -268,6 +311,140 @@ def extract_pdf(path: Path, output: Path, document_id: str) -> tuple[list[dict[s
     except Exception as exc: return blocks, [], warnings, [f"corrupt or unreadable PDF: {exc}"]
 
 
+def _markdown_table_cells(line: str) -> list[str]:
+    """Split one Markdown table row while tolerating optional edge pipes."""
+
+    value = line.strip()
+    if value.startswith("|"):
+        value = value[1:]
+    if value.endswith("|") and not value.endswith("\\|"):
+        value = value[:-1]
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for character in value:
+        if character == "|" and not escaped:
+            cells.append("".join(current).strip())
+            current = []
+            continue
+        if character == "\\" and not escaped:
+            escaped = True
+            current.append(character)
+            continue
+        escaped = False
+        current.append(character)
+    cells.append("".join(current).strip())
+    return cells
+
+
+def _is_markdown_table_delimiter(line: str) -> bool:
+    cells = _markdown_table_cells(line)
+    return len(cells) >= 1 and all(re.fullmatch(r":?-{1,}:?", cell.replace(" ", "")) for cell in cells)
+
+
+def _is_table_row(line: str) -> bool:
+    value = line.strip()
+    return "|" in value and len(_markdown_table_cells(value)) >= 2
+
+
+def extract_text(path: Path, _output: Path, document_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
+    """Extract Markdown or plain text into ordered, line-addressable blocks."""
+
+    try:
+        # UTF-8 with an optional BOM is the portable interchange format for
+        # these artifacts.  Decoding errors are extraction errors, rather than
+        # silently replacing source bytes with a different factual value.
+        text = path.read_bytes().decode("utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        return [], [], [], [f"text source could not be decoded as UTF-8: {exc}"]
+
+    source_type = "markdown" if path.suffix.lower() in {".md", ".markdown"} else "text"
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+
+        # A Markdown table is recognized only when a header is followed by a
+        # delimiter row.  This avoids classifying ordinary prose containing a
+        # single pipe as a table.
+        if source_type == "markdown" and index + 1 < len(lines) and _is_table_row(line) and _is_markdown_table_delimiter(lines[index + 1]):
+            start = index
+            index += 2
+            while index < len(lines) and lines[index].strip() and _is_table_row(lines[index]):
+                index += 1
+            # The delimiter row is Markdown syntax, not source data. Preserve
+            # the header and data rows while keeping the locator over the full
+            # source range for auditability.
+            table_lines = [lines[start], *lines[start + 2 : index]]
+            rows = [
+                [
+                    {"row": row_index, "column": column_index, "text": cell, "colspan": 1, "vertical_merge": None}
+                    for column_index, cell in enumerate(_markdown_table_cells(row))
+                ]
+                for row_index, row in enumerate(table_lines)
+            ]
+            locator = {"type": source_type, "line_start": start + 1, "line_end": index}
+            blocks.append(make_block(document_id, "table", "\n".join(table_lines), locator, rows=rows))
+            continue
+
+        heading = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
+        if heading:
+            level = len(heading.group(1))
+            blocks.append(
+                make_block(
+                    document_id,
+                    "heading",
+                    heading.group(2).strip(),
+                    {"type": source_type, "line_start": index + 1, "line_end": index + 1},
+                    heading_level=level,
+                )
+            )
+            index += 1
+            continue
+
+        list_item = re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)(.+?)\s*$", line)
+        if list_item:
+            blocks.append(
+                make_block(
+                    document_id,
+                    "list_item",
+                    list_item.group(1).strip(),
+                    {"type": source_type, "line_start": index + 1, "line_end": index + 1},
+                )
+            )
+            index += 1
+            continue
+
+        start = index
+        paragraph_lines = [line.strip()]
+        index += 1
+        while index < len(lines) and lines[index].strip():
+            if re.match(r"^\s{0,3}#{1,6}\s+", lines[index]) or re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", lines[index]):
+                break
+            if source_type == "markdown" and index + 1 < len(lines) and _is_table_row(lines[index]) and _is_markdown_table_delimiter(lines[index + 1]):
+                break
+            paragraph_lines.append(lines[index].strip())
+            index += 1
+        blocks.append(
+            make_block(
+                document_id,
+                "paragraph",
+                "\n".join(paragraph_lines),
+                {"type": source_type, "line_start": start + 1, "line_end": index},
+            )
+        )
+
+    if not blocks:
+        warnings.append("source contains no non-empty extractable blocks")
+    return blocks, [], warnings, []
+
+
 def chunks_for(document_id: str, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []; current: list[dict[str, Any]] = []; count = 0
     for block in blocks:
@@ -287,7 +464,8 @@ def source_paths(inputs: Iterable[str]) -> list[Path]:
     paths: list[Path] = []
     for raw in inputs:
         path = Path(raw)
-        if path.is_dir(): paths.extend(c for c in path.rglob("*") if c.is_file() and c.suffix.lower() in {".docx", ".pdf"})
+        if path.is_dir():
+            paths.extend(c for c in path.rglob("*") if c.is_file() and c.suffix.lower() in SUPPORTED_SUFFIXES)
         elif path.is_file(): paths.append(path)
         else: raise FileNotFoundError(f"source does not exist: {path}")
     return sorted(set(paths), key=lambda value: str(value.resolve()))
@@ -296,8 +474,12 @@ def source_paths(inputs: Iterable[str]) -> list[Path]:
 def extract_one(path: Path, output: Path) -> dict[str, Any]:
     document_id = sha(path.read_bytes()); kind = path.suffix.lower().lstrip("."); warnings: list[str] = []; errors: list[str] = []; blocks: list[dict[str, Any]] = []; assets: list[dict[str, Any]] = []
     try:
-        if kind == "docx": blocks, assets, warnings, errors = extract_docx(path, output, document_id)
-        elif kind == "pdf": blocks, assets, warnings, errors = extract_pdf(path, output, document_id)
+        if kind == "docx":
+            blocks, assets, warnings, errors = extract_docx(path, output, document_id)
+        elif kind == "pdf":
+            blocks, assets, warnings, errors = extract_pdf(path, output, document_id)
+        elif path.suffix.lower() in TEXT_SUFFIXES:
+            blocks, assets, warnings, errors = extract_text(path, output, document_id)
         else: errors = [f"unsupported source type: {path.suffix}"]
     except (OSError, ValueError) as exc: errors = [str(exc)]
     oversized = [block for block in blocks if len(block["text"]) >= MAX_CHARS]
@@ -320,7 +502,7 @@ def extract(inputs: Iterable[str], output_dir: str) -> dict[str, Any]:
     output = Path(output_dir); output.mkdir(parents=True, exist_ok=True); documents: list[dict[str, Any]] = []
     try: paths = source_paths(inputs)
     except FileNotFoundError as exc: documents.append({"document_id": sha(str(exc)), "source": "", "source_type": "unknown", "status": "error", "warnings": [], "errors": [str(exc)], "index": ""}); paths = []
-    if not paths and not documents: documents.append({"document_id": sha("no sources"), "source": "", "source_type": "unknown", "status": "error", "warnings": [], "errors": ["no DOCX or PDF sources found"], "index": ""})
+    if not paths and not documents: documents.append({"document_id": sha("no sources"), "source": "", "source_type": "unknown", "status": "error", "warnings": [], "errors": ["no supported source files found"], "index": ""})
     for path in paths: documents.append(extract_one(path, output))
     manifest = {"format_version": FORMAT_VERSION, "status": status_for([w for d in documents for w in d["warnings"]], [e for d in documents for e in d["errors"]]), "documents": documents}; write_json(output / "manifest.json", manifest); return manifest
 
@@ -373,7 +555,10 @@ def validate_output(output_dir: str) -> list[str]:
 
 
 def extract_main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Extract DOCX/PDF files into structured source artifacts."); parser.add_argument("inputs", nargs="+", help="DOCX/PDF files or directories"); parser.add_argument("--output-dir", required=True, help="artifact output directory"); args = parser.parse_args(argv)
+    parser = argparse.ArgumentParser(description="Extract DOCX, PDF, Markdown, and text files into structured source artifacts.")
+    parser.add_argument("inputs", nargs="+", help="source files or directories")
+    parser.add_argument("--output-dir", required=True, help="artifact output directory")
+    args = parser.parse_args(argv)
     manifest = extract(args.inputs, args.output_dir); print(json.dumps({"status": manifest["status"], "manifest": str(Path(args.output_dir) / "manifest.json")}, ensure_ascii=False)); return 2 if manifest["status"] == "error" else 0
 
 

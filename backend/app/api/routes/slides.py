@@ -65,6 +65,7 @@ def _safe_stage(value: object, *, fallback: str = "processing") -> str:
 _PHASE_BY_STAGE = {
     "starting": AgentPhase.PREPARING,
     "preparing": AgentPhase.PREPARING,
+    "extracting": AgentPhase.EXTRACTING,
     "initial": AgentPhase.DRAFTING,
     "drafting": AgentPhase.DRAFTING,
     "validation": AgentPhase.VALIDATING,

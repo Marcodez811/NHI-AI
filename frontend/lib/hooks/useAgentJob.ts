@@ -108,6 +108,7 @@ function readPhaseHistory(storageKey: string): AgentJobPhase[] {
                   [
                       "queued",
                       "preparing",
+                      "extracting",
                       "drafting",
                       "validating",
                       "reviewing",
