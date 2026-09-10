@@ -172,6 +172,7 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
     const mounted = useRef(true);
     const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const requestController = useRef<AbortController | null>(null);
+    const pollRequest = useRef<Promise<Job | undefined> | null>(null);
     const generation = useRef(0);
     const activeJobId = useRef<string | null>(null);
     const lastPayload = useRef<Payload | null>(null);
@@ -199,6 +200,9 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
         }
         requestController.current?.abort();
         requestController.current = null;
+        // Do not let a replacement job join a request that was just aborted.
+        // Its finally block only clears this ref when it still owns it.
+        pollRequest.current = null;
     }, []);
 
     useEffect(() => {
@@ -238,9 +242,12 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
         token: number,
     ): Promise<Job | undefined> => {
         if (!mounted.current || token !== generation.current) return undefined;
+        if (pollRequest.current) return pollRequest.current;
         const controller = new AbortController();
         requestController.current = controller;
-        try {
+        let request!: Promise<Job | undefined>;
+        request = (async () => {
+          try {
             const next = await getJobRef.current(id, { signal: controller.signal });
             if (!mounted.current || token !== generation.current) return undefined;
             // A malformed or exhausted transport response must behave like a
@@ -267,7 +274,7 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
                 schedule(id, pollInterval, token);
             }
             return next;
-        } catch (requestError) {
+          } catch (requestError) {
             if (
                 !mounted.current ||
                 token !== generation.current ||
@@ -296,11 +303,15 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
             );
             schedule(id, delay, token);
             return undefined;
-        } finally {
+          } finally {
             if (requestController.current === controller) {
                 requestController.current = null;
             }
-        }
+            if (pollRequest.current === request) pollRequest.current = null;
+          }
+        })();
+        pollRequest.current = request;
+        return request;
     }, [finish, maxPollInterval, pollInterval, schedule, storageKey, terminalStatuses]);
 
     pollForRef.current = pollFor;

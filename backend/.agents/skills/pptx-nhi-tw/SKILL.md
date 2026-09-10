@@ -18,14 +18,15 @@ Create formal, editable, Traditional-Chinese policy briefings. Keep the final ar
 
 1. Treat `work/evidence.json` as the frozen, authoritative factual source. Do not open original source documents or extraction chunks, and do not modify the EvidenceStore. Referenced source images are available under `work/extracted/assets/`.
 2. Read `references/nhi-zh-tw.md` before drafting. Read `references/generation-gotchas.md` before generating, and `references/template-editing.md` before modifying a template.
-3. Design the narrative and generate or edit `output/presentation.pptx`. Preserve native PowerPoint text, tables, and charts; use `addChart()` for chartable data. Keep factual synthesis traceable to block IDs from the EvidenceStore in your working reasoning.
-4. Render the complete deck with the backend-compatible pipeline below. Inspect the sequence and every slide for clipping, overlap, unreadable text, weak hierarchy, inconsistent layout, and visual defects. Fix problems and regenerate the deck and every render until the candidate is visually sound.
+3. Design the narrative and generate or edit `output/presentation.pptx`. Keep factual synthesis traceable to EvidenceStore block IDs in your working reasoning, but never expose block IDs, hashes, `EvidenceStore`, or `work/evidence.json` in the delivered deck. For every factual claim, figure, or chart, use the block's `citation.display_text` as a short readable footer, such as `資料來源：年度報告.pdf，PDF 第 12 頁`. If a retained block has no `citation`, use only the basename from `provenance.source` and its available PDF page or text line; use the filename alone when no reliable locator exists, and never expose XML paths or invent source metadata. Put the expanded source name, section path, locator, claim, and chart values/units in speaker notes with `slide.addNotes()`; do not add citations to a cover or section divider that contains no factual claim.
+4. Keep simple bar, column, line, pie, and ordinary stacked charts editable with `addChart()`. Render combination or dual-axis charts, heatmaps, dense annotations, and a native chart that remains visually incorrect after one correction as a PNG from exact source-backed values. Use `scripts/render_chart_image.js --input` for its built-in bar/line layouts and `--svg` for a self-contained custom SVG such as a heatmap or dual-axis chart. Supply the image's intended PowerPoint width and height to the renderer, use the same dimensions with `addImage()`, and create the PNG in `work/images/`. Rasterize only the chart, keep surrounding text and citations editable, and preserve the values and calculation notes in speaker notes.
+5. Render the complete deck with the backend-compatible pipeline below. Inspect the sequence and every slide for clipping, overlap, unreadable text, weak hierarchy, inconsistent layout, citations, and visual defects. Fix problems and regenerate the deck and every render until the candidate is visually sound.
 
    ```bash
    python .agents/skills/pptx-nhi-tw/scripts/render_slides.py output/presentation.pptx
    ```
 
-5. Finish with exactly one `work/rendered/final/slide-<number>.png` per slide. The bundled renderer accepts `pdftoppm`'s padded names, writes canonical unpadded names, removes stale renders, and records non-authoritative diagnostics in `work/rendered/render_metadata.json`.
+6. Finish with exactly one `work/rendered/preview/slide-<number>.png` per slide for your own inspection. The bundled renderer accepts `pdftoppm`'s padded names, writes canonical unpadded names, removes stale previews, and records non-authoritative diagnostics in `work/rendered/preview/render_metadata.json`. The backend independently creates `work/rendered/final/` from the PPTX after deterministic validation; never create or edit that directory.
 
 The backend owns deterministic validation, `content_check.json`, `deck_snapshot.json`, semantic review, retry decisions, and publication. Do not create or edit those artifacts.
 
@@ -42,4 +43,4 @@ The validation scripts remain bundled for backend use. The author must not gener
 - `references/generation-gotchas.md` — PPTXGenJS, native charts, and CJK layout constraints.
 - `references/nhi-zh-tw.md` — terminology, official register, ROC calendar, and typography.
 - `references/template-editing.md` — safe template analysis and OOXML editing.
-- `references/qa.md` — EvidenceMap/SlideReview/QAReport contracts and release checks.
+- `references/qa.md` — author visual-review procedure and backend artifact ownership.

@@ -159,7 +159,7 @@ async def test_settings_api_key_used_not_os_getenv(monkeypatch):
 
     import os
     from app import config as config_module
-    from app.config import Settings
+    from pydantic import SecretStr
 
     # Clear any real key from the environment.
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -172,14 +172,18 @@ async def test_settings_api_key_used_not_os_getenv(monkeypatch):
             captured_keys.append(api_key)
             self.responses = AsyncFakeResponses(_fake_response())
 
-    monkeypatch.setattr(config_module.settings, "openai_api_key", "settings-key-123")
+    monkeypatch.setattr(
+        config_module.settings,
+        "openai_api_key",
+        SecretStr("settings-key-123"),
+    )
 
     from app.services.chat import responder as responder_module
 
     original_factory = responder_module._default_async_client
 
     async def patched_factory():
-        api_key = config_module.settings.openai_api_key
+        api_key = config_module.settings.openai_api_key.get_secret_value()
         client = FakeAsyncOpenAI(api_key=api_key)
         return client
 

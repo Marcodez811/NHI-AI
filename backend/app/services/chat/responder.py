@@ -48,7 +48,7 @@ class ChatServiceError(RuntimeError):
 async def _default_async_client() -> Any:
     """Create an async client lazily using settings rather than os.getenv."""
 
-    api_key = settings.openai_api_key
+    api_key = settings.openai_api_key.get_secret_value()
     if not api_key:
         raise ChatServiceError("Chat provider is not configured.")
     try:

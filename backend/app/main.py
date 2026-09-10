@@ -126,7 +126,9 @@ def _make_chat_service() -> ResponseService:
 
     global _chat_client
     if _chat_client is None:
-        _chat_client = AsyncOpenAI(api_key=settings.openai_api_key)
+        _chat_client = AsyncOpenAI(
+            api_key=settings.openai_api_key.get_secret_value()
+        )
     return ResponseService(
         client=_chat_client,
         vector_store_id_provider=_runtime_vector_store_id,

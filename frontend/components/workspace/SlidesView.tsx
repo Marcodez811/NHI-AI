@@ -58,6 +58,7 @@ export function SlidesView({
     pollNow,
     start,
     retry,
+    onNewPresentation,
 }: {
     docs: DocumentRead[];
     selected: string[];
@@ -80,6 +81,7 @@ export function SlidesView({
     pollNow?: () => Promise<SlideJob | undefined>;
     start: () => Promise<void>;
     retry: () => Promise<void>;
+    onNewPresentation?: () => void;
 }) {
     const selectedDocs = docs.filter((doc) => selected.includes(doc.id));
     const eligible = selectedDocs.filter(
@@ -97,6 +99,10 @@ export function SlidesView({
             ),
     );
     const notReady = selectedDocs.filter((doc) => doc.status !== "ready");
+    const failedSources = notReady.filter((doc) => doc.status === "failed");
+    const deletingSources = notReady.filter((doc) =>
+        ["deleting", "delete_failed"].includes(doc.status),
+    );
     const availableSources = docs.filter(
         (doc) =>
             doc.status === "ready" &&
@@ -136,7 +142,11 @@ export function SlidesView({
               : !selectedDocs.length
                 ? "選取至少一份可用來源後即可生成。"
                 : notReady.length > 0
-                  ? notReady.length + " 份選取文件正在索引，完成後才能生成。"
+                  ? failedSources.length
+                    ? failedSources.length + " 份選取文件索引失敗，請在知識庫重新上傳或移除。"
+                    : deletingSources.length
+                      ? deletingSources.length + " 份選取文件正在刪除，請移除後再生成。"
+                      : notReady.length + " 份選取文件正在索引，完成後才能生成。"
                   : unsupported.length > 0
                     ? "請移除不支援的來源格式後再生成。"
                     : blockedCount > 0
@@ -152,6 +162,15 @@ export function SlidesView({
               : "知識庫中的文件尚未完成索引，或格式尚不支援。"
         : "知識庫目前沒有文件。";
     const downloadUrl = job ? slideDownloadUrl(job) : null;
+    const jobBrief = job?.brief ?? null;
+    const jobSourceNames = jobBrief?.document_ids.map((id) => {
+        const source = docs.find((doc) => doc.id === id);
+        return source ? documentDisplayName(source) : "來源已不存在";
+    }) ?? [];
+    const beginNewPresentation = () => {
+        if (onNewPresentation) onNewPresentation();
+        else void retry();
+    };
 
     if (completed && downloadUrl) {
         return (
@@ -162,7 +181,7 @@ export function SlidesView({
                             簡報已準備好
                         </h1>
                         <p className="mt-1 text-sm text-muted-foreground">
-                            這次工作已完成。你可以下載檔案，或調整設定後再次生成。
+                            這次工作已完成。你可以下載檔案，或用相同設定建立下一份簡報。
                         </p>
                     </div>
                     <div className="max-w-3xl rounded-2xl border border-border bg-card p-6 shadow-sm">
@@ -172,7 +191,7 @@ export function SlidesView({
                                     簡報標題
                                 </p>
                                 <h2 className="mt-1 text-xl font-semibold">
-                                    {title}
+                                    {jobBrief?.title ?? title}
                                 </h2>
                             </div>
                             <a
@@ -198,16 +217,12 @@ export function SlidesView({
                                 </dt>
                                 <dd
                                     className="mt-1 truncate font-medium"
-                                    title={selectedDocs
-                                        .map(documentDisplayName)
-                                        .join("、")}
+                                    title={jobSourceNames.join("、")}
                                 >
-                                    {selectedDocs.length
-                                        ? selectedDocs.length === 1
-                                            ? documentDisplayName(
-                                                  selectedDocs[0],
-                                              )
-                                            : `${documentDisplayName(selectedDocs[0])} 等 ${selectedDocs.length} 份`
+                                    {jobSourceNames.length
+                                        ? jobSourceNames.length === 1
+                                            ? jobSourceNames[0]
+                                            : `${jobSourceNames[0]} 等 ${jobSourceNames.length} 份`
                                         : "—"}
                                 </dd>
                             </div>
@@ -230,11 +245,11 @@ export function SlidesView({
                         </dl>
                         <Button
                             type="button"
-                            onClick={() => void retry()}
+                            onClick={beginNewPresentation}
                             variant="outline"
                             className="mt-5"
                         >
-                            再次生成
+                            建立新簡報
                         </Button>
                     </div>
                 </div>
@@ -696,7 +711,7 @@ export function SlidesView({
                                 onRefresh={
                                     pollNow ? () => void pollNow() : undefined
                                 }
-                                onRetry={() => void retry()}
+                                onRetry={beginNewPresentation}
                             />
                         )}
                         {phase === "expired" && (

@@ -96,8 +96,7 @@ export function AgentJobActivity({
     if (!job) return null;
 
     const currentPhase = fallbackPhase(job);
-    const history = new Set([...phaseHistory, currentPhase]);
-    const currentIndex = AGENT_JOB_PHASES.indexOf(currentPhase);
+    const observedHistory = [...phaseHistory, currentPhase];
     const active =
         !isTerminal(job) &&
         (clientPhase === "polling" || clientPhase === "submitting");
@@ -139,8 +138,7 @@ export function AgentJobActivity({
                     const isCurrent = currentPhase === phaseName;
                     const isCompleted =
                         currentPhase === "completed" ||
-                        (history.has(phaseName) && !isCurrent) ||
-                        (currentIndex >= 0 && index < currentIndex);
+                        observedHistory.slice(0, -1).includes(phaseName);
                     const isPending = !isCurrent && !isCompleted;
                     const isLast = index === AGENT_JOB_PHASES.length - 1;
 
@@ -219,7 +217,7 @@ export function AgentJobActivity({
                                 size="sm"
                                 className="mt-2 h-auto p-0"
                             >
-                                再次生成
+                                調整設定後重試
                             </Button>
                         )}
                     </div>

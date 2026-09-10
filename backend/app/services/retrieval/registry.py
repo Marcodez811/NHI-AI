@@ -125,7 +125,10 @@ class RetrievalIndexRegistry:
         api_key = getattr(self._settings, "openai_api_key", None)
         if not api_key:
             raise RetrievalProviderError(RetrievalIndexErrorCode.PROVIDER_NOT_CONFIGURED)
-        return OpenAI(api_key=api_key, timeout=self._bootstrap_timeout)
+        return OpenAI(
+            api_key=api_key.get_secret_value(),
+            timeout=self._bootstrap_timeout,
+        )
 
     def get_record(self) -> RetrievalIndex | None:
         with self._session_factory() as session:

@@ -209,6 +209,8 @@ def create_job_workspace(job_id: str, jobs_root: Path) -> Path:
         "work/extracted/assets",
         "work/images",
         "work/intermediate",
+        "work/rendered/preview",
+        "work/rendered/preview-pdf",
         "work/rendered/final",
         "output",
     ):

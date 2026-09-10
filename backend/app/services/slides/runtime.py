@@ -48,6 +48,24 @@ Read the attached `$pptx-nhi-tw` skill completely. Synthesize the frozen evidenc
 narrative, resolve conflicts explicitly using the evidence blocks, and never invent facts or
 data. Do not open or reinterpret files under `input/`, and do not modify `work/evidence.json`
 or `work/extracted/`.
+
+`EvidenceStore`, evidence IDs, hashes, JSON filenames, and extraction-process language are
+internal workflow details. Never show them in slide text, citations, speaker notes, or the
+cover. Cite audience-facing sources from each evidence block's `citation` object instead:
+use its `display_text` in a readable slide footer and its source name, section path, and
+locator in speaker notes. Cite slides that contain factual claims, figures, or charts; do not
+add a pipeline explanation to the cover or an unsupported bibliography slide.
+For a retained evidence block without `citation`, derive a conservative reference from
+`provenance.source`'s basename and its available PDF page or text line locator. Use the
+filename alone when no reliable locator exists; never expose an XML path or invent a page,
+section, publisher, date, or office.
+
+Keep simple charts editable. For combination or dual-axis charts, dense labels, heatmaps,
+or a native chart that still renders incorrectly after one correction, create a data-rendered
+PNG from exact evidence values with the bundled chart-image script and add that image alone.
+Keep all surrounding text and citations editable, and put chart values, units, and calculation
+notes in speaker notes.
+
 If template/ contains a PPTX, use it as the visual basis.
 Assume network access and package installation are unavailable.
 
@@ -55,7 +73,9 @@ Render and inspect every slide, revising layout or visual issues in the candidat
 The backend validator owns deterministic content checks and the deck snapshot. Required
 author artifacts:
 - output/presentation.pptx
-- work/rendered/final/*.png (exactly one per slide)
+- work/rendered/preview/*.png for the author's visual inspection only
+
+The backend independently generates work/rendered/final/*.png for validation and semantic review.
 """
 
 

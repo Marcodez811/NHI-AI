@@ -2,6 +2,7 @@ from app.services.agentic.events import AgentEventType
 from types import SimpleNamespace
 
 import pytest
+from pydantic import SecretStr
 
 from app.tasks.agents import _progress_telemetry_type
 
@@ -17,7 +18,7 @@ def test_worker_builds_allowlisted_codex_runner_with_default_model(monkeypatch):
     from app.tasks.agents import _build_runner_registry
 
     monkeypatch.setattr(settings, "agent_default_model", "worker-default")
-    monkeypatch.setattr(settings, "openai_api_key", "worker-key")
+    monkeypatch.setattr(settings, "openai_api_key", SecretStr("worker-key"))
     monkeypatch.setattr(settings, "agent_heartbeat_seconds", 10.0)
     registry, timeout = _build_runner_registry()
     runner = registry.resolve("codex")

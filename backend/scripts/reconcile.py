@@ -91,7 +91,7 @@ def reconcile(*, apply: bool = False, store_id: str | None = None, client: Any |
         if not settings.openai_api_key:
             print("OPENAI_API_KEY is not configured.", file=sys.stderr)
             return 2
-        client = OpenAI(api_key=settings.openai_api_key)
+        client = OpenAI(api_key=settings.openai_api_key.get_secret_value())
 
     try:
         remote_page = client.vector_stores.files.list(vector_store_id=resolved_store_id, limit=100)

@@ -20,6 +20,7 @@ from app.models.slides import (
     CreateSlidesJobResponse,
     GenerateSlidesRequest,
     JobStatus,
+    SlideJobBrief,
     SUPPORTED_SLIDE_SOURCE_EXTENSIONS,
     SlidesJobStatusResponse,
     SlidesTaskPayload,
@@ -45,7 +46,7 @@ def get_slide_job_repository() -> SlideJobRepository:
 _PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 _SAFE_STAGE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SENSITIVE_TEXT = re.compile(r"sk-[a-zA-Z0-9_-]{8,}|api[_ -]?key|authorization|traceback", re.I)
-_FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9._ -]+")
+_FILENAME_UNSAFE = re.compile(r"[^\w._ -]+", re.UNICODE)
 
 
 def get_result_backend() -> Any:
@@ -121,6 +122,16 @@ def _parse_datetime(value: object) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+def _brief_from_durable(job: Any) -> SlideJobBrief:
+    return SlideJobBrief(
+        title=job.title,
+        document_ids=[UUID(str(value)) for value in job.document_ids],
+        slides_count=job.slides_count,
+        guidance=job.guidance,
+        tone=job.tone,
+    )
 
 
 async def _write_progress(
@@ -401,6 +412,7 @@ async def get_slides_job(
                         "job_id": durable.id,
                         "error": None,
                         "download_url": None,
+                        "brief": _brief_from_durable(durable),
                     })
         return SlidesJobStatusResponse(
             job_id=durable.id,
@@ -412,6 +424,7 @@ async def get_slides_job(
             finished_at=durable.finished_at,
             error=durable.error,
             download_url=f"/api/v1/slides/jobs/{durable.id}/download" if durable.status == JobStatus.COMPLETED.value else None,
+            brief=_brief_from_durable(durable),
         )
     result, progress = await _lookup_job(backend, job_id)
     return _terminal_response(result) if result is not None else _progress_response(job_id, progress)

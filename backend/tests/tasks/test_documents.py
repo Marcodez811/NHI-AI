@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from pydantic import SecretStr
 
 from app.config import settings
 from app.models.documents import (
@@ -137,7 +138,7 @@ async def test_provider_not_found_is_idempotent(monkeypatch):
         files=FakeFiles(),
     )
     monkeypatch.setattr(task_module, "OpenAI", lambda **_kwargs: client)
-    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "openai_api_key", SecretStr("test-key"))
     monkeypatch.setattr(settings, "openai_vector_store_id", "vector-store")
 
     await task_module.OpenAIDocumentDeletionService().delete_remote(
@@ -176,7 +177,7 @@ async def test_deletion_prefers_persisted_vector_store_over_legacy_env(monkeypat
         "_retrieval_registry",
         SimpleNamespace(get_ready_id=lambda: "db-vector-store"),
     )
-    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "openai_api_key", SecretStr("test-key"))
     monkeypatch.setattr(settings, "openai_vector_store_id", "legacy-env-vector-store")
 
     await task_module.OpenAIDocumentDeletionService().delete_remote(

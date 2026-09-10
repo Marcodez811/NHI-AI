@@ -301,6 +301,8 @@ export interface CreateSlidePayload {
     tone: "formal" | "casual";
 }
 
+export type SlideJobBrief = CreateSlidePayload;
+
 export interface SlidesJobStatusResponse {
     job_id: string;
     status: SlideJobStatus;
@@ -311,6 +313,7 @@ export interface SlidesJobStatusResponse {
     finished_at: string | null;
     error: string | null;
     download_url: string | null;
+    brief?: SlideJobBrief | null;
 }
 
 /** Existing UI callers use this name for the polling response. */

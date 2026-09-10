@@ -183,6 +183,8 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertIn("authoritative requested presentation title", prompt)
         self.assertIn("ordinary rounding", prompt)
         self.assertIn("fresh semantic-only review", prompt)
+        self.assertIn("internal EvidenceStore/block-ID/path/hash leakage", prompt)
+        self.assertIn("image-chart values", prompt)
         self.assertNotIn("Prior blocking findings", prompt)
 
         previous = ReviewOutcome(
@@ -253,6 +255,7 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertIn("Address every blocking finding below", prompt)
         self.assertIn("verify each blocking finding individually", prompt)
         self.assertIn("2026 / Taiwan: NHI briefing", prompt)
+        self.assertIn("audience-facing source footers", prompt)
 
     def test_review_context_lists_semantic_review_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -267,6 +270,13 @@ class SlidesServiceTests(unittest.TestCase):
             ],
         )
         self.assertIn("work/rendered/final/*.png", context["artifacts"])
+
+    def test_author_writable_paths_exist_and_exclude_backend_final_renders(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = slides.create_job_workspace("job", Path(temporary))
+            writable = slides_adapter.stage_writable_paths("author", workspace)
+            self.assertTrue(all(path.exists() for path in writable))
+            self.assertNotIn(workspace / "work" / "rendered" / "final", writable)
 
     def test_validator_candidate_findings_are_structured_retry_feedback(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -55,6 +55,17 @@
         "locator": {"type": "object"},
         "document_id": {"$ref": "#/$defs/sha256"},
         "provenance": {"type": "object"},
+        "citation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source_name", "section_path", "locator_label", "display_text"],
+          "properties": {
+            "source_name": {"type": "string", "minLength": 1},
+            "section_path": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "locator_label": {"type": "string"},
+            "display_text": {"type": "string", "minLength": 1}
+          }
+        },
         "asset_refs": {"type": "array", "items": {"type": "object"}}
       }
     },

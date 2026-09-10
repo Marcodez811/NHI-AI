@@ -168,7 +168,7 @@ class OpenAIDocumentDeletionService:
             raise RuntimeError("Document retrieval provider is not configured.")
         vector_store_id = _runtime_vector_store_id()
 
-        client = OpenAI(api_key=settings.openai_api_key)
+        client = OpenAI(api_key=settings.openai_api_key.get_secret_value())
 
         # Detach the vector-store attachment using the persisted owning store.
         # Fall back to the registry store only for legacy rows that predate
@@ -368,7 +368,7 @@ class OpenAIDocumentIngestionService:
             raise NewsDocumentError("News documents are not supported.")
         if not settings.openai_api_key:
             raise RuntimeError("Document retrieval provider is not configured.")
-        client = OpenAI(api_key=settings.openai_api_key)
+        client = OpenAI(api_key=settings.openai_api_key.get_secret_value())
         lease_token = uuid4().hex
         claim = await asyncio.to_thread(_claim_job, payload, lease_token=lease_token)
         if claim.stale:

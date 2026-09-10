@@ -152,6 +152,58 @@ describe("SlidesView", () => {
         expect(start).toHaveBeenCalledOnce();
     });
 
+    it("returns to the editable form instead of resubmitting a completed job", async () => {
+        const user = userEvent.setup();
+        const onNewPresentation = vi.fn();
+        const start = vi.fn(async () => undefined);
+        render(
+            <SlidesView
+                docs={[document()]}
+                selected={["doc-1"]}
+                setSelected={vi.fn()}
+                onUpload={vi.fn()}
+                onBrowseSources={vi.fn()}
+                title="changed title"
+                setTitle={vi.fn()}
+                count={10}
+                setCount={vi.fn()}
+                guidance=""
+                setGuidance={vi.fn()}
+                tone="formal"
+                setTone={vi.fn()}
+                job={{
+                    job_id: "job-completed",
+                    status: "completed",
+                    phase: "completed",
+                    stage: "completed",
+                    message: "done",
+                    started_at: null,
+                    finished_at: null,
+                    error: null,
+                    download_url: "/download",
+                    brief: {
+                        title: "original title",
+                        document_ids: ["doc-1"],
+                        slides_count: 10,
+                        guidance: "",
+                        tone: "formal",
+                    },
+                }}
+                phase="completed"
+                error={null}
+                warning={null}
+                start={start}
+                retry={start}
+                onNewPresentation={onNewPresentation}
+            />,
+        );
+
+        expect(screen.getByText("original title")).toBeInTheDocument();
+        await user.click(screen.getByRole("button", { name: "建立新簡報" }));
+        expect(onNewPresentation).toHaveBeenCalledOnce();
+        expect(start).not.toHaveBeenCalled();
+    });
+
     it("offers an inline picker for available sources", async () => {
         const user = userEvent.setup();
         renderView({ docs: [document()] });

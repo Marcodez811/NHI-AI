@@ -72,6 +72,6 @@ describe("AgentJobActivity", () => {
 
         expect(screen.getByText("失敗")).toBeInTheDocument();
         expect(screen.getByText("generation failed")).toBeInTheDocument();
-        expect(screen.getByRole("button", { name: "再次生成" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "調整設定後重試" })).toBeInTheDocument();
     });
 });

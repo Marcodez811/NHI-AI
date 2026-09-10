@@ -13,8 +13,9 @@ from app.api.routes.slides import (
 )
 from app.config import settings
 from app.models.documents import Document, DocumentCategory, DocumentStatus
-from app.models.slides import GenerateSlidesRequest
+from app.models.slides import GenerateSlidesRequest, SlideJob
 from app.services.agentic import AgentPhase
+from app.services.slides.repository import InMemorySlideJobRepository
 
 
 class FakeBackend:
@@ -182,7 +183,10 @@ async def test_create_job_rejects_missing_or_unready_or_unsupported_sources():
 
 
 @pytest.mark.asyncio
-async def test_completed_status_and_download_are_safe(tmp_path, monkeypatch):
+@pytest.mark.parametrize("filename", ["NHI update.pptx", "中央癌症防治會報第21次會議.pptx", "健保政策.pptx"])
+async def test_completed_status_and_download_are_safe(tmp_path, monkeypatch, filename):
+    from urllib.parse import quote
+
     backend = FakeBackend()
     job_id = uuid4()
     deck = tmp_path / "jobs" / "deck.pptx"
@@ -195,7 +199,7 @@ async def test_completed_status_and_download_are_safe(tmp_path, monkeypatch):
             "job_id": str(job_id),
             "status": "completed",
             "artifact_key": "jobs/deck.pptx",
-            "download_filename": "NHI update.pptx",
+            "download_filename": filename,
         },
     )
     status_response = await get_slides_job(job_id, backend)
@@ -204,6 +208,39 @@ async def test_completed_status_and_download_are_safe(tmp_path, monkeypatch):
     assert status_response.phase is AgentPhase.COMPLETED
     assert status_response.download_url == f"/api/v1/slides/jobs/{job_id}/download"
     assert download_response.media_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    # Starlette uses RFC 5987 encoding when the attachment name needs it.
+    encoded = quote(filename)
+    expected = (
+        f"attachment; filename*=utf-8''{encoded}"
+        if encoded != filename
+        else f'attachment; filename="{filename}"'
+    )
+    assert download_response.headers["content-disposition"] == expected
+
+
+@pytest.mark.asyncio
+async def test_durable_status_exposes_the_original_brief():
+    backend = FakeBackend()
+    repository = InMemorySlideJobRepository()
+    job_id = uuid4()
+    document_id = uuid4()
+    await repository.create(
+        SlideJob(
+            id=job_id,
+            title="政策重點",
+            document_ids=[str(document_id)],
+            slides_count=9,
+            guidance="聚焦改革影響",
+            tone="formal",
+        )
+    )
+
+    response = await get_slides_job(job_id, backend, repository)
+
+    assert response.brief is not None
+    assert response.brief.title == "政策重點"
+    assert response.brief.document_ids == [document_id]
+    assert response.brief.slides_count == 9
 
 
 @pytest.mark.asyncio

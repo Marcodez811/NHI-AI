@@ -113,6 +113,7 @@ export function WorkspaceContent({
                     pollNow={workspace.slideJob.pollNow}
                     start={workspace.startSlides}
                     retry={workspace.startSlides}
+                    onNewPresentation={workspace.startNewSlides}
                 />
             )}
             {workspace.uploadOpen && (

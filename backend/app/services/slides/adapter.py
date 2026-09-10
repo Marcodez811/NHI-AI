@@ -255,7 +255,8 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
         if stage == "author":
             return (
                 workspace / "output",
-                workspace / "work" / "rendered",
+                workspace / "work" / "rendered" / "preview",
+                workspace / "work" / "rendered" / "preview-pdf",
                 workspace / "work" / "images",
             )
         return ()
@@ -315,9 +316,11 @@ the frozen `work/evidence.json` store after this activation.
                 "existing presentation and affected artifacts in place. Preserve the requested "
                 f"title exactly as `{value.title}` and the requested slide count of {value.slides_count}; "
                 "do not redesign or rewrite unaffected slides.\n"
-                "Address every blocking finding below. After changes, regenerate affected renders, "
+                "Address every blocking finding below. After changes, regenerate affected preview renders, "
                 "then stop; the backend validator owns content_check.json and deck_snapshot.json. "
                 "The frozen evidence.json and work/extracted/ tree are read-only and authoritative. "
+                "Preserve or repair audience-facing source footers and speaker-note references; never add "
+                "EvidenceStore names, paths, hashes, or block IDs to the delivered presentation. "
                 "Before finishing, verify each blocking finding individually "
                 "and state which slide or artifact change resolves it.\n\n"
                 "## Blocking review findings to correct\n"
@@ -354,6 +357,15 @@ the frozen `work/evidence.json` store after this activation.
             "polish as advisory unless it changes a threshold, comparison, denominator, or meaning. "
             "Every factual claim must be supported by one or more evidence_refs. For a contradiction, "
             "identify the correct value in reason and provide a concrete correction. "
+            "Review citations as part of factual quality: factual slides, figures, and charts need a "
+            "recognizable source filename and available section, page, or line locator in the visible "
+            "footer, with expanded references in slide notes. Treat missing or misleading attribution, "
+            "internal EvidenceStore/block-ID/path/hash leakage, incorrect image-chart values, or unreadable "
+            "image-chart labels as blocking. A retained block may lack derived citation metadata; in that "
+            "case accept a conservative filename and available provenance locator. Treat workflow terms as "
+            "leakage only when they describe generation or serve as citations, not when the source material "
+            "legitimately discusses software, JSON, paths, or hashes. Treat harmless citation-style "
+            "differences as advisory. Speaker notes are author claims that must still match frozen evidence. "
             f"Review inputs: {json.dumps(review_context or {}, ensure_ascii=False)}"
         )
 

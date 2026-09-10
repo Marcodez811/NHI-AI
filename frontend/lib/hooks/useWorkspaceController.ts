@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "../api/client";
 import {
     Category,
@@ -43,6 +43,7 @@ export function useWorkspaceController() {
     const catalog = useDocuments();
     const retrieval = useRetrievalStatus();
     const slideJob = useSlideJob();
+    const restoredSlideBrief = useRef<string | null>(null);
     const session = useWorkspaceSession();
     const {
         view,
@@ -78,6 +79,18 @@ export function useWorkspaceController() {
         tone,
         setTone,
     } = session;
+
+    useEffect(() => {
+        const brief = slideJob.job?.brief;
+        const jobId = slideJob.job?.job_id;
+        if (!brief || !jobId || restoredSlideBrief.current === jobId) return;
+        restoredSlideBrief.current = jobId;
+        setSlideTitle(brief.title);
+        setSlideCount(brief.slides_count);
+        setGuidance(brief.guidance);
+        setTone(brief.tone);
+        setSelected(brief.document_ids);
+    }, [setGuidance, setSelected, setSlideCount, setSlideTitle, setTone, slideJob.job]);
     const [uploading, setUploading] = useState(false);
     const [qaModes, setQaModes] = useState<QaModeInfo[]>([]);
     const [qaError, setQaError] = useState<string | null>(null);
@@ -296,6 +309,18 @@ export function useWorkspaceController() {
         }
     };
 
+    const startNewSlides = () => {
+        const brief = slideJob.job?.brief;
+        if (brief) {
+            setSlideTitle(brief.title);
+            setSlideCount(brief.slides_count);
+            setGuidance(brief.guidance);
+            setTone(brief.tone);
+            setSelected(brief.document_ids);
+        }
+        slideJob.reset();
+    };
+
     return {
         catalog,
         slideJob,
@@ -359,6 +384,7 @@ export function useWorkspaceController() {
         tone,
         setTone,
         startSlides,
+        startNewSlides,
     };
 }
 

@@ -8,7 +8,6 @@ import re
 import stat
 import tempfile
 from pathlib import Path
-from typing import BinaryIO, Protocol, runtime_checkable
 from uuid import UUID
 
 from fastapi import UploadFile
@@ -51,7 +50,7 @@ class DocumentStorage:
         raise NotImplementedError
 
 
-_UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._ -]+")
+_UNSAFE_FILENAME = re.compile(r"[^\w._ -]+", re.UNICODE) 
 
 
 def safe_filename(filename: str | None) -> str:

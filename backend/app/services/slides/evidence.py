@@ -272,6 +272,77 @@ def _document_blocks(extracted_dir: Path, document: dict[str, Any]) -> tuple[dic
     return index, blocks
 
 
+def _source_name(source: object) -> str:
+    """Return a portable display name without exposing a host path."""
+
+    value = str(source or "").strip().replace("\\", "/")
+    return value.rsplit("/", 1)[-1] or "來源文件"
+
+
+def _locator_scope(locator: dict[str, Any]) -> tuple[str, str]:
+    """Keep document-body headings out of footnote and other source parts."""
+
+    return (str(locator.get("type", "")), str(locator.get("part", "")))
+
+
+def _line_locator_label(locator: dict[str, Any]) -> str:
+    start, end = locator.get("line_start"), locator.get("line_end")
+    if not isinstance(start, int) or start < 1:
+        return ""
+    if not isinstance(end, int) or end <= start:
+        return f"第 {start} 行"
+    return f"第 {start}–{end} 行"
+
+
+def _citation_for_block(
+    block: dict[str, Any],
+    source_name: str,
+    sections: dict[tuple[str, str], list[tuple[int, str]]],
+) -> dict[str, Any]:
+    """Build a human-facing citation while keeping provenance IDs internal."""
+
+    locator = block["locator"]
+    scope = _locator_scope(locator)
+    section_stack = sections.setdefault(scope, [])
+    if block.get("kind") == "heading":
+        heading = " ".join(str(block.get("text", "")).split())
+        level = block.get("heading_level")
+        if heading and isinstance(level, int) and level > 0:
+            section_stack[:] = [item for item in section_stack if item[0] < level]
+            section_stack.append((level, heading))
+
+    section_path = [heading for _, heading in section_stack]
+    locator_type = locator.get("type")
+    if locator_type == "pdf" and isinstance(locator.get("page"), int) and locator["page"] > 0:
+        locator_label = f"PDF 第 {locator['page']} 頁"
+    elif locator_type in {"markdown", "text"}:
+        locator_label = _line_locator_label(locator)
+    else:
+        locator_label = ""
+    components = [source_name]
+    if section_path:
+        components.append("／".join(f"〈{heading}〉" for heading in section_path))
+    if locator_label:
+        components.append(locator_label)
+    return {
+        "source_name": source_name,
+        "section_path": section_path,
+        "locator_label": locator_label,
+        "display_text": "資料來源：" + "，".join(components),
+    }
+
+
+def _validate_citation(value: object, label: str) -> None:
+    citation = _object(value, label)
+    _string(citation.get("source_name"), f"{label}.source_name")
+    _string(citation.get("display_text"), f"{label}.display_text")
+    if not isinstance(citation.get("locator_label"), str):
+        raise EvidenceError(f"{label}.locator_label must be a string")
+    section_path = _list(citation.get("section_path"), f"{label}.section_path")
+    if any(not isinstance(heading, str) or not heading.strip() for heading in section_path):
+        raise EvidenceError(f"{label}.section_path must contain non-empty strings")
+
+
 def _build_store(extracted_dir: Path) -> dict[str, Any]:
     root = Path(extracted_dir)
     manifest, manifest_path = _manifest(root)
@@ -335,6 +406,8 @@ def _build_store(extracted_dir: Path) -> dict[str, Any]:
                 "assets": normalized_assets,
             }
         )
+        sections: dict[tuple[str, str], list[tuple[int, str]]] = {}
+        display_source_name = _source_name(document.get("source", index.get("source", "")))
         for raw_block in document_blocks:
             block = copy.deepcopy(raw_block)
             block_id = block["id"]
@@ -348,6 +421,7 @@ def _build_store(extracted_dir: Path) -> dict[str, Any]:
                 "source": document.get("source", index.get("source", "")),
                 "locator": copy.deepcopy(block["locator"]),
             }
+            block["citation"] = _citation_for_block(block, display_source_name, sections)
             refs: list[dict[str, str]] = []
             for relationship_id in block.get("relationship_ids", []):
                 for asset_id in asset_by_relationship.get((document_id, relationship_id), []):
@@ -385,6 +459,18 @@ def _without_content_hash(evidence: dict[str, Any]) -> dict[str, Any]:
     integrity = value.get("integrity")
     if isinstance(integrity, dict):
         integrity.pop("content_sha256", None)
+    return value
+
+
+def _without_derived_citations(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Create a comparison copy for idempotent legacy-store detection."""
+
+    value = _without_content_hash(evidence)
+    blocks = value.get("blocks")
+    if isinstance(blocks, list):
+        for block in blocks:
+            if isinstance(block, dict):
+                block.pop("citation", None)
     return value
 
 
@@ -446,6 +532,11 @@ def validate_frozen_evidence(evidence_path: Path, *, extracted_dir: Path | None 
                 problems.append(f"EvidenceStore.blocks[{number}] references an unknown document")
             try:
                 _validate_block(block, document_id, f"EvidenceStore.blocks[{number}]")
+                # Citation metadata was added after EvidenceStore v1 shipped.
+                # It is optional for retained stores, but must be well-formed
+                # whenever a newer consolidation includes it.
+                if "citation" in block:
+                    _validate_citation(block["citation"], f"EvidenceStore.blocks[{number}].citation")
             except EvidenceError as exc:
                 problems.append(str(exc))
             block_id = block.get("id")
@@ -542,9 +633,15 @@ def freeze_evidence(extracted_dir: Path, evidence_path: Path) -> dict[str, Any]:
         if existing_problems:
             raise EvidenceError("existing frozen EvidenceStore is invalid: " + "; ".join(existing_problems))
         existing = _object(_read_json(destination, "EvidenceStore"), "EvidenceStore")
-        if canonical_json(existing) != canonical_json(candidate):
-            raise EvidenceError("frozen EvidenceStore already exists and cannot be replaced")
-        return existing
+        if canonical_json(existing) == canonical_json(candidate):
+            return existing
+        existing_blocks = _list(existing.get("blocks"), "EvidenceStore.blocks")
+        is_legacy = all(isinstance(block, dict) and "citation" not in block for block in existing_blocks)
+        if is_legacy and canonical_json(_without_derived_citations(existing)) == canonical_json(_without_derived_citations(candidate)):
+            # Preserve the original bytes and integrity binding. Citations are
+            # derived presentation hints, not a reason to rewrite frozen facts.
+            return existing
+        raise EvidenceError("frozen EvidenceStore already exists and cannot be replaced")
     _atomic_write_json(destination, candidate)
     problems = validate_frozen_evidence(destination, extracted_dir=Path(extracted_dir))
     if problems:

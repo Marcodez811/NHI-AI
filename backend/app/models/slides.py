@@ -102,6 +102,16 @@ class CreateSlidesJobResponse(BaseModel):
     phase: AgentPhase = AgentPhase.QUEUED
 
 
+class SlideJobBrief(BaseModel):
+    """The immutable user brief that created a durable slide job."""
+
+    title: str
+    document_ids: list[UUID]
+    slides_count: int
+    guidance: str
+    tone: Literal["formal", "casual"]
+
+
 class SlidesJobStatusResponse(BaseModel):
     """Returned when a client polls for job status."""
 
@@ -114,6 +124,9 @@ class SlidesJobStatusResponse(BaseModel):
     finished_at: datetime | None = None
     error: str | None = None
     download_url: str | None = None
+    # Durable jobs return their original input so a refreshed browser can
+    # accurately describe and restart a presentation without guessing.
+    brief: SlideJobBrief | None = None
 
 
 # --------------------------------------------------------------------------

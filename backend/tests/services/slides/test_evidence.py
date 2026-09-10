@@ -8,8 +8,11 @@ import pytest
 
 from app.services.slides.evidence import (
     EvidenceError,
+    _citation_for_block,
+    canonical_json,
     freeze_evidence,
     load_frozen_evidence,
+    sha256_bytes,
     validate_frozen_evidence,
 )
 
@@ -19,6 +22,23 @@ _SPEC = importlib.util.spec_from_file_location("source_extraction_for_test", _EX
 assert _SPEC and _SPEC.loader
 _EXTRACTION = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_EXTRACTION)
+
+
+def test_human_citations_use_pdf_pages_and_safe_filename_fallbacks() -> None:
+    pdf = _citation_for_block(
+        {"kind": "paragraph", "text": "claim", "locator": {"type": "pdf", "page": 12}},
+        "年度報告.pdf",
+        {},
+    )
+    unknown = _citation_for_block(
+        {"kind": "paragraph", "text": "claim", "locator": {"type": "docx", "path": "/internal/xml/path"}},
+        "政策說明.docx",
+        {},
+    )
+
+    assert pdf["display_text"] == "資料來源：年度報告.pdf，PDF 第 12 頁"
+    assert unknown["display_text"] == "資料來源：政策說明.docx"
+    assert "/internal/xml/path" not in unknown["display_text"]
 
 
 def test_markdown_and_text_extraction_preserve_order_and_structure(tmp_path: Path) -> None:
@@ -57,6 +77,13 @@ def test_freeze_consolidates_every_block_and_keeps_warning_and_hashes(tmp_path: 
     assert all(block["provenance"]["document_id"] == block["document_id"] for block in evidence["blocks"])
     assert evidence["documents"][0]["source_sha256"] == evidence["documents"][0]["document_id"]
     assert evidence["integrity"]["manifest_sha256"].startswith("sha256:")
+    assert evidence["blocks"][0]["citation"] == {
+        "source_name": "brief.md",
+        "section_path": ["Title"],
+        "locator_label": "第 1 行",
+        "display_text": "資料來源：brief.md，〈Title〉，第 1 行",
+    }
+    assert evidence["blocks"][1]["citation"]["display_text"] == "資料來源：brief.md，〈Title〉，第 3 行"
     assert validate_frozen_evidence(evidence_path, extracted_dir=extracted) == []
     assert load_frozen_evidence(evidence_path, extracted_dir=extracted)["blocks"] == evidence["blocks"]
 
@@ -87,6 +114,28 @@ def test_tampering_with_frozen_content_is_rejected(tmp_path: Path) -> None:
     assert validate_frozen_evidence(evidence_path) != []
     with pytest.raises(EvidenceError, match="validation failed"):
         load_frozen_evidence(evidence_path)
+
+
+def test_older_frozen_store_without_citation_metadata_remains_valid(tmp_path: Path) -> None:
+    source = tmp_path / "brief.txt"
+    source.write_text("An authoritative claim.", encoding="utf-8")
+    extracted = tmp_path / "extracted"
+    _EXTRACTION.extract([str(source)], str(extracted))
+    evidence_path = tmp_path / "evidence.json"
+    freeze_evidence(extracted, evidence_path)
+
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    for block in payload["blocks"]:
+        block.pop("citation")
+    without_hash = json.loads(json.dumps(payload))
+    without_hash["integrity"].pop("content_sha256")
+    payload["integrity"]["content_sha256"] = sha256_bytes(canonical_json(without_hash))
+    evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+    legacy_bytes = evidence_path.read_bytes()
+
+    assert validate_frozen_evidence(evidence_path, extracted_dir=extracted) == []
+    assert freeze_evidence(extracted, evidence_path) == payload
+    assert evidence_path.read_bytes() == legacy_bytes
 
 
 def test_asset_hashes_and_figure_relationships_are_preserved(tmp_path: Path) -> None:
@@ -162,3 +211,84 @@ def test_asset_hashes_and_figure_relationships_are_preserved(tmp_path: Path) -> 
         {"relationship_id": "rId1", "asset_id": asset_id, "sha256": asset_id}
     ]
     assert evidence["status"] == "warning"
+
+
+def test_citations_keep_docx_headings_with_their_document_part(tmp_path: Path) -> None:
+    source = tmp_path / "政策說明.docx"
+    source.write_bytes(b"document")
+    document_id = _EXTRACTION.sha(source.read_bytes())
+    extracted = tmp_path / "extracted"
+    blocks = [
+        _EXTRACTION.make_block(
+            document_id,
+            "heading",
+            "給付範圍",
+            {"type": "docx", "part": "word/document.xml", "path": "/w:document/w:body/*[1]"},
+            heading_level=1,
+        ),
+        _EXTRACTION.make_block(
+            document_id,
+            "heading",
+            "適用對象",
+            {"type": "docx", "part": "word/document.xml", "path": "/w:document/w:body/*[2]"},
+            heading_level=2,
+        ),
+        _EXTRACTION.make_block(
+            document_id,
+            "paragraph",
+            "適用條件。",
+            {"type": "docx", "part": "word/document.xml", "path": "/w:document/w:body/*[3]"},
+        ),
+        _EXTRACTION.make_block(
+            document_id,
+            "footnote",
+            "附註。",
+            {"type": "docx", "part": "word/footnotes.xml", "note_id": "1"},
+        ),
+    ]
+    index = extracted / "documents" / "index.json"
+    index.parent.mkdir(parents=True)
+    index.write_text(
+        json.dumps(
+            {
+                "format_version": "1.0",
+                "document_id": document_id,
+                "source": str(source),
+                "source_type": "docx",
+                "status": "ok",
+                "warnings": [],
+                "errors": [],
+                "blocks": blocks,
+                "chunks": [],
+                "assets": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (extracted / "manifest.json").write_text(
+        json.dumps(
+            {
+                "format_version": "1.0",
+                "status": "ok",
+                "warnings": [],
+                "errors": [],
+                "documents": [
+                    {
+                        "document_id": document_id,
+                        "source": str(source),
+                        "source_type": "docx",
+                        "status": "ok",
+                        "warnings": [],
+                        "errors": [],
+                        "index": "documents/index.json",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = freeze_evidence(extracted, tmp_path / "evidence.json")
+
+    assert evidence["blocks"][2]["citation"]["display_text"] == "資料來源：政策說明.docx，〈給付範圍〉／〈適用對象〉"
+    assert evidence["blocks"][3]["citation"]["section_path"] == []

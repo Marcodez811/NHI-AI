@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900">
+  <rect width="1600" height="900" fill="#FFFFFF"/>
+  <g font-family="Noto Sans CJK TC, Noto Sans TC, sans-serif">
+    <text x="120" y="85" font-size="42" font-weight="700" fill="#16324F">示範：量與率雙軸圖（請替換所有數值）</text>
+    <g stroke="#D9E3EA" stroke-width="2">
+      <line x1="180" y1="700" x2="1420" y2="700"/><line x1="180" y1="540" x2="1420" y2="540"/>
+      <line x1="180" y1="380" x2="1420" y2="380"/><line x1="180" y1="220" x2="1420" y2="220"/>
+    </g>
+    <g fill="#48627A" font-size="24">
+      <text x="80" y="715">0 件</text><text x="65" y="555">50 件</text><text x="50" y="395">100 件</text><text x="50" y="235">150 件</text>
+      <text x="1440" y="715">0%</text><text x="1440" y="555">5%</text><text x="1440" y="395">10%</text><text x="1440" y="235">15%</text>
+      <text x="350" y="755">112年</text><text x="750" y="755">113年</text><text x="1150" y="755">114年</text>
+    </g>
+    <g fill="#005BAC"><rect x="330" y="444" width="120" height="256"/><rect x="730" y="380" width="120" height="320"/><rect x="1130" y="316" width="120" height="384"/></g>
+    <path d="M390 508 L790 412 L1190 348" fill="none" stroke="#E6812D" stroke-width="10" stroke-linecap="round"/>
+    <g fill="#E6812D"><circle cx="390" cy="508" r="13"/><circle cx="790" cy="412" r="13"/><circle cx="1190" cy="348" r="13"/></g>
+    <g font-size="25" fill="#16324F"><rect x="440" y="810" width="24" height="24" fill="#005BAC"/><text x="478" y="831">案件量（左軸）</text><line x1="780" y1="822" x2="820" y2="822" stroke="#E6812D" stroke-width="8"/><text x="838" y="831">比率（右軸）</text></g>
+  </g>
+</svg>
