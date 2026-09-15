@@ -119,4 +119,68 @@ describe("SSE contract", () => {
             expect.any(Object),
         );
     });
+
+    it("reports progress status before structured completion", async () => {
+        vi.stubGlobal("fetch", vi.fn(async () => new Response(
+            'data: {"type":"status","phase":"searching"}\n\n' +
+            'data: {"type":"done","citations":[]}\n\n',
+        )));
+        const onStatus = vi.fn();
+
+        await streamChat(
+            { question: "問題", mode: "legislative_qa", document_ids: [] },
+            { onDelta: vi.fn(), onStatus },
+        );
+
+        expect(onStatus).toHaveBeenCalledWith("searching");
+    });
+
+    it("rejects EOF without a structured done event", async () => {
+        vi.stubGlobal("fetch", vi.fn(async () => new Response(
+            'data: {"type":"text_delta","text":"部分回答"}\n\n',
+        )));
+
+        await expect(streamChat(
+            { question: "問題", mode: "legislative_qa", document_ids: [] },
+            { onDelta: vi.fn() },
+        )).rejects.toMatchObject({ code: "chat_stream_interrupted" });
+    });
+
+    it("rejects malformed recognized event payloads", async () => {
+        expect(() => parseSseEventBlock("event: text_delta\ndata: not-json"))
+            .toThrowError(expect.objectContaining({ code: "chat_stream_invalid" }));
+    });
+
+    it("does not treat a provider DONE sentinel as application success", async () => {
+        vi.stubGlobal("fetch", vi.fn(async () => new Response("data: [DONE]\n\n")));
+
+        await expect(streamChat(
+            { question: "問題", mode: "legislative_qa", document_ids: [] },
+            { onDelta: vi.fn() },
+        )).rejects.toMatchObject({ code: "chat_stream_interrupted" });
+    });
+
+    it("times out when no response bytes arrive", async () => {
+        vi.useFakeTimers();
+        try {
+            vi.stubGlobal("fetch", vi.fn((_url, init) => new Promise<Response>((_resolve, reject) => {
+                (init?.signal as AbortSignal).addEventListener("abort", () => {
+                    reject(new DOMException("Aborted", "AbortError"));
+                });
+            })));
+            const request = streamChat(
+                { question: "問題", mode: "legislative_qa", document_ids: [] },
+                { onDelta: vi.fn() },
+            );
+            const rejection = expect(request).rejects.toMatchObject({
+                code: "chat_timeout",
+            });
+
+            await vi.advanceTimersByTimeAsync(45_000);
+
+            await rejection;
+        } finally {
+            vi.useRealTimers();
+        }
+    });
 });

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from collections.abc import AsyncGenerator
 from typing import Annotated
 from uuid import UUID
@@ -10,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from app.models.chat import ChatRequest, ChatResponse, QaModeInfo
+from app.config import settings
 from app.models.documents import DocumentCategory, DocumentStatus
 from app.services.documents.repository import DocumentRepository
 from app.services.chat.responder import ChatServiceError, ResponseService
@@ -51,23 +54,23 @@ async def _resolve_document_scope(
             if document is None:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="A selected document was not found.",
+                    detail="找不到所選文件。",
                 )
             if document.category != request.mode.value:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="Selected documents must match the chat category.",
+                    detail="所選文件必須符合目前的搜尋範圍。",
                 )
             if document.status != DocumentStatus.READY.value or not document.retrieval_enabled:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="Selected documents are not ready for retrieval.",
+                    detail="所選文件尚未完成檢索準備。",
                 )
             # A document mid-category-transition cannot be cited in either category.
             if getattr(document, "pending_category", None) is not None:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="Selected documents are not ready for retrieval.",
+                    detail="所選文件尚未完成檢索準備。",
                 )
         return list(request.document_ids)
 
@@ -87,7 +90,7 @@ async def _resolve_document_scope(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "knowledge_base_empty",
-                "message": "No retrieval-ready documents are available for this category.",
+                "message": "目前搜尋範圍尚無可用文件。",
             },
         )
     return [doc.id for doc in eligible]
@@ -96,10 +99,52 @@ async def _resolve_document_scope(
 @router.get("/qa-modes", response_model=list[QaModeInfo])
 async def list_qa_modes() -> list[QaModeInfo]:
     return [
-        QaModeInfo(mode="legislative_qa", label="立院問答", description="Search legislative Q&A sources."),
-        QaModeInfo(mode="public_opinion", label="輿情", description="Search policy and public-opinion sources."),
-        QaModeInfo(mode="bei_can", label="備參", description="Search briefing reference sources."),
+        QaModeInfo(mode="legislative_qa", label="立院問答", description="立法院問答資料"),
+        QaModeInfo(mode="public_opinion", label="輿情", description="政策與輿情資料"),
+        QaModeInfo(mode="bei_can", label="備參", description="備參資料"),
     ]
+
+
+async def _stream_with_heartbeat(
+    source: AsyncGenerator[str, None],
+    *,
+    heartbeat_seconds: float,
+    timeout_seconds: float,
+) -> AsyncGenerator[str, None]:
+    """Forward an SSE generator while keeping proxies alive and enforcing a deadline."""
+
+    iterator = source.__aiter__()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    pending: asyncio.Task[str] | None = None
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                yield 'data: {"type":"error","code":"chat_timeout","message":"對話處理逾時，請稍後再試。"}\n\n'
+                return
+            if pending is None:
+                pending = asyncio.create_task(iterator.__anext__())
+            done, _ = await asyncio.wait(
+                {pending},
+                timeout=min(heartbeat_seconds, remaining),
+            )
+            if not done:
+                yield ": heartbeat\n\n"
+                continue
+            try:
+                chunk = pending.result()
+            except StopAsyncIteration:
+                return
+            pending = None
+            yield chunk
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with suppress(asyncio.CancelledError):
+                await pending
+        with suppress(Exception):
+            await iterator.aclose()
 
 
 def _http_error(exc: ChatServiceError) -> HTTPException:
@@ -109,7 +154,17 @@ def _http_error(exc: ChatServiceError) -> HTTPException:
         if "unavailable" in message.lower() or "configured" in message.lower()
         else status.HTTP_400_BAD_REQUEST
     )
-    return HTTPException(status_code=code, detail=message)
+    return HTTPException(
+        status_code=code,
+        detail={
+            "code": "chat_unavailable" if code == status.HTTP_503_SERVICE_UNAVAILABLE else "chat_invalid",
+            "message": (
+                "對話服務暫時無法使用，請稍後再試。"
+                if code == status.HTTP_503_SERVICE_UNAVAILABLE
+                else "對話請求設定無效。"
+            ),
+        },
+    )
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -134,7 +189,12 @@ async def stream_chat(
     allowlist = await _resolve_document_scope(request, repository)
 
     async def _generate() -> AsyncGenerator[str, None]:
-        async for chunk in service.answer_stream(request, document_id_allowlist=allowlist):
+        source = service.answer_stream(request, document_id_allowlist=allowlist)
+        async for chunk in _stream_with_heartbeat(
+            source,
+            heartbeat_seconds=settings.chat_stream_heartbeat_seconds,
+            timeout_seconds=settings.chat_timeout_seconds,
+        ):
             yield chunk
 
     return StreamingResponse(

@@ -537,10 +537,14 @@ export async function fetchRetrievalStatus(
 
 export interface StreamHandlers {
     onDelta: (text: string) => void;
+    onStatus?: (phase: ChatStatusPhase) => void;
     onDone?: (citations: Citation[]) => void;
 }
 
+export type ChatStatusPhase = "preparing" | "searching" | "drafting" | "validating";
+
 export type ChatStreamEvent =
+    | { type: "status"; phase: ChatStatusPhase }
     | { type: "text_delta"; text: string }
     | { type: "done"; citations: Citation[]; mode?: Category; grounded?: boolean }
     | { type: "error"; message: string; code?: string };
@@ -582,17 +586,38 @@ export function parseSseEventBlock(block: string): ChatStreamEvent | null {
     }
     const rawData = dataLines.join("\n").trim();
     if (!rawData) return null;
-    if (rawData === "[DONE]") return { type: "done", citations: [] };
+    // A provider-style sentinel is not our application completion contract.
+    // Only a structured `done` event can make a request successful.
+    if (rawData === "[DONE]") return null;
 
     let payload: unknown;
     try {
         payload = JSON.parse(rawData) as unknown;
     } catch {
-        // Keep compatibility with simple text/event-stream producers.
-        return { type: "text_delta", text: rawData };
+        throw new ApiError(502, "對話串流格式無效。", {
+            code: "chat_stream_invalid",
+        });
     }
-    if (!isRecord(payload)) return null;
+    if (!isRecord(payload)) {
+        throw new ApiError(502, "對話串流格式無效。", {
+            code: "chat_stream_invalid",
+        });
+    }
     const type = stringValue(payload.type) ?? eventName;
+    if (type === "status") {
+        const phase = stringValue(payload.phase);
+        if (
+            phase === "preparing" ||
+            phase === "searching" ||
+            phase === "drafting" ||
+            phase === "validating"
+        ) {
+            return { type: "status", phase };
+        }
+        throw new ApiError(502, "對話串流格式無效。", {
+            code: "chat_stream_invalid",
+        });
+    }
     if (type === "error") {
         const message =
             stringValue(payload.message) ??
@@ -622,7 +647,10 @@ export function parseSseEventBlock(block: string): ChatStreamEvent | null {
             rawStringValue(payload.text) ??
             rawStringValue(payload.text_delta) ??
             rawStringValue(payload.delta);
-        return text !== undefined ? { type: "text_delta", text } : null;
+        if (text !== undefined) return { type: "text_delta", text };
+        throw new ApiError(502, "對話串流格式無效。", {
+            code: "chat_stream_invalid",
+        });
     }
     return null;
 }
@@ -632,6 +660,24 @@ export async function streamChat(
     handlers: StreamHandlers,
     options: { signal?: AbortSignal } = {},
 ): Promise<void> {
+    const inactivityTimeoutMs = 45_000;
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const abortFromCaller = () => controller.abort();
+    const resetInactivityTimer = () => {
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        inactivityTimer = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, inactivityTimeoutMs);
+    };
+
+    if (options.signal?.aborted) abortFromCaller();
+    else options.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    resetInactivityTimer();
+
     let response: Response;
     try {
         response = await fetch(`${API_ROOT}/chat/stream`, {
@@ -641,51 +687,81 @@ export async function streamChat(
                 "Content-Type": "application/json",
             },
             body: JSON.stringify(payload),
-            signal: options.signal,
+            signal: controller.signal,
         });
-    } catch {
+    } catch (error) {
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        options.signal?.removeEventListener("abort", abortFromCaller);
+        if (options.signal?.aborted) throw error;
+        if (timedOut) {
+            throw new ApiError(504, "對話服務回應逾時，請稍後再試。", {
+                code: "chat_timeout",
+            });
+        }
         throw new ApiError(0, "對話服務暫時無法使用。");
     }
-    if (!response.ok) {
-        const body = await readResponseBody(response);
-        throw new ApiError(
-            response.status,
-            getApiErrorMessage(body, "對話服務暫時無法使用。"),
-            { code: errorCode(body), details: body },
-        );
-    }
-    if (!response.body) throw new ApiError(502, "對話串流沒有回傳內容。");
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let finished = false;
-
-    const consume = (block: string) => {
-        const event = parseSseEventBlock(block);
-        if (!event) return;
-        if (event.type === "text_delta") handlers.onDelta(event.text);
-        else if (event.type === "done") {
-            finished = true;
-            handlers.onDone?.(event.citations);
-        } else {
-            throw new ApiError(500, event.message, { code: event.code });
+    try {
+        if (!response.ok) {
+            const body = await readResponseBody(response);
+            throw new ApiError(
+                response.status,
+                getApiErrorMessage(body, "對話服務暫時無法使用。"),
+                { code: errorCode(body), details: body },
+            );
         }
-    };
+        if (!response.body) throw new ApiError(502, "對話串流沒有回傳內容。");
 
-    while (true) {
-        const { value, done } = await reader.read();
-        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-        let boundary: RegExpExecArray | null;
-        while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
-            consume(buffer.slice(0, boundary.index));
-            buffer = buffer.slice(boundary.index + boundary[0].length);
+        reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let finished = false;
+
+        const consume = (block: string) => {
+            const event = parseSseEventBlock(block);
+            if (!event) return;
+            if (event.type === "status") handlers.onStatus?.(event.phase);
+            else if (event.type === "text_delta") handlers.onDelta(event.text);
+            else if (event.type === "done") {
+                finished = true;
+                handlers.onDone?.(event.citations);
+            } else {
+                throw new ApiError(503, event.message, { code: event.code });
+            }
+        };
+
+        while (!finished) {
+            const { value, done } = await reader.read();
+            if (value?.byteLength) resetInactivityTimer();
+            buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+            let boundary: RegExpExecArray | null;
+            while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
+                consume(buffer.slice(0, boundary.index));
+                buffer = buffer.slice(boundary.index + boundary[0].length);
+                if (finished) break;
+            }
+            if (done) break;
         }
-        if (done) break;
+        buffer += decoder.decode();
+        if (!finished && buffer.trim()) consume(buffer);
+        if (!finished) {
+            throw new ApiError(502, "對話串流意外中斷，請重新送出問題。", {
+                code: "chat_stream_interrupted",
+            });
+        }
+    } catch (error) {
+        if (error instanceof ApiError) throw error;
+        if (options.signal?.aborted) throw error;
+        if (timedOut) {
+            throw new ApiError(504, "對話服務回應逾時，請稍後再試。", {
+                code: "chat_timeout",
+            });
+        }
+        throw new ApiError(0, "對話服務暫時無法使用。");
+    } finally {
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        options.signal?.removeEventListener("abort", abortFromCaller);
+        if (reader) await reader.cancel().catch(() => undefined);
     }
-    buffer += decoder.decode();
-    if (buffer.trim()) consume(buffer);
-    if (!finished) handlers.onDone?.([]);
 }
 
 export async function createSlideJob(

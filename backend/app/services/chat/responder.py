@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncGenerator, Callable, Iterable
 from typing import Any, Protocol
 from uuid import UUID
@@ -15,6 +16,7 @@ from .retrieval import build_file_search_tool
 
 
 INSUFFICIENT_EVIDENCE = "無法回答，因為無相關資料"
+logger = logging.getLogger(__name__)
 
 SYSTEM_INSTRUCTIONS: dict[QaMode, str] = {
     QaMode.LEGISLATIVE_QA: (
@@ -179,9 +181,9 @@ class ResponseService:
         *,
         document_id_allowlist: Iterable[UUID] | None = None,
     ) -> ChatResponse:
-        allowed_ids = self._validated_document_allowlist(document_id_allowlist)
-        client = await self._async_client
         try:
+            allowed_ids = self._validated_document_allowlist(document_id_allowlist)
+            client = await self._async_client
             response = await client.responses.create(
                 **self.build_request(request, allowed_ids)
             )
@@ -216,18 +218,25 @@ class ResponseService:
         ultimately returned.
         """
 
-        allowed_ids = self._validated_document_allowlist(document_id_allowlist)
-        client = await self._async_client
         try:
+            yield _sse("status", {"phase": "preparing"})
+            allowed_ids = self._validated_document_allowlist(document_id_allowlist)
+            client = await self._async_client
+            yield _sse("status", {"phase": "searching"})
             stream = client.responses.stream(
                 **self.build_request(request, allowed_ids)
             )
             text_chunks: list[str] = []
+            drafting_started = False
             async with stream as active:
                 async for event in active:
                     if _event_type(event) == "response.output_text.delta":
+                        if not drafting_started:
+                            drafting_started = True
+                            yield _sse("status", {"phase": "drafting"})
                         text_chunks.append(_event_delta(event))
                 final = await active.get_final_response()
+            yield _sse("status", {"phase": "validating"})
             raw_citations = normalize_citations(
                 final, document_id_for_file=self._document_id_for_file
             )
@@ -246,9 +255,14 @@ class ResponseService:
                 },
             )
         except ChatServiceError as exc:
-            yield _sse("error", {"code": "chat_unavailable", "message": str(exc)})
-        except Exception:
+            logger.warning("Chat service unavailable: %s", exc)
             yield _sse(
                 "error",
-                {"code": "chat_unavailable", "message": "Chat provider is temporarily unavailable."},
+                {"code": "chat_unavailable", "message": "對話服務暫時無法使用，請稍後再試。"},
+            )
+        except Exception:
+            logger.exception("Unexpected streaming chat failure")
+            yield _sse(
+                "error",
+                {"code": "chat_unavailable", "message": "對話服務暫時無法使用，請稍後再試。"},
             )

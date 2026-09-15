@@ -84,8 +84,15 @@ async def test_stream_emits_deltas_then_done():
         event
         async for event in service.answer_stream(request, document_id_allowlist=[document_id])
     ]
-    assert '"type": "text_delta"' in events[0]
-    assert '第一段' in events[0]
+    phases = [event for event in events if '"type": "status"' in event]
+    assert [phase.split('"phase": "')[1].split('"')[0] for phase in phases] == [
+        "preparing",
+        "searching",
+        "drafting",
+        "validating",
+    ]
+    text_events = [event for event in events if '"type": "text_delta"' in event]
+    assert '第一段' in text_events[0]
     assert '"type": "done"' in events[-1]
     assert '"grounded": true' in events[-1]
     payload = client.responses.stream_calls[0]
@@ -104,5 +111,6 @@ async def test_stream_replaces_unreferenced_output_with_insufficient_evidence():
         event
         async for event in service.answer_stream(request, document_id_allowlist=[uuid4()])
     ]
-    assert INSUFFICIENT_EVIDENCE in events[0]
+    text_events = [event for event in events if '"type": "text_delta"' in event]
+    assert INSUFFICIENT_EVIDENCE in text_events[0]
     assert '"grounded": false' in events[-1]

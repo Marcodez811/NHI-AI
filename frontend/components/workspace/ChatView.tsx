@@ -7,7 +7,7 @@ import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
-import type { Category, QaModeInfo } from "../../lib/api/chat";
+import type { Category, ChatStatusPhase, QaModeInfo } from "../../lib/api/chat";
 import type { DocumentRead } from "../../lib/api/documents";
 import { MAX_DOCUMENTS, documentDisplayName } from "../../lib/api/documents";
 import type { RetrievalStatus } from "../../lib/api/retrieval";
@@ -20,6 +20,13 @@ import { isChatComposerBlocked, resolveChatEmptyState } from "./chat-state";
 function categoryDescription(modes: QaModeInfo[], category: Category): string {
     return modes.find((mode) => mode.mode === category)?.description ?? "";
 }
+
+const CHAT_STATUS_LABELS: Record<ChatStatusPhase, string> = {
+    preparing: "正在準備查詢…",
+    searching: "正在搜尋來源文件…",
+    drafting: "正在整理回答…",
+    validating: "正在核對引用來源…",
+};
 
 function ScopePicker({
     scope,
@@ -151,14 +158,18 @@ function ChatConversation({
         <div className="flex flex-col gap-7">
             {chat.map((message, index) => (
                 <div
-                    key={`${index}-${message.role}`}
+                    key={message.id ?? `${index}-${message.role}`}
                     className={`flex gap-3 ${message.role === "user" ? "justify-end" : ""}`}
                 >
                     <div
                         className={`max-w-[85%] rounded-xl px-4 py-3 text-sm leading-7 ${message.role === "user" ? "bg-primary text-primary-foreground" : "border border-border bg-card"}`}
                     >
                         <div className="whitespace-pre-wrap">
-                            {message.text || (busy && index === chat.length - 1 ? "思考中…" : "")}
+                            {message.text || (busy && index === chat.length - 1 ? (
+                                <span role="status" aria-live="polite">
+                                    {message.status ? CHAT_STATUS_LABELS[message.status] : "正在處理問題…"}
+                                </span>
+                            ) : "")}
                         </div>
                         {message.citations?.length ? (
                             <div className="mt-4 border-t border-border/70 pt-3">
@@ -284,6 +295,9 @@ function ChatComposer({
                     <ArrowUp size={16} />
                 </Button>
             </div>
+            <p className="mt-2 text-center text-xs text-muted-foreground">
+                每次提問皆為獨立查詢；請在問題中提供完整背景。
+            </p>
         </div>
     );
 }

@@ -126,9 +126,19 @@ def _make_chat_service() -> ResponseService:
 
     global _chat_client
     if _chat_client is None:
-        _chat_client = AsyncOpenAI(
-            api_key=settings.openai_api_key.get_secret_value()
-        )
+        api_key = settings.openai_api_key.get_secret_value()
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "chat_unavailable", "message": "對話服務尚未完成設定。"},
+            )
+        try:
+            _chat_client = AsyncOpenAI(api_key=api_key)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "chat_unavailable", "message": "對話服務暫時無法使用，請稍後再試。"},
+            ) from exc
     return ResponseService(
         client=_chat_client,
         vector_store_id_provider=_runtime_vector_store_id,

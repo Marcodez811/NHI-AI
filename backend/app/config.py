@@ -51,6 +51,16 @@ class Settings(BaseSettings):
     openai_vector_store_id: str | None = None
     openai_vector_store_name: str = "NHI-AI Knowledge Base"
     openai_vector_store_bootstrap_timeout_seconds: float = Field(default=10.0, gt=0)
+    chat_stream_heartbeat_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        validation_alias=AliasChoices("CHAT_STREAM_HEARTBEAT_SECONDS"),
+    )
+    chat_timeout_seconds: float = Field(
+        default=180.0,
+        gt=0,
+        validation_alias=AliasChoices("CHAT_TIMEOUT_SECONDS"),
+    )
     database_url: str = "sqlite:///./nhi_ai.db"
     # Canonical Luna 1 names.  AliasChoices keeps deployments using the old
     # SLIDES_* names working during migration; the new name is intentionally

@@ -7,6 +7,8 @@ export {
 
 export type {
   Category,
+  ChatRequest,
   QaModeInfo,
   Citation,
+  ChatStatusPhase,
 } from "../api";

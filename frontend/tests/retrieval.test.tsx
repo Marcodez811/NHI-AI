@@ -120,6 +120,21 @@ describe("useRetrievalStatus", () => {
 describe("ChatView retrieval empty states", () => {
     afterEach(() => cleanup());
 
+    it("announces the current chat phase and explains independent questions", () => {
+        renderChat({
+            chat: [{
+                id: "assistant-1",
+                role: "assistant",
+                text: "",
+                status: "searching",
+            }],
+            busy: true,
+        });
+
+        expect(screen.getByRole("status")).toHaveTextContent("正在搜尋來源文件…");
+        expect(screen.getByText("每次提問皆為獨立查詢；請在問題中提供完整背景。")).toBeInTheDocument();
+    });
+
     it("opens and changes scope repeatedly with real parent state updates", async () => {
         const user = userEvent.setup();
         const options = [...modes, { mode: "bei_can" as const, label: "備參", description: "" }];

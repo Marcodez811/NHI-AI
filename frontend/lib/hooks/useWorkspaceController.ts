@@ -11,9 +11,10 @@ import {
     QaModeInfo,
     getDocumentDownloadUrl,
 } from "../api/documents";
-import { fetchQaModes, streamChat } from "../api/chat";
+import { fetchQaModes } from "../api/chat";
 import { supportsSlideGeneration } from "../api/slides";
 import { useDocuments } from "./useDocuments";
+import { useChatRequest } from "./useChatRequest";
 import { useRetrievalStatus } from "./useRetrievalStatus";
 import { useSlideJob } from "./useSlideJob";
 import { useWorkspaceSession } from "./useWorkspaceSession";
@@ -95,8 +96,6 @@ export function useWorkspaceController() {
     const [uploading, setUploading] = useState(false);
     const [qaModes, setQaModes] = useState<QaModeInfo[]>([]);
     const [qaError, setQaError] = useState<string | null>(null);
-    const [chatBusy, setChatBusy] = useState(false);
-    const [chatError, setChatError] = useState<string | null>(null);
     const [eligibilityError, setEligibilityError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
 
@@ -161,6 +160,7 @@ export function useWorkspaceController() {
         readyDocuments.length > 0 ||
         (retrieval.status?.ready_document_count ?? 0) > 0;
     const hasCategoryReadyDocuments = categoryReadyDocuments.length > 0;
+    const chatRequest = useChatRequest({ draft, setDraft, setChat });
 
     const toggleSelected = (id: string) => {
         setEligibilityError(null);
@@ -187,7 +187,7 @@ export function useWorkspaceController() {
 
     const send = async () => {
         const question = draft.trim();
-        if (!question || chatBusy || question.length > 20_000) return;
+        if (!question || chatRequest.busy || question.length > 20_000) return;
         if (!retrieval.status?.can_retrieve) {
             setEligibilityError(
                 retrieval.error?.message ||
@@ -205,34 +205,13 @@ export function useWorkspaceController() {
             return;
         }
         setEligibilityError(null);
-        setChatError(null);
-        setDraft("");
-        setChat((items) => [...items, { role: "user", text: question }, { role: "assistant", text: "" }]);
-        setChatBusy(true);
-        try {
-            await streamChat(
-                { question, mode: scope, document_ids: chatSelectedDocs.length ? chatEligible.map((doc) => doc.id) : [] },
-                {
-                    onDelta: (delta) => setChat((items) => {
-                        const next = [...items];
-                        const last = next[next.length - 1];
-                        if (last?.role === "assistant") last.text += delta;
-                        return next;
-                    }),
-                    onDone: (citations) => setChat((items) => {
-                        const next = [...items];
-                        const last = next[next.length - 1];
-                        if (last?.role === "assistant") last.citations = citations;
-                        return next;
-                    }),
-                },
-            );
-        } catch (error) {
-            setChatError(errorText(error));
-            setChat((items) => items.slice(0, -1));
-        } finally {
-            setChatBusy(false);
-        }
+        await chatRequest.send({
+            question,
+            mode: scope,
+            document_ids: chatSelectedDocs.length
+                ? chatEligible.map((doc) => doc.id)
+                : [],
+        });
     };
 
     const mutateDocument = async (id: string, changes: DocumentMutation) => {
@@ -329,10 +308,10 @@ export function useWorkspaceController() {
     };
 
     const startNewChat = () => {
-        if (chatBusy) return;
+        if (chatRequest.busy) return;
         setChat([]);
         setDraft("");
-        setChatError(null);
+        chatRequest.clearError();
         setEligibilityError(null);
     };
 
@@ -371,8 +350,8 @@ export function useWorkspaceController() {
         draft,
         setDraft,
         send,
-        chatBusy,
-        chatError,
+        chatBusy: chatRequest.busy,
+        chatError: chatRequest.error,
         eligibilityError,
         actionError,
         retrievalStatus: retrieval.status,
