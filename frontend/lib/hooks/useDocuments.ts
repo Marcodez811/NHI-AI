@@ -20,7 +20,8 @@ import {
     uploadDocument as uploadDocumentRequest,
     Category,
 } from "../api/documents";
-import { ApiError, getApiErrorMessage } from "../api/client";
+import { ApiError } from "../api/client";
+import { asApiError } from "../api-error";
 
 export interface UseDocumentsOptions {
     autoLoad?: boolean;
@@ -54,14 +55,6 @@ export interface UseDocumentsResult {
     createFolder: (name: string) => Promise<FolderRead>;
     renameFolder: (id: string, name: string) => Promise<FolderRead>;
     deleteFolder: (id: string) => Promise<void>;
-}
-
-function asApiError(error: unknown, fallback: string): ApiError {
-    if (error instanceof ApiError) return error;
-    if (error instanceof Error && error.message) {
-        return new ApiError(0, error.message);
-    }
-    return new ApiError(0, getApiErrorMessage(error, fallback));
 }
 
 /** Replace one document while preserving the server's returned state. */

@@ -1,6 +1,6 @@
 import type { Citation } from "../api/chat";
 
-export type View = "chat" | "files" | "slides";
+export type View = "chat" | "files" | "slides" | "workflows";
 
 export type ChatMessage = {
     role: "user" | "assistant";

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "../api/client";
 import {
     Category,
+    CATEGORY_LABELS,
     CATEGORY_VALUES,
     DocumentRead,
     MAX_DOCUMENTS,
@@ -19,7 +20,7 @@ import { useWorkspaceSession } from "./useWorkspaceSession";
 
 const fallbackModes: QaModeInfo[] = CATEGORY_VALUES.map((mode) => ({
     mode,
-    label: mode,
+    label: CATEGORY_LABELS[mode],
     description: "",
 }));
 
@@ -48,10 +49,10 @@ export function useWorkspaceController() {
     const {
         view,
         setView,
-        collapsed,
-        setCollapsed,
         selected,
         setSelected,
+        chatSelected,
+        setChatSelected,
         folderId,
         setFolderId,
         query,
@@ -133,12 +134,16 @@ export function useWorkspaceController() {
         [catalog.documents, selected],
     );
     const chatEligible = useMemo(
-        () => selectedDocs.filter((doc) => doc.category === scope && doc.status === "ready" && doc.retrieval_enabled),
-        [selectedDocs, scope],
+        () => catalog.documents.filter((doc) => chatSelected.includes(doc.id) && doc.category === scope && doc.status === "ready" && doc.retrieval_enabled),
+        [catalog.documents, chatSelected, scope],
+    );
+    const chatSelectedDocs = useMemo(
+        () => catalog.documents.filter((doc) => chatSelected.includes(doc.id)),
+        [catalog.documents, chatSelected],
     );
     const blockedDocuments = useMemo(
-        () => selectedDocs.filter((doc) => !chatEligible.some((eligible) => eligible.id === doc.id)),
-        [chatEligible, selectedDocs],
+        () => chatSelectedDocs.filter((doc) => !chatEligible.some((eligible) => eligible.id === doc.id)),
+        [chatEligible, chatSelectedDocs],
     );
     const readyDocuments = useMemo(
         () => catalog.documents.filter((doc) => doc.status === "ready" && doc.retrieval_enabled),
@@ -171,6 +176,7 @@ export function useWorkspaceController() {
 
     const changeScope = (value: Category) => {
         setScope(value);
+        setChatSelected([]);
         setEligibilityError(null);
     };
 
@@ -193,7 +199,7 @@ export function useWorkspaceController() {
             setEligibilityError("目前搜尋範圍尚無可用文件，請先上傳文件或切換分類。");
             return;
         }
-        if (selectedDocs.length && blockedDocuments.length) {
+        if (chatSelectedDocs.length && blockedDocuments.length) {
             const names = blockedDocuments.map((doc) => doc.display_name).join("、");
             setEligibilityError("請先處理未符合目前搜尋條件的選取文件：" + names);
             return;
@@ -205,7 +211,7 @@ export function useWorkspaceController() {
         setChatBusy(true);
         try {
             await streamChat(
-                { question, mode: scope, document_ids: selectedDocs.length ? chatEligible.map((doc) => doc.id) : [] },
+                { question, mode: scope, document_ids: chatSelectedDocs.length ? chatEligible.map((doc) => doc.id) : [] },
                 {
                     onDelta: (delta) => setChat((items) => {
                         const next = [...items];
@@ -249,6 +255,7 @@ export function useWorkspaceController() {
             try {
                 await catalog.deleteDocument(document.id);
                 setSelected((items) => items.filter((id) => id !== document.id));
+                setChatSelected((items) => items.filter((id) => id !== document.id));
             } catch (error) {
                 setActionError(errorText(error));
             }
@@ -321,15 +328,24 @@ export function useWorkspaceController() {
         slideJob.reset();
     };
 
+    const startNewChat = () => {
+        if (chatBusy) return;
+        setChat([]);
+        setDraft("");
+        setChatError(null);
+        setEligibilityError(null);
+    };
+
     return {
         catalog,
         slideJob,
         view,
         setView,
-        collapsed,
-        setCollapsed,
         selected,
         setSelected,
+        chatSelected,
+        setChatSelected,
+        chatSelectedDocs,
         selectedDocs,
         folderId,
         setFolderId,
@@ -385,6 +401,7 @@ export function useWorkspaceController() {
         setTone,
         startSlides,
         startNewSlides,
+        startNewChat,
     };
 }
 

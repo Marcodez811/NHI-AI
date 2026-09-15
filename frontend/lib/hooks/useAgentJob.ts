@@ -2,7 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentJobPhase } from "../api/types";
-import { ApiError, getApiErrorMessage } from "../api/client";
+import { ApiError } from "../api/client";
+import { asApiError } from "../api-error";
+import {
+    appendPhase,
+    phaseForJob,
+    readActiveJobId,
+    readPhaseHistory,
+    writeActiveJobId,
+    writePhaseHistory,
+} from "./agent-job-state";
 
 export type AgentJobClientPhase =
     | "idle"
@@ -68,90 +77,6 @@ export interface UseAgentJobResult<Payload, Job extends AgentJobRecord, Created 
 const DEFAULT_STORAGE_KEY = "nhi-ai:active-agent-job-id";
 const DEFAULT_TERMINAL_STATUSES = ["completed", "failed"] as const;
 const TRANSIENT_STATUS_WARNING = "Status temporarily unavailable—retrying.";
-
-function asApiError(error: unknown, fallback: string): ApiError {
-    if (error instanceof ApiError) return error;
-    if (error instanceof Error && error.message) {
-        return new ApiError(0, error.message);
-    }
-    return new ApiError(0, getApiErrorMessage(error, fallback));
-}
-
-function readActiveJobId(storageKey: string): string | null {
-    if (typeof window === "undefined") return null;
-    try {
-        return window.sessionStorage.getItem(storageKey);
-    } catch {
-        return null;
-    }
-}
-
-function writeActiveJobId(storageKey: string, id: string | null): void {
-    if (typeof window === "undefined") return;
-    try {
-        if (id) window.sessionStorage.setItem(storageKey, id);
-        else window.sessionStorage.removeItem(storageKey);
-    } catch {
-        // Session storage is an enhancement; private browsing must not break polling.
-    }
-}
-
-function readPhaseHistory(storageKey: string): AgentJobPhase[] {
-    if (typeof window === "undefined") return [];
-    try {
-        const value: unknown = JSON.parse(
-            window.sessionStorage.getItem(`${storageKey}:phases`) || "[]",
-        );
-        return Array.isArray(value)
-            ? value.filter((phase): phase is AgentJobPhase =>
-                  typeof phase === "string" &&
-                  [
-                      "queued",
-                      "preparing",
-                      "extracting",
-                      "drafting",
-                      "validating",
-                      "reviewing",
-                      "revising",
-                      "publishing",
-                      "completed",
-                      "failed",
-                  ].includes(phase),
-              )
-            : [];
-    } catch {
-        return [];
-    }
-}
-
-function writePhaseHistory(storageKey: string, history: AgentJobPhase[]): void {
-    if (typeof window === "undefined") return;
-    try {
-        if (history.length) {
-            window.sessionStorage.setItem(
-                `${storageKey}:phases`,
-                JSON.stringify(history),
-            );
-        } else {
-            window.sessionStorage.removeItem(`${storageKey}:phases`);
-        }
-    } catch {
-        // Session storage is an enhancement; private browsing must not break polling.
-    }
-}
-
-function phaseForJob(job: AgentJobRecord): AgentJobPhase | null {
-    if (job.phase) return job.phase;
-    if (job.status === "queued") return "queued";
-    if (job.status === "completed") return "completed";
-    if (job.status === "failed") return "failed";
-    return "preparing";
-}
-
-function appendPhase(history: AgentJobPhase[], phase: AgentJobPhase | null): AgentJobPhase[] {
-    if (!phase || history[history.length - 1] === phase) return history;
-    return [...history, phase];
-}
 
 /**
  * Workflow-neutral async job lifecycle. A workflow supplies only its create
@@ -439,5 +364,3 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
         reset,
     };
 }
-
-export { TRANSIENT_STATUS_WARNING };

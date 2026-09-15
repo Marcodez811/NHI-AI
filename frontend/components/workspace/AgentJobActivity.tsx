@@ -14,7 +14,7 @@ import type {
     AgentJobRecord,
 } from "../../lib/hooks/useAgentJob";
 
-export const AGENT_JOB_PHASES: readonly AgentJobPhase[] = [
+const AGENT_JOB_PHASES: readonly AgentJobPhase[] = [
     "queued",
     "preparing",
     "extracting",
@@ -26,7 +26,7 @@ export const AGENT_JOB_PHASES: readonly AgentJobPhase[] = [
     "completed",
 ];
 
-export const AGENT_JOB_PHASE_LABELS: Record<AgentJobPhase, string> = {
+const AGENT_JOB_PHASE_LABELS: Record<AgentJobPhase, string> = {
     queued: "等待中",
     preparing: "準備中",
     extracting: "整理來源中",

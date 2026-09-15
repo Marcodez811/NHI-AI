@@ -11,8 +11,8 @@ import type { ChatMessage, Tone, View } from "../workspace/types";
  */
 export function useWorkspaceSession() {
   const [view, setView] = useState<View>("chat");
-  const [collapsed, setCollapsed] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
+  const [chatSelected, setChatSelected] = useState<string[]>([]);
   const [folderId, setFolderId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -30,10 +30,10 @@ export function useWorkspaceSession() {
   return {
     view,
     setView,
-    collapsed,
-    setCollapsed,
     selected,
     setSelected,
+    chatSelected,
+    setChatSelected,
     folderId,
     setFolderId,
     query,

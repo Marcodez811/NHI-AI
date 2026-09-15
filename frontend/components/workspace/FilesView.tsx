@@ -16,6 +16,8 @@ import {
     Upload,
 } from "lucide-react";
 import { Button } from "../ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "../ui/dropdown-menu";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import type {
@@ -25,7 +27,6 @@ import type {
     IngestionJobRead,
     QaModeInfo,
 } from "../../lib/api/documents";
-import { MAX_DOCUMENTS } from "../../lib/api/documents";
 import {
     ActionButton,
     documentDisplayName,
@@ -33,8 +34,38 @@ import {
     formatDate,
     statusLabel,
 } from "./WorkspaceViewUtils";
+import { CategorySelect, FolderSelect } from "./DocumentSelects";
 
-export function IngestionDetails({
+const STATUS_LABELS: Record<string, string> = {
+    all: "全部狀態",
+    ready: "可使用",
+    indexing: "建立索引中",
+    queued: "等待處理",
+    failed: "處理失敗",
+};
+
+function filterDocuments(
+    docs: DocumentRead[],
+    filters: {
+        folderId: string | null;
+        category: "all" | Category;
+        status: string;
+        query: string;
+    },
+): DocumentRead[] {
+    const normalizedQuery = filters.query.trim().toLowerCase();
+    return docs.filter((document) => {
+        if (filters.folderId === "_uncategorized" && document.folder_id) return false;
+        if (filters.folderId && filters.folderId !== "_uncategorized" && document.folder_id !== filters.folderId) return false;
+        if (filters.category !== "all" && document.category !== filters.category) return false;
+        if (filters.status !== "all" && document.status !== filters.status) return false;
+        if (!normalizedQuery) return true;
+        return documentDisplayName(document).toLowerCase().includes(normalizedQuery) ||
+            document.original_filename.toLowerCase().includes(normalizedQuery);
+    });
+}
+
+function IngestionDetails({
     document,
     getIngestion,
 }: {
@@ -89,7 +120,7 @@ export function IngestionDetails({
     );
 }
 
-export function FolderManager({
+function FolderManager({
     folders,
     onCreate,
     onRename,
@@ -103,32 +134,54 @@ export function FolderManager({
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [folderEditor, setFolderEditor] = useState<{
+        mode: "create" | "rename";
+        id?: string;
+        name: string;
+    } | null>(null);
+    const [deleteTarget, setDeleteTarget] = useState<FolderRead | null>(null);
     const run = async (key: string, action: () => Promise<void>) => {
         setBusy(key);
         setError(null);
         try {
             await action();
+            return true;
         } catch (actionError) {
             setError(
                 actionError instanceof Error
                     ? actionError.message
                     : "資料夾操作失敗。",
             );
+            return false;
         } finally {
             setBusy(null);
         }
     };
-    const create = () => {
-        const name = window.prompt("新資料夾名稱");
-        if (name?.trim()) void run("create", () => onCreate(name.trim()));
+    const saveFolder = async () => {
+        if (!folderEditor?.name.trim()) return;
+        const editor = folderEditor;
+        const success = await run(
+            editor.mode === "create" ? "create" : editor.id || "rename",
+            () =>
+                editor.mode === "create"
+                    ? onCreate(editor.name.trim())
+                    : onRename(editor.id || "", editor.name.trim()),
+        );
+        if (success) setFolderEditor(null);
+    };
+    const confirmDelete = async () => {
+        if (!deleteTarget) return;
+        const target = deleteTarget;
+        const success = await run(target.id, () => onDelete(target.id));
+        if (success) setDeleteTarget(null);
     };
     return (
-        <div className="rounded-xl border border-border bg-card p-4">
+        <div className="relative">
             <Button
                 type="button"
                 aria-expanded={open}
-                variant="ghost"
-                className="h-auto w-full justify-between px-0 text-sm font-semibold"
+                variant="outline"
+                className="h-8 justify-between px-3 text-xs font-medium"
                 onClick={() => setOpen((value) => !value)}
             >
                 <span className="flex items-center gap-2">
@@ -138,10 +191,10 @@ export function FolderManager({
                 <ChevronDown size={15} className={open ? "rotate-180" : ""} />
             </Button>
             {open && (
-                <div className="mt-3 space-y-2">
+                    <div className="absolute right-0 top-10 z-10 w-64 space-y-2 rounded-lg border border-border bg-card p-3 shadow-lg">
                     <Button
                         type="button"
-                        onClick={create}
+                        onClick={() => setFolderEditor({ mode: "create", name: "" })}
                         disabled={busy !== null}
                         variant="outline"
                         className="h-auto w-full justify-start border-dashed px-3 py-2 text-left text-xs text-primary"
@@ -159,16 +212,13 @@ export function FolderManager({
                                 <ActionButton
                                     label={`重新命名 ${item.name}`}
                                     disabled={busy !== null}
-                                    onClick={() => {
-                                        const name = window.prompt(
-                                            "資料夾名稱",
-                                            item.name,
-                                        );
-                                        if (name?.trim())
-                                            void run(item.id, () =>
-                                                onRename(item.id, name.trim()),
-                                            );
-                                    }}
+                                    onClick={() =>
+                                        setFolderEditor({
+                                            mode: "rename",
+                                            id: item.id,
+                                            name: item.name,
+                                        })
+                                    }
                                 >
                                     <Pencil size={13} />
                                 </ActionButton>
@@ -176,16 +226,7 @@ export function FolderManager({
                                     label={`刪除 ${item.name}`}
                                     disabled={busy !== null}
                                     destructive
-                                    onClick={() => {
-                                        if (
-                                            window.confirm(
-                                                `刪除資料夾「${item.name}」？`,
-                                            )
-                                        )
-                                            void run(item.id, () =>
-                                                onDelete(item.id),
-                                            );
-                                    }}
+                                    onClick={() => setDeleteTarget(item)}
                                 >
                                     <Trash2 size={13} />
                                 </ActionButton>
@@ -195,6 +236,68 @@ export function FolderManager({
                     {error && <p className="text-xs text-red-600">{error}</p>}
                 </div>
             )}
+            <Dialog
+                open={Boolean(folderEditor)}
+                onOpenChange={(nextOpen) => !nextOpen && setFolderEditor(null)}
+            >
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>
+                            {folderEditor?.mode === "rename"
+                                ? "重新命名資料夾"
+                                : "新增資料夾"}
+                        </DialogTitle>
+                        <DialogDescription>
+                            用資料夾整理來源文件，方便在知識庫和工作流中快速篩選。
+                        </DialogDescription>
+                    </DialogHeader>
+                    <label className="grid gap-2 text-sm font-medium" htmlFor="folder-name">
+                        資料夾名稱
+                        <Input
+                            id="folder-name"
+                            value={folderEditor?.name || ""}
+                            onChange={(event) =>
+                                setFolderEditor((current) =>
+                                    current
+                                        ? { ...current, name: event.target.value }
+                                        : current,
+                                )
+                            }
+                            autoFocus
+                            maxLength={80}
+                        />
+                    </label>
+                    <DialogFooter>
+                        <Button type="button" variant="outline" onClick={() => setFolderEditor(null)}>
+                            取消
+                        </Button>
+                        <Button type="button" disabled={!folderEditor?.name.trim() || busy !== null} onClick={() => void saveFolder()}>
+                            儲存
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+            <Dialog
+                open={Boolean(deleteTarget)}
+                onOpenChange={(nextOpen) => !nextOpen && setDeleteTarget(null)}
+            >
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>刪除資料夾？</DialogTitle>
+                        <DialogDescription>
+                            刪除「{deleteTarget?.name}」後，文件仍會保留，但會移至未分類。
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button type="button" variant="outline" onClick={() => setDeleteTarget(null)}>
+                            取消
+                        </Button>
+                        <Button type="button" variant="destructive" disabled={busy !== null} onClick={() => void confirmDelete()}>
+                            刪除資料夾
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 }
@@ -207,8 +310,6 @@ export function FilesView({
     folderName,
     query,
     setQuery,
-    selected,
-    onToggle,
     onUpload,
     onUpdate,
     onDelete,
@@ -229,8 +330,6 @@ export function FilesView({
     folderName: string;
     query: string;
     setQuery: (value: string) => void;
-    selected: string[];
-    onToggle: (id: string) => void;
     onUpload: () => void;
     onUpdate: (
         id: string,
@@ -253,30 +352,50 @@ export function FilesView({
     modes: QaModeInfo[];
 }) {
     const [expanded, setExpanded] = useState<string | null>(null);
+    const [detailsDoc, setDetailsDoc] = useState<DocumentRead | null>(null);
+    const [detailsName, setDetailsName] = useState("");
+    const [detailsCategory, setDetailsCategory] = useState<Category>("bei_can");
+    const [detailsFolder, setDetailsFolder] = useState<string>("_uncategorized");
+    const [detailsRetrieval, setDetailsRetrieval] = useState(true);
+    const [categoryFilter, setCategoryFilter] = useState<"all" | Category>("all");
+    const [statusFilter, setStatusFilter] = useState("all");
     const visible = useMemo(
-        () =>
-            docs.filter(
-                (doc) =>
-                    (!folderId || doc.folder_id === folderId) &&
-                    (!query ||
-                        documentDisplayName(doc)
-                            .toLowerCase()
-                            .includes(query.toLowerCase()) ||
-                        doc.original_filename
-                            .toLowerCase()
-                            .includes(query.toLowerCase())),
-            ),
-        [docs, folderId, query],
+        () => filterDocuments(docs, {
+            folderId,
+            category: categoryFilter,
+            status: statusFilter,
+            query,
+        }),
+        [docs, folderId, query, categoryFilter, statusFilter],
     );
+    const openDetails = (doc: DocumentRead) => {
+        setDetailsDoc(doc);
+        setDetailsName(doc.display_name);
+        setDetailsCategory(doc.category);
+        setDetailsFolder(doc.folder_id || "_uncategorized");
+        setDetailsRetrieval(doc.retrieval_enabled);
+    };
+    const closeDetails = () => setDetailsDoc(null);
+    const saveDetails = async () => {
+        if (!detailsDoc || !detailsName.trim()) return;
+        await onUpdate(detailsDoc.id, {
+            display_name: detailsName.trim(),
+            category: detailsCategory,
+            folder_id: detailsFolder === "_uncategorized" ? null : detailsFolder,
+            retrieval_enabled: detailsRetrieval,
+        });
+        closeDetails();
+    };
     return (
-        <section className="p-5 lg:p-8">
-            <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
+        <section className="px-5 py-8 lg:px-10 lg:py-10">
+            <div className="mx-auto max-w-[1100px]">
+            <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
                 <div>
                     <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
                         知識庫 <ChevronRight size={13} /> {folderName}
                     </div>
-                    <h1 className="text-2xl font-semibold tracking-tight">
-                        所有文件
+                    <h1 className="text-[24px] font-semibold tracking-tight">
+                        知識庫管理
                     </h1>
                     <p className="mt-1 text-sm text-muted-foreground">
                         管理文件、分類資料，並供生成工作流程使用。
@@ -296,49 +415,9 @@ export function FilesView({
                     <span>{error || actionError}</span>
                 </div>
             )}
-            <div className="grid gap-5 lg:grid-cols-[14rem_1fr]">
-                <div className="space-y-3">
-                    <div className="rounded-xl border border-border bg-card p-3">
-                        <div className="mb-2 text-xs font-semibold text-muted-foreground">
-                            文件夾
-                        </div>
-                        <Button
-                            type="button"
-                            variant="ghost"
-                            onClick={() => setFolderId(null)}
-                            className={`mb-1 h-auto w-full justify-between px-3 py-2 text-left text-sm ${!folderId ? "bg-primary/10 text-primary" : ""}`}
-                        >
-                            <span>全部文件</span>
-                            <span>{docs.length}</span>
-                        </Button>
-                        {folders.map((item) => (
-                            <Button
-                                type="button"
-                                variant="ghost"
-                                key={item.id}
-                                onClick={() => setFolderId(item.id)}
-                                className={`mb-1 h-auto w-full justify-between px-3 py-2 text-left text-sm ${folderId === item.id ? "bg-primary/10 text-primary" : ""}`}
-                            >
-                                <span className="truncate">{item.name}</span>
-                                <span>
-                                    {
-                                        docs.filter(
-                                            (doc) => doc.folder_id === item.id,
-                                        ).length
-                                    }
-                                </span>
-                            </Button>
-                        ))}
-                    </div>
-                    <FolderManager
-                        folders={folders}
-                        onCreate={onCreateFolder}
-                        onRename={onRenameFolder}
-                        onDelete={onDeleteFolder}
-                    />
-                </div>
+            <div>
                 <div>
-                    <div className="mb-5 flex flex-wrap gap-2">
+                    <div className="mb-4 flex flex-wrap items-center gap-2">
                         <div className="flex min-w-56 flex-1 items-center gap-2 rounded-md border border-border bg-card px-3">
                             <Search size={16} />
                             <Input
@@ -350,9 +429,35 @@ export function FilesView({
                                 className="h-8 border-0 bg-transparent py-2 text-sm shadow-none focus-visible:ring-0"
                             />
                         </div>
-                        <span className="flex items-center rounded-md bg-secondary px-3 text-xs text-muted-foreground">
-                            已選取 {selected.length} / {MAX_DOCUMENTS}
-                        </span>
+                        <FolderSelect
+                            folders={folders}
+                            value={folderId || "_all"}
+                            onValueChange={(value) => setFolderId(value === "_all" ? null : value)}
+                            includeAll
+                            size="sm"
+                            className="w-36"
+                            aria-label="資料夾篩選"
+                        />
+                        <CategorySelect
+                            modes={modes}
+                            value={categoryFilter}
+                            onValueChange={setCategoryFilter}
+                            includeAll
+                            size="sm"
+                            className="w-32"
+                            aria-label="分類篩選"
+                        />
+                        <Select items={STATUS_LABELS} value={statusFilter} onValueChange={(value) => setStatusFilter(value || "all")}>
+                            <SelectTrigger size="sm" className="w-32" aria-label="狀態篩選"><SelectValue>{(value) => STATUS_LABELS[value as string] ?? "全部狀態"}</SelectValue></SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="all">全部狀態</SelectItem>
+                                <SelectItem value="ready">可使用</SelectItem>
+                                <SelectItem value="indexing">建立索引中</SelectItem>
+                                <SelectItem value="queued">等待處理</SelectItem>
+                                <SelectItem value="failed">處理失敗</SelectItem>
+                            </SelectContent>
+                        </Select>
+                        <FolderManager folders={folders} onCreate={onCreateFolder} onRename={onRenameFolder} onDelete={onDeleteFolder} />
                     </div>
                     <div className="overflow-hidden rounded-xl border border-border bg-card">
                         <div className="border-b border-border px-4 py-3 text-xs text-muted-foreground">
@@ -360,15 +465,13 @@ export function FilesView({
                             {folderName}
                         </div>
                         <div className="overflow-x-auto">
-                            <table className="w-full min-w-[900px] text-left text-sm">
+                            <table className="w-full min-w-[820px] text-left text-sm">
                                 <thead className="border-b border-border bg-muted/40 text-xs text-muted-foreground">
                                     <tr>
-                                        <th className="w-10 px-4 py-3" />
                                         <th className="px-3 py-3">名稱</th>
                                         <th className="px-3 py-3">分類</th>
                                         <th className="px-3 py-3">資料夾</th>
                                         <th className="px-3 py-3">修改時間</th>
-                                        <th className="px-3 py-3">大小</th>
                                         <th className="px-3 py-3">狀態</th>
                                         <th className="px-3 py-3">操作</th>
                                     </tr>
@@ -383,19 +486,6 @@ export function FilesView({
                                                 key={doc.id}
                                                 className="border-b border-border last:border-0 hover:bg-muted/30"
                                             >
-                                                <td className="px-4 py-3 align-top">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={selected.includes(
-                                                            doc.id,
-                                                        )}
-                                                        disabled={deleting}
-                                                        onChange={() =>
-                                                            onToggle(doc.id)
-                                                        }
-                                                        aria-label={`選取 ${documentDisplayName(doc)}`}
-                                                    />
-                                                </td>
                                                 <td className="px-3 py-3 align-top">
                                                     <div className="flex items-start gap-3">
                                                         <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-secondary">
@@ -438,48 +528,16 @@ export function FilesView({
                                                         </div>
                                                     </div>
                                                 </td>
-                                                <td className="px-3 py-3 align-top">
-                                                    <Select
-                                                        value={doc.category}
-                                                        disabled={deleting}
-                                                        onValueChange={(value) =>
-                                                            void onUpdate(doc.id, { category: value as Category })
-                                                        }
-                                                    >
-                                                        <SelectTrigger size="sm" className="max-w-32" aria-label={`分類 ${documentDisplayName(doc)}`}>
-                                                            <SelectValue />
-                                                        </SelectTrigger>
-                                                        <SelectContent>
-                                                            {modes.map((mode) => <SelectItem value={mode.mode} key={mode.mode}>{mode.label}</SelectItem>)}
-                                                        </SelectContent>
-                                                    </Select>
+                                                <td className="px-3 py-3 align-top text-xs text-muted-foreground">
+                                                    {modes.find((mode) => mode.mode === doc.category)?.label || doc.category}
                                                 </td>
-                                                <td className="px-3 py-3 align-top">
-                                                    <Select
-                                                        value={doc.folder_id || "_uncategorized"}
-                                                        disabled={deleting}
-                                                        onValueChange={(value) =>
-                                                            void onUpdate(doc.id, { folder_id: value === "_uncategorized" ? null : value })
-                                                        }
-                                                    >
-                                                        <SelectTrigger size="sm" className="max-w-32" aria-label={`資料夾 ${documentDisplayName(doc)}`}>
-                                                            <SelectValue />
-                                                        </SelectTrigger>
-                                                        <SelectContent>
-                                                            <SelectItem value="_uncategorized">未分類</SelectItem>
-                                                            {folders.map((item) => <SelectItem value={item.id} key={item.id}>{item.name}</SelectItem>)}
-                                                        </SelectContent>
-                                                    </Select>
+                                                <td className="px-3 py-3 align-top text-xs text-muted-foreground">
+                                                    {doc.folder_id ? folders.find((folder) => folder.id === doc.folder_id)?.name || "資料夾" : "未分類"}
                                                 </td>
                                                 <td className="px-3 py-3 align-top text-xs text-muted-foreground">
                                                     {formatDate(
                                                         doc.updated_at ||
                                                             doc.created_at,
-                                                    )}
-                                                </td>
-                                                <td className="px-3 py-3 align-top text-xs text-muted-foreground">
-                                                    {formatBytes(
-                                                        doc.size_bytes,
                                                     )}
                                                 </td>
                                                 <td className="px-3 py-3 align-top">
@@ -498,7 +556,7 @@ export function FilesView({
                                                         className="h-auto gap-1.5 p-0 text-xs"
                                                     >
                                                         <span
-                                                            className={`size-1.5 rounded-full ${doc.status === "ready" ? "bg-emerald-500" : doc.status === "failed" || doc.status === "delete_failed" ? "bg-red-500" : doc.status === "deleting" ? "bg-slate-400" : "bg-amber-500"}`}
+                                                            className={`size-1.5 rounded-full ${doc.status === "ready" ? "bg-emerald-500" : doc.status === "indexing" ? "bg-info" : doc.status === "failed" || doc.status === "delete_failed" ? "bg-red-500" : doc.status === "deleting" ? "bg-slate-400" : "bg-amber-500"}`}
                                                         />
                                                         {statusLabel(
                                                             doc.status,
@@ -522,115 +580,18 @@ export function FilesView({
                                                     </Button>
                                                 </td>
                                                 <td className="px-3 py-3 align-top">
-                                                    <div className="flex items-center gap-0">
-                                                        <ActionButton
-                                                            label="重新命名"
-                                                            disabled={deleting}
-                                                            onClick={() => {
-                                                                const name =
-                                                                    window.prompt(
-                                                                        "文件名稱",
-                                                                        doc.display_name,
-                                                                    );
-                                                                if (
-                                                                    name?.trim()
-                                                                )
-                                                                    void onUpdate(
-                                                                        doc.id,
-                                                                        {
-                                                                            display_name:
-                                                                                name.trim(),
-                                                                        },
-                                                                    );
-                                                            }}
-                                                        >
-                                                            <Pencil size={14} />
-                                                        </ActionButton>
-                                                        <ActionButton
-                                                            label={
-                                                                doc.retrieval_enabled
-                                                                    ? "停用檢索"
-                                                                    : "啟用檢索"
-                                                            }
-                                                            disabled={deleting}
-                                                            onClick={() =>
-                                                                void onUpdate(
-                                                                    doc.id,
-                                                                    {
-                                                                        retrieval_enabled:
-                                                                            !doc.retrieval_enabled,
-                                                                    },
-                                                                )
-                                                            }
-                                                        >
-                                                            <span
-                                                                className={`block size-3 rounded-full border-2 ${doc.retrieval_enabled ? "border-emerald-500 bg-emerald-500" : "border-muted-foreground"}`}
-                                                            />
-                                                        </ActionButton>
-                                                        <ActionButton
-                                                            label="下載"
-                                                            disabled={deleting}
-                                                            onClick={() =>
-                                                                onDownload(doc)
-                                                            }
-                                                        >
-                                                            <Download
-                                                                size={14}
-                                                            />
-                                                        </ActionButton>
-                                                        <ActionButton
-                                                            label={
-                                                                doc.status ===
-                                                                "delete_failed"
-                                                                    ? "重試刪除"
-                                                                    : "刪除"
-                                                            }
-                                                            disabled={deleting}
-                                                            destructive
-                                                            onClick={() =>
-                                                                onDelete(doc)
-                                                            }
-                                                        >
-                                                            {doc.status ===
-                                                            "delete_failed" ? (
-                                                                <RefreshCw
-                                                                    size={14}
-                                                                />
-                                                            ) : (
-                                                                <Trash2
-                                                                    size={14}
-                                                                />
-                                                            )}
-                                                        </ActionButton>
-                                                        <ActionButton
-                                                            label="更多"
-                                                            onClick={() =>
-                                                                setExpanded(
-                                                                    expandedRow
-                                                                        ? null
-                                                                        : doc.id,
-                                                                )
-                                                            }
-                                                        >
-                                                            <MoreHorizontal
-                                                                size={14}
-                                                            />
-                                                        </ActionButton>
-                                                    </div>
-                                                    {doc.status ===
-                                                        "delete_failed" && (
-                                                        <Button
-                                                            type="button"
-                                                            onClick={() =>
-                                                                onDelete(doc)
-                                                            }
-                                                            variant="link"
-                                                            size="sm"
-                                                            className="mt-1 h-auto p-0 text-xs text-red-600"
-                                                        >
-                                                            重試刪除
-                                                        </Button>
-                                                    )}
+                                                    <DropdownMenu>
+                                                        <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label={`更多操作：${documentDisplayName(doc)}`} />}>
+                                                            <MoreHorizontal size={15} />
+                                                        </DropdownMenuTrigger>
+                                                        <DropdownMenuContent align="end" className="w-40">
+                                                            <DropdownMenuItem onClick={() => openDetails(doc)}><Pencil size={14} />編輯文件</DropdownMenuItem>
+                                                            <DropdownMenuItem onClick={() => setExpanded(expandedRow ? null : doc.id)}><FileText size={14} />索引詳情</DropdownMenuItem>
+                                                            <DropdownMenuItem disabled={deleting} onClick={() => onDownload(doc)}><Download size={14} />下載文件</DropdownMenuItem>
+                                                            <DropdownMenuSeparator />
+                                                            <DropdownMenuItem variant="destructive" disabled={deleting} onClick={() => onDelete(doc)}>{doc.status === "delete_failed" ? <RefreshCw size={14} /> : <Trash2 size={14} />}{doc.status === "delete_failed" ? "重試刪除" : "刪除文件"}</DropdownMenuItem>
+                                                        </DropdownMenuContent>
+                                                    </DropdownMenu>
                                                     {doc.status ===
                                                         "deleting" && (
                                                         <div className="mt-1 text-xs text-muted-foreground">
@@ -651,6 +612,48 @@ export function FilesView({
                         )}
                     </div>
                 </div>
+            </div>
+            <Dialog open={Boolean(detailsDoc)} onOpenChange={(open) => !open && closeDetails()}>
+                <DialogContent className="sm:max-w-lg">
+                    <DialogHeader>
+                        <DialogTitle>編輯文件</DialogTitle>
+                        <DialogDescription>更新文件的顯示名稱、分類、資料夾與檢索設定。</DialogDescription>
+                    </DialogHeader>
+                    <div className="grid gap-4">
+                        <label className="grid gap-2 text-sm font-medium" htmlFor="document-display-name">
+                            文件名稱
+                            <Input id="document-display-name" value={detailsName} onChange={(event) => setDetailsName(event.target.value)} />
+                        </label>
+                        <div className="grid gap-2 text-sm font-medium">
+                            分類
+                            <CategorySelect
+                                modes={modes}
+                                value={detailsCategory}
+                                onValueChange={(value) => setDetailsCategory(value as Category)}
+                                aria-label="文件分類"
+                            />
+                        </div>
+                        <div className="grid gap-2 text-sm font-medium">
+                            資料夾
+                            <FolderSelect
+                                folders={folders}
+                                value={detailsFolder}
+                                onValueChange={setDetailsFolder}
+                                aria-label="文件資料夾"
+                            />
+                        </div>
+                        <label className="flex items-center gap-2 text-sm">
+                            <input type="checkbox" checked={detailsRetrieval} onChange={(event) => setDetailsRetrieval(event.target.checked)} />
+                            啟用檢索，允許對話引用此文件
+                        </label>
+                        {detailsDoc && <p className="text-xs text-muted-foreground">原始檔案：{detailsDoc.original_filename} · {formatBytes(detailsDoc.size_bytes)}</p>}
+                    </div>
+                    <DialogFooter>
+                        <Button type="button" variant="outline" onClick={closeDetails}>取消</Button>
+                        <Button type="button" disabled={!detailsName.trim()} onClick={() => void saveDetails()}>儲存變更</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
             </div>
         </section>
     );

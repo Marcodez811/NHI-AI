@@ -32,7 +32,7 @@ Analysts upload and organize policy documents, wait for background indexing, sel
 
 ## Brand Commitments
 
-Retain the 健保署 AI name and the existing blue, light/dark CSS-variable theme while standardizing implementation on shadcn/base-nova components.
+Retain the 健保署 AI name and use the official NHI logo as the brand mark. The interface uses NHI green as its primary action and wayfinding color, NHI blue as a supporting accent, and white/grey surfaces across light and dark CSS-variable themes while standardizing implementation on shadcn/base-nova components.
 
 ## Evidence on Hand
 

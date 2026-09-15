@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DocumentRead } from "../lib/api";
-import { SlidesView } from "../components/workspace/WorkspaceViews";
+import { SlidesView } from "../components/workspace/SlidesView";
 
 const document = (overrides: Partial<DocumentRead> = {}): DocumentRead => ({
     id: "doc-1",
@@ -105,7 +105,10 @@ describe("SlidesView", () => {
 
         expect(screen.getByText("來源已就緒，可以生成。")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "生成簡報" })).toBeEnabled();
-        expect(screen.getByRole("button", { name: "正式" })).toHaveAttribute("aria-pressed", "true");
+        const toneSelector = screen.getByRole("button", { name: "正式" });
+        expect(toneSelector).toHaveAttribute("aria-pressed", "true");
+        expect(toneSelector).toHaveTextContent("正式");
+        expect(toneSelector).not.toHaveTextContent("formal");
         expect(screen.getByLabelText("簡報標題")).toHaveValue("政策重點整理");
     });
 

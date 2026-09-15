@@ -8,29 +8,16 @@ export const metadata: Metadata = {
     title: "健保署 AI",
     description: "以文件為核心的內部 AI 工作台，支援對話與簡報生成。",
     icons: {
-        icon: [
-            {
-                url: "/icon-light-32x32.png",
-                media: "(prefers-color-scheme: light)",
-            },
-            {
-                url: "/icon-dark-32x32.png",
-                media: "(prefers-color-scheme: dark)",
-            },
-            {
-                url: "/icon.svg",
-                type: "image/svg+xml",
-            },
-        ],
-        apple: "/apple-icon.png",
+        icon: "/nhi-logo-small.png",
+        apple: "/nhi-logo-small.png",
     },
 };
 
 export const viewport: Viewport = {
     colorScheme: "light dark",
     themeColor: [
-        { media: "(prefers-color-scheme: light)", color: "white" },
-        { media: "(prefers-color-scheme: dark)", color: "black" },
+        { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+        { media: "(prefers-color-scheme: dark)", color: "#171c1a" },
     ],
 };
 
@@ -44,7 +31,7 @@ export default function RootLayout({
             <body className="antialiased">
                 <ThemeProvider
                     attribute="class"
-                    defaultTheme="system"
+                    defaultTheme="light"
                     enableSystem
                     disableTransitionOnChange
                 >

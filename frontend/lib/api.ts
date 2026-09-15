@@ -7,27 +7,20 @@
  */
 
 export type Category = "legislative_qa" | "public_opinion" | "bei_can";
-/** Backend names this enum `QaMode`; Category remains the UI's historical name. */
-export type QaMode = Category;
-
 export const CATEGORY_VALUES: readonly Category[] = [
     "legislative_qa",
     "public_opinion",
     "bei_can",
 ];
 
-export const MAX_DOCUMENTS = 20;
-export const MAX_CHAT_DOCUMENTS = 20;
-export const MAX_QUESTION_LENGTH = 20_000;
+export const CATEGORY_LABELS: Record<Category, string> = {
+    legislative_qa: "立院問答",
+    public_opinion: "輿情",
+    bei_can: "備參",
+};
 
-/** Mirrors the backend's accepted upload extensions. */
-export const SUPPORTED_DOCUMENT_EXTENSIONS = [
-    ".pdf",
-    ".docx",
-    ".md",
-    ".markdown",
-    ".txt",
-] as const;
+export const MAX_DOCUMENTS = 20;
+export const MAX_QUESTION_LENGTH = 20_000;
 
 /** Mirrors the source formats currently usable by the slide worker. */
 export const SUPPORTED_SLIDE_EXTENSIONS = [
@@ -37,10 +30,6 @@ export const SUPPORTED_SLIDE_EXTENSIONS = [
     ".markdown",
     ".txt",
 ] as const;
-
-export type SupportedDocumentExtension =
-    (typeof SUPPORTED_DOCUMENT_EXTENSIONS)[number];
-export type SupportedSlideExtension = (typeof SUPPORTED_SLIDE_EXTENSIONS)[number];
 
 export type DocumentStatus =
     | "queued"
@@ -72,9 +61,6 @@ export interface DocumentRead {
     created_at: string;
     updated_at: string;
 }
-
-/** Existing callers use this name; it is an exact alias, not a second shape. */
-export type DocumentRecord = DocumentRead;
 
 /** Display-only fallback; neither field is renamed in the transport contract. */
 export function documentDisplayName(
@@ -115,11 +101,11 @@ export interface FolderRead {
     updated_at: string;
 }
 
-export interface FolderCreate {
+interface FolderCreate {
     name: string;
 }
 
-export type FolderUpdate = FolderCreate;
+type FolderUpdate = FolderCreate;
 
 export interface IngestionJobRead {
     id: string;
@@ -177,12 +163,6 @@ export interface ChatRequest {
     document_ids?: string[];
     max_num_results?: number;
     include_search_results?: boolean;
-}
-
-export interface ChatResponse {
-    answer: string;
-    mode: Category;
-    citations: Citation[];
 }
 
 /** Stable, workflow-facing lifecycle phases. Details stay server-side. */
@@ -512,9 +492,6 @@ export async function renameFolder(id: string, name: string): Promise<FolderRead
     });
 }
 
-/** Alias that mirrors the backend operation's generic update terminology. */
-export const updateFolder = renameFolder;
-
 export async function deleteFolder(id: string): Promise<void> {
     await request<void>(`/documents/folders/${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -546,26 +523,6 @@ export async function getIngestionStatus(id: string): Promise<IngestionJobRead> 
 
 export function getDocumentDownloadUrl(id: string): string {
     return `${API_ROOT}/documents/${encodeURIComponent(id)}/download`;
-}
-
-/** Fetches the source bytes while retaining the same normalized API errors. */
-export async function downloadDocument(id: string): Promise<Blob> {
-    let response: Response;
-    try {
-        response = await fetch(getDocumentDownloadUrl(id), {
-            headers: { Accept: "application/octet-stream" },
-        });
-    } catch {
-        throw new ApiError(0, "文件下載暫時無法使用，請稍後再試。");
-    }
-    if (!response.ok) {
-        const body = await readResponseBody(response);
-        throw new ApiError(response.status, getApiErrorMessage(body), {
-            code: errorCode(body),
-            details: body,
-        });
-    }
-    return response.blob();
 }
 
 export async function fetchQaModes(): Promise<QaModeInfo[]> {
@@ -778,7 +735,7 @@ export async function fetchAgentRunEvents(
     );
 }
 
-export function getSlideDownloadUrl(id: string): string {
+function getSlideDownloadUrl(id: string): string {
     return `${API_ROOT}/slides/jobs/${encodeURIComponent(id)}/download`;
 }
 

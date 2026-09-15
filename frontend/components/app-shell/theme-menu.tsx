@@ -6,7 +6,8 @@ import { useTheme } from "next-themes"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -19,7 +20,7 @@ const themes = [
 ] as const
 
 export function ThemeMenu() {
-  const { setTheme } = useTheme()
+  const { theme, setTheme } = useTheme()
 
   return (
     <DropdownMenu>
@@ -31,14 +32,19 @@ export function ThemeMenu() {
         <Moon className="hidden size-4 dark:block" aria-hidden="true" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-36">
-        <DropdownMenuLabel>顯示模式</DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        {themes.map(({ value, label, icon: Icon }) => (
-          <DropdownMenuItem key={value} onClick={() => setTheme(value)}>
-            <Icon className="size-4" aria-hidden="true" />
-            {label}
-          </DropdownMenuItem>
-        ))}
+        <DropdownMenuRadioGroup
+          value={theme ?? "system"}
+          onValueChange={(value) => setTheme(value as (typeof themes)[number]["value"])}
+        >
+          <DropdownMenuLabel>顯示模式</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {themes.map(({ value, label, icon: Icon }) => (
+            <DropdownMenuRadioItem key={value} value={value}>
+              <Icon className="size-4" aria-hidden="true" />
+              {label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </DropdownMenu>
   )

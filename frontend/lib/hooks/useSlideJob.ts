@@ -7,13 +7,7 @@ import {
     getSlideJob,
     SlideJob,
 } from "../api/slides";
-import {
-    AgentJobClientPhase,
-    useAgentJob,
-    UseAgentJobResult,
-} from "./useAgentJob";
-
-export type SlideJobPhase = AgentJobClientPhase;
+import { useAgentJob, UseAgentJobResult } from "./useAgentJob";
 
 export interface UseSlideJobOptions {
     /** Delay between healthy polls. Defaults to two seconds. */

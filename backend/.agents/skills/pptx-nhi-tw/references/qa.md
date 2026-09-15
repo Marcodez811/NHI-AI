@@ -7,6 +7,10 @@ After a complete draft, render it to `work/rendered/preview/` and inspect every
 slide at full size. Check narrative progression, factual consistency, light
 theme, official-logo treatment, clipping, overlap, contrast, label legibility,
 alignment, template residue, text density, and audience-facing citations.
+Compare representative generated slides with the chosen reference-family preview
+from `reference-style.md`: headline scale, main graphic density, color roles,
+and header/footer geometry should visibly relate to that family. Do not treat
+reference facts or decorative assets as authorized presentation content.
 Factual slides must cite recognizable filenames with the available section,
 page, or line locator. Never show EvidenceStore names, paths, hashes, or block
 IDs as citations or generation explanations; legitimate source discussion of

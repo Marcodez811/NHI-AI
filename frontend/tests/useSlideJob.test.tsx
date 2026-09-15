@@ -181,4 +181,45 @@ describe("useSlideJob", () => {
         });
         expect(api.getSlideJob).not.toHaveBeenCalled();
     });
+
+    it("ignores a stale poll response after reset", async () => {
+        let resolveJob!: (value: SlideJob) => void;
+        vi.mocked(api.getSlideJob).mockImplementationOnce(
+            () => new Promise((resolve) => { resolveJob = resolve; }),
+        );
+        const { result } = renderHook(() =>
+            useSlideJob({ pollIntervalMs: 250, maxPollIntervalMs: 500 }),
+        );
+
+        await act(async () => {
+            await result.current.startJob(payload);
+            await vi.advanceTimersByTimeAsync(250);
+        });
+        act(() => result.current.reset());
+        await act(async () => {
+            resolveJob(job({ status: "completed", phase: "completed" }));
+            await Promise.resolve();
+        });
+
+        expect(result.current.phase).toBe("idle");
+        expect(result.current.job).toBeNull();
+    });
+
+    it("runs when session storage is unavailable", async () => {
+        vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+            throw new DOMException("blocked", "SecurityError");
+        });
+        vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+            throw new DOMException("blocked", "SecurityError");
+        });
+        const { result } = renderHook(() =>
+            useSlideJob({ pollIntervalMs: 250, maxPollIntervalMs: 500 }),
+        );
+
+        await act(async () => {
+            await result.current.startJob(payload);
+        });
+        expect(result.current.job?.job_id).toBe("job-1");
+        expect(result.current.phase).toBe("polling");
+    });
 });

@@ -5,16 +5,13 @@ export {
   supportsSlideGeneration,
   createSlideJob,
   getSlideJob,
-  getSlideDownloadUrl,
   slideDownloadUrl,
 } from "../api";
 
 export type {
   DocumentRead,
   AgentJobPhase,
-  SlideJobStatus,
   CreateSlidesJobResponse,
   CreateSlidePayload,
-  SlidesJobStatusResponse,
   SlideJob,
 } from "../api";

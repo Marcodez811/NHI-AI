@@ -110,7 +110,7 @@ export function useAgentDevRuns(
             // sequence target. The event stream is paginated, and fetching
             // only one page can otherwise leave a terminal run incomplete.
             const nextSnapshot = await fetchAgentRun(runId, { signal });
-            if (!mounted.current || signal.aborted || selectedRunIdRef.current !== runId) return;
+            if (typeof window === "undefined" || !mounted.current || signal.aborted || selectedRunIdRef.current !== runId) return;
 
             let page = await fetchAgentRunEvents(runId, {
                 after: eventCursor.current,
@@ -139,12 +139,12 @@ export function useAgentDevRuns(
                     limit: eventLimit,
                     signal,
                 });
-                if (!mounted.current || signal.aborted || selectedRunIdRef.current !== runId) return;
+                if (typeof window === "undefined" || !mounted.current || signal.aborted || selectedRunIdRef.current !== runId) return;
                 const advanced = consumePage(page.events, page.next_after);
                 if (!advanced || cursor <= previousCursor) break;
             }
 
-            if (!mounted.current || signal.aborted || selectedRunIdRef.current !== runId) return;
+            if (typeof window === "undefined" || !mounted.current || signal.aborted || selectedRunIdRef.current !== runId) return;
             eventCursor.current = cursor;
             setSnapshot(nextSnapshot);
             terminalRunRef.current = isTerminal(nextSnapshot.status) && cursor >= nextSnapshot.last_sequence;
@@ -154,10 +154,10 @@ export function useAgentDevRuns(
             );
             setLastUpdatedAt(new Date());
         } catch (requestError) {
-            if (!mounted.current || signal.aborted) return;
+            if (typeof window === "undefined" || !mounted.current || signal.aborted) return;
             setDetailError(asApiError(requestError, "代理執行詳情暫時無法載入。"));
         } finally {
-            if (mounted.current) setDetailLoading(false);
+            if (typeof window !== "undefined" && mounted.current) setDetailLoading(false);
         }
     }, [eventLimit]);
 
@@ -170,7 +170,7 @@ export function useAgentDevRuns(
             const response: AgentRunListResponse = await fetchAgentRuns(runLimit, {
                 signal: controller.signal,
             });
-            if (!mounted.current || controller.signal.aborted) return;
+            if (typeof window === "undefined" || !mounted.current || controller.signal.aborted) return;
             setRuns(response.runs);
             setError(null);
             setLoading(false);
@@ -201,7 +201,7 @@ export function useAgentDevRuns(
                 resetEvents();
             }
         } catch (requestError) {
-            if (!mounted.current || controller.signal.aborted) return;
+            if (typeof window === "undefined" || !mounted.current || controller.signal.aborted) return;
             setError(asApiError(requestError, "代理執行清單暫時無法載入。"));
             setLoading(false);
         } finally {

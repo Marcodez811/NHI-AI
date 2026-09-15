@@ -4,6 +4,7 @@ import { ChatView } from "./ChatView";
 import { FilesView } from "./FilesView";
 import { SlidesView } from "./SlidesView";
 import { UploadModal } from "./UploadModal";
+import { WorkflowList } from "./WorkflowList";
 import type { WorkspaceController } from "../../lib/hooks/useWorkspaceController";
 import type { View } from "../../lib/workspace/types";
 
@@ -38,6 +39,9 @@ export function WorkspaceContent({
                     send={workspace.send}
                     scope={workspace.scope}
                     setScope={workspace.changeScope}
+                    docs={workspace.catalog.documents}
+                    selected={workspace.chatSelected}
+                    setSelected={workspace.setChatSelected}
                     modes={workspace.modes}
                     modesError={workspace.qaError}
                     retryModes={() => void workspace.loadModes()}
@@ -72,8 +76,6 @@ export function WorkspaceContent({
                     folderName={workspace.folderName}
                     query={workspace.query}
                     setQuery={workspace.setQuery}
-                    selected={workspace.selected}
-                    onToggle={workspace.toggleSelected}
                     onUpload={() => workspace.setUploadOpen(true)}
                     onUpdate={workspace.mutateDocument}
                     onDelete={workspace.deleteDocument}
@@ -116,6 +118,7 @@ export function WorkspaceContent({
                     onNewPresentation={workspace.startNewSlides}
                 />
             )}
+            {view === "workflows" && <WorkflowList />}
             {workspace.uploadOpen && (
                 <UploadModal
                     pending={workspace.pending}

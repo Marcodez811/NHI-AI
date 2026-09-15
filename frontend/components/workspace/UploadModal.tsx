@@ -10,8 +10,8 @@ import {
     DialogHeader,
     DialogTitle,
 } from "../ui/dialog";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import type { Category, FolderRead, QaModeInfo } from "../../lib/api/documents";
+import { CategorySelect, FolderSelect } from "./DocumentSelects";
 
 export function UploadModal({
     pending,
@@ -48,20 +48,19 @@ export function UploadModal({
                 <div className="grid gap-4 sm:grid-cols-2">
                     <div className="grid gap-2 text-sm font-medium">
                         <span>文件分類</span>
-                        <Select value={category} onValueChange={(value) => setCategory(value as Category)}>
-                            <SelectTrigger><SelectValue /></SelectTrigger>
-                            <SelectContent>{modes.map((mode) => <SelectItem key={mode.mode} value={mode.mode}>{mode.label}</SelectItem>)}</SelectContent>
-                        </Select>
+                        <CategorySelect
+                            modes={modes}
+                            value={category}
+                            onValueChange={(value) => setCategory(value as Category)}
+                        />
                     </div>
                     <div className="grid gap-2 text-sm font-medium">
                         <span>資料夾</span>
-                        <Select value={folderId || "_uncategorized"} onValueChange={(value) => setFolderId(value === "_uncategorized" ? null : value)}>
-                            <SelectTrigger><SelectValue /></SelectTrigger>
-                            <SelectContent>
-                                <SelectItem value="_uncategorized">未分類</SelectItem>
-                                {folders.map((folder) => <SelectItem value={folder.id} key={folder.id}>{folder.name}</SelectItem>)}
-                            </SelectContent>
-                        </Select>
+                        <FolderSelect
+                            folders={folders}
+                            value={folderId || "_uncategorized"}
+                            onValueChange={(value) => setFolderId(value === "_uncategorized" ? null : value)}
+                        />
                     </div>
                 </div>
                 <label className="mt-4 flex min-h-36 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-muted/30 text-center text-sm text-muted-foreground">

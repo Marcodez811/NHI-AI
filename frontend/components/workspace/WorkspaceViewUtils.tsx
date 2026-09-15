@@ -2,10 +2,8 @@ import type { ReactNode } from "react";
 import { Button } from "../ui/button";
 
 import type {
-    Category,
     DocumentRead,
     DocumentStatus,
-    QaModeInfo,
 } from "../../lib/api/documents";
 
 export function documentDisplayName(document: DocumentRead): string {
@@ -58,10 +56,6 @@ export function extensionOf(document: DocumentRead): string {
     const name = document.original_filename.toLowerCase();
     const dot = name.lastIndexOf(".");
     return dot >= 0 ? name.slice(dot) : "";
-}
-
-export function categoryLabel(modes: QaModeInfo[], category: Category): string {
-    return modes.find((mode) => mode.mode === category)?.label ?? category;
 }
 
 export function ActionButton({

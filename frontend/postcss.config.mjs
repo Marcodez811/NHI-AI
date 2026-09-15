@@ -1,4 +1,4 @@
-/** @type {import('postcss-load-config').Config} */
+/** @type {import('postcss').ProcessOptions & { plugins: Record<string, object> }} */
 const config = {
   plugins: {
     '@tailwindcss/postcss': {},

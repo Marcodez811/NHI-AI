@@ -1,4 +1,5 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { StrictMode, useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -119,6 +120,28 @@ describe("useRetrievalStatus", () => {
 describe("ChatView retrieval empty states", () => {
     afterEach(() => cleanup());
 
+    it("opens and changes scope repeatedly with real parent state updates", async () => {
+        const user = userEvent.setup();
+        const options = [...modes, { mode: "bei_can" as const, label: "備參", description: "" }];
+        function Harness() {
+            const [scope, setScope] = useState<"legislative_qa" | "bei_can">("legislative_qa");
+            return <StrictMode><ChatView
+                chat={[]} draft="" setDraft={vi.fn()} send={vi.fn()}
+                scope={scope} setScope={(value) => setScope(value as typeof scope)}
+                modes={options} modesError={null} retryModes={vi.fn()}
+                busy={false} error={null} eligibilityError={null}
+                retrievalStatus={status()} hasAnyReadyDocuments hasCategoryReadyDocuments={false}
+            /></StrictMode>;
+        }
+        render(<Harness />);
+        for (const label of ["備參", "立法院問答", "備參"]) {
+            const trigger = screen.getByRole("combobox", { name: "搜尋範圍" });
+            fireEvent.mouseDown(trigger, { button: 0 });
+            await user.click(await screen.findByRole("option", { name: label }));
+            expect(trigger).toHaveTextContent(label);
+        }
+    });
+
     it("guides users to upload the first document and hides the composer", async () => {
         const user = userEvent.setup();
         const onUploadSources = vi.fn();
@@ -141,7 +164,9 @@ describe("ChatView retrieval empty states", () => {
         renderChat({ hasCategoryReadyDocuments: false });
 
         expect(screen.getByText("此搜尋範圍尚無可用文件")).toBeInTheDocument();
-        expect(screen.getByRole("combobox", { name: "搜尋範圍" })).toBeInTheDocument();
+        const scopeSelector = screen.getByRole("combobox", { name: "搜尋範圍" });
+        expect(scopeSelector).toHaveTextContent("立法院問答");
+        expect(scopeSelector).not.toHaveTextContent("legislative_qa");
     });
 
     it("offers retry when vector-store readiness fails", async () => {
@@ -157,4 +182,3 @@ describe("ChatView retrieval empty states", () => {
         expect(retryRetrieval).toHaveBeenCalledOnce();
     });
 });
-
