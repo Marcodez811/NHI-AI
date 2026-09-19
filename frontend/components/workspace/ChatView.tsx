@@ -7,6 +7,7 @@ import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
+import { MessageResponse } from "../ai-elements/message";
 import type { Category, ChatStatusPhase, QaModeInfo } from "../../lib/api/chat";
 import type { DocumentRead } from "../../lib/api/documents";
 import { MAX_DOCUMENTS, documentDisplayName } from "../../lib/api/documents";
@@ -116,10 +117,10 @@ function ChatSourcePicker({
 }
 
 const SUGGESTED_QUESTIONS = [
-    "整理近期健保政策相關輿情",
-    "找出立法院近期最常詢問的問題",
-    "比較不同備參資料中的政策內容",
-    "整理資料中的主要政策風險",
+    "中醫門診114年一般服務醫療給付費用成長率",
+    "114年編列之品質保證保留款預算",
+    "健保給付首款AI醫材之113年成效",
+    "114年區域醫院固接網路頻寬月租費支付上限",
 ] as const;
 
 function ChatWelcome({ setDraft }: { setDraft: (value: string) => void }) {
@@ -129,7 +130,7 @@ function ChatWelcome({ setDraft }: { setDraft: (value: string) => void }) {
             <p className="mt-2 text-sm text-muted-foreground">
                 針對已上傳的資料提問，快速找到可信的答案
             </p>
-            <div className="mx-auto mt-8 grid max-w-xl gap-2 sm:grid-cols-2">
+            <div className="mx-auto mt-8 grid max-w-2xl gap-2 sm:grid-cols-2">
                 {SUGGESTED_QUESTIONS.map((text) => (
                     <Button
                         type="button"
@@ -147,48 +148,79 @@ function ChatWelcome({ setDraft }: { setDraft: (value: string) => void }) {
     );
 }
 
-function ChatConversation({
-    chat,
-    busy,
-}: {
-    chat: ChatMessage[];
-    busy: boolean;
-}) {
+function ChatCitations({ citations }: { citations: NonNullable<ChatMessage["citations"]> }) {
+    if (!citations.length) return null;
+
     return (
-        <div className="flex flex-col gap-7">
-            {chat.map((message, index) => (
-                <div
-                    key={message.id ?? `${index}-${message.role}`}
-                    className={`flex gap-3 ${message.role === "user" ? "justify-end" : ""}`}
-                >
-                    <div
-                        className={`max-w-[85%] rounded-xl px-4 py-3 text-sm leading-7 ${message.role === "user" ? "bg-primary text-primary-foreground" : "border border-border bg-card"}`}
-                    >
-                        <div className="whitespace-pre-wrap">
-                            {message.text || (busy && index === chat.length - 1 ? (
-                                <span role="status" aria-live="polite">
-                                    {message.status ? CHAT_STATUS_LABELS[message.status] : "正在處理問題…"}
+        <div className="mt-6 border-t border-border/60 pt-4">
+            <div className="mb-3 text-xs font-medium text-muted-foreground">參考來源</div>
+            <div className="flex flex-col gap-2">
+                {citations.map((citation, index) => {
+                    const excerpt = citation.text?.trim();
+                    const filename = citation.filename?.trim();
+                    const showExcerpt = excerpt && excerpt !== filename && excerpt !== `【${filename}】`;
+
+                    return (
+                        <div
+                            key={`${citation.document_id || citation.filename || "source"}-${index}`}
+                            className="min-w-0 rounded-lg border border-border/50 bg-muted/30 px-3 py-2.5 text-xs"
+                        >
+                            <div className="flex flex-wrap items-center gap-x-1">
+                                <span className="break-words font-medium text-foreground">
+                                    {citation.filename || citation.document_id || "來源文件"}
                                 </span>
-                            ) : "")}
-                        </div>
-                        {message.citations?.length ? (
-                            <div className="mt-4 border-t border-border/70 pt-3">
-                                <div className="mb-2 text-xs text-muted-foreground">參考來源</div>
-                                {message.citations.map((citation, citationIndex) => (
-                                    <div
-                                        className="mb-1 rounded bg-secondary px-2 py-1 text-xs"
-                                        key={`${citation.document_id || citation.filename || "source"}-${citationIndex}`}
-                                    >
-                                        {citation.filename || citation.document_id || "來源文件"}
-                                        {citation.page ? ` · 第 ${citation.page} 頁` : ""}
-                                        {citation.text ? ` · ${citation.text}` : ""}
-                                    </div>
-                                ))}
+                                {citation.page ? (
+                                    <span className="text-muted-foreground">· 第 {citation.page} 頁</span>
+                                ) : null}
                             </div>
-                        ) : null}
+                            {showExcerpt ? (
+                                <div className="mt-1.5 line-clamp-2 break-words leading-5 text-muted-foreground">
+                                    {excerpt}
+                                </div>
+                            ) : null}
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+function ChatConversation({ chat, busy }: { chat: ChatMessage[]; busy: boolean }) {
+    return (
+        <div className="flex w-full min-w-0 flex-col gap-7">
+            {chat.map((message, index) => {
+                const isLastMessage = index === chat.length - 1;
+
+                return (
+                    <div
+                        key={message.id ?? `${index}-${message.role}`}
+                        className={`flex min-w-0 ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                    >
+                        {message.role === "user" ? (
+                            <div className="min-w-0 max-w-[85%] rounded-2xl bg-primary px-4 py-2.5 text-sm leading-7 text-primary-foreground sm:max-w-[72%]">
+                                <div className="whitespace-pre-wrap break-words">{message.text}</div>
+                            </div>
+                        ) : (
+                            <div className="w-full min-w-0 text-sm leading-7 text-foreground">
+                                {message.text ? (
+                                    <MessageResponse
+                                        animated={{ animation: "fadeIn", duration: 150, sep: "word" }}
+                                        isAnimating={busy && isLastMessage && message.status !== undefined}
+                                    >
+                                        {message.text}
+                                    </MessageResponse>
+                                ) : busy && isLastMessage ? (
+                                    <div role="status" aria-live="polite" className="py-1 text-muted-foreground">
+                                        {message.status ? CHAT_STATUS_LABELS[message.status] : "正在處理問題…"}
+                                    </div>
+                                ) : null}
+                                <ChatCitations citations={message.citations ?? []} />
+                            </div>
+                        )}
                     </div>
-                </div>
-            ))}
+                );
+            })}
         </div>
     );
 }
@@ -296,7 +328,7 @@ function ChatComposer({
                 </Button>
             </div>
             <p className="mt-2 text-center text-xs text-muted-foreground">
-                每次提問皆為獨立查詢；請在問題中提供完整背景。
+                每次提問皆為獨立查詢；請在問題中提供完整資訊。
             </p>
         </div>
     );
@@ -368,7 +400,7 @@ export function ChatView({
     const composerBlocked = isChatComposerBlocked(emptyStateKind);
     return (
         <section className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-3xl flex-col px-5">
-            <div className="flex flex-1 flex-col justify-center py-12">
+            <div className={`flex flex-1 flex-col ${chat.length ? "justify-start py-8" : "justify-center py-12"}`}>
                 {!chat.length ? (
                     emptyStateKind ? (
                         <div className="space-y-5">

@@ -3,6 +3,7 @@
 import { ChatView } from "./ChatView";
 import { FilesView } from "./FilesView";
 import { SlidesView } from "./SlidesView";
+import { NewsView } from "./NewsView";
 import { UploadModal } from "./UploadModal";
 import { WorkflowList } from "./WorkflowList";
 import type { WorkspaceController } from "../../lib/hooks/useWorkspaceController";
@@ -117,6 +118,9 @@ export function WorkspaceContent({
                     retry={workspace.startSlides}
                     onNewPresentation={workspace.startNewSlides}
                 />
+            )}
+            {view === "news" && (
+                <NewsView docs={workspace.catalog.documents} onBrowseSources={onBrowseSources ?? (() => workspace.setView("files"))} />
             )}
             {view === "workflows" && <WorkflowList />}
             {workspace.uploadOpen && (

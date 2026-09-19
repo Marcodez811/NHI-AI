@@ -120,6 +120,40 @@ describe("useRetrievalStatus", () => {
 describe("ChatView retrieval empty states", () => {
     afterEach(() => cleanup());
 
+    it("renders assistant Markdown and animates only the active reply", () => {
+        const chat = [
+            { id: "user-1", role: "user" as const, text: "**保留原文**" },
+            { id: "assistant-1", role: "assistant" as const, text: "## 政策摘要\n\n這是**重點**。", status: "drafting" as const },
+        ];
+        const streaming = renderChat({ chat, busy: true });
+
+        expect(screen.getByText("**保留原文**")).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "政策摘要" })).toBeInTheDocument();
+        expect(screen.getByText("重點").closest('[data-streamdown="strong"]')).toBeInTheDocument();
+        expect(streaming.container.querySelectorAll("[data-sd-animate]").length).toBeGreaterThan(0);
+
+        streaming.unmount();
+        const completed = renderChat({
+            chat: [{ ...chat[0] }, {
+                ...chat[1],
+                status: undefined,
+                citations: [
+                    { type: "file_citation", text: "佐證", filename: "資料.pdf", document_id: null, file_id: null, start_index: null, end_index: null, page: 3 },
+                    { type: "file_citation", text: "【摘要.pdf】", filename: "摘要.pdf", document_id: null, file_id: null, start_index: null, end_index: null, page: null },
+                ],
+            }],
+            busy: false,
+        });
+        expect(screen.getByRole("heading", { name: "政策摘要" })).toBeInTheDocument();
+        expect(screen.getByText("資料.pdf")).toBeInTheDocument();
+        expect(screen.getByText("· 第 3 頁")).toBeInTheDocument();
+        expect(screen.getByText("佐證")).toBeInTheDocument();
+        expect(screen.getByText("摘要.pdf")).toBeInTheDocument();
+        expect(screen.queryByText("【摘要.pdf】")).not.toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "政策摘要" }).parentElement).not.toHaveClass("size-full");
+        expect(completed.container.querySelectorAll("[data-sd-animate]")).toHaveLength(0);
+    });
+
     it("announces the current chat phase and explains independent questions", () => {
         renderChat({
             chat: [{
@@ -132,7 +166,7 @@ describe("ChatView retrieval empty states", () => {
         });
 
         expect(screen.getByRole("status")).toHaveTextContent("正在搜尋來源文件…");
-        expect(screen.getByText("每次提問皆為獨立查詢；請在問題中提供完整背景。")).toBeInTheDocument();
+        expect(screen.getByText("每次提問皆為獨立查詢；請在問題中提供完整資訊。")).toBeInTheDocument();
     });
 
     it("opens and changes scope repeatedly with real parent state updates", async () => {

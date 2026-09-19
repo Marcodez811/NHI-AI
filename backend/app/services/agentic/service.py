@@ -996,9 +996,13 @@ async def _execute_workflow(
                 reasoning_effort=getattr(adapter, "author_reasoning_effort", None),
                 workspace=workspace,
                 prompt=str(prompt),
-                sandbox=Sandbox.full_access,
-                skill_names=tuple(staged),
+                sandbox=_stage_sandbox(adapter, "author"),
+                skill_names=_stage_skills(adapter, "author", staged),
                 audit_path=_attempt_audit_path(workspace, "author", 1),
+                hidden_paths=_stage_hidden_paths(adapter, "author", workspace),
+                read_only_paths=_stage_read_only_paths(adapter, "author", workspace),
+                writable_paths=_stage_writable_paths(adapter, "author", workspace),
+                restrict_workspace=bool(getattr(adapter, "stage_isolation", False)),
             )
             author_role = str(getattr(adapter, "author_role", "presentation_author"))
             await _emit_event(

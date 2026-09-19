@@ -1,0 +1,26 @@
+services:
+    frontend:
+        image: nhi-ai-frontend:dev
+        build:
+            target: dev
+        develop:
+            watch:
+                - action: sync
+                  path: ./frontend
+                  target: /app
+                  initial_sync: true
+                  ignore:
+                      - node_modules/
+                      - node_modules.*/
+                      - .next/
+                      - package.json
+                      - pnpm-lock.yaml
+                      - pnpm-workspace.yaml
+                - action: rebuild
+                  path: ./frontend/package.json
+                - action: rebuild
+                  path: ./frontend/pnpm-lock.yaml
+                - action: rebuild
+                  path: ./frontend/pnpm-workspace.yaml
+                - action: rebuild
+                  path: ./frontend/Dockerfile

@@ -9,6 +9,7 @@ const routeToView = {
   "/chat": "chat",
   "/knowledge": "files",
   "/slides": "slides",
+  "/news": "news",
   "/workflows": "workflows",
 } as const;
 

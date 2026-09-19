@@ -24,6 +24,7 @@ dependencies = [
     "taskiq-redis>=1.2.3",
     "uvicorn[standard]>=0.52.4",
     "alembic>=1.19.1",
+    "openai-agents>=0.22.2",
 ]
 
 [dependency-groups]

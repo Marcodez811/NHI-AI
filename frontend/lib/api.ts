@@ -299,6 +299,28 @@ export interface SlidesJobStatusResponse {
 /** Existing UI callers use this name for the polling response. */
 export type SlideJob = SlidesJobStatusResponse;
 
+export interface CreateNewsPayload {
+    document_ids: string[];
+    guidance: string;
+}
+
+export interface CreateNewsJobResponse {
+    job_id: string;
+    status: SlideJobStatus;
+    phase: AgentJobPhase;
+}
+
+export interface NewsJob {
+    job_id: string;
+    status: SlideJobStatus;
+    phase: AgentJobPhase;
+    message: string | null;
+    started_at: string | null;
+    finished_at: string | null;
+    error: string | null;
+    article: string | null;
+}
+
 export interface ApiErrorOptions {
     code?: string;
     details?: unknown;
@@ -781,6 +803,25 @@ export async function getSlideJob(
     options: { signal?: AbortSignal } = {},
 ): Promise<SlideJob> {
     return request<SlideJob>(`/slides/jobs/${encodeURIComponent(id)}`, options);
+}
+
+export async function createNewsJob(
+    payload: CreateNewsPayload,
+    options: { signal?: AbortSignal } = {},
+): Promise<CreateNewsJobResponse> {
+    return request<CreateNewsJobResponse>("/news/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: options.signal,
+    });
+}
+
+export async function getNewsJob(
+    id: string,
+    options: { signal?: AbortSignal } = {},
+): Promise<NewsJob> {
+    return request<NewsJob>(`/news/jobs/${encodeURIComponent(id)}`, options);
 }
 
 export async function fetchAgentRuns(

@@ -28,14 +28,17 @@ class WorkflowRegistry:
         """Load built-in adapters lazily on the process-wide registry only."""
 
         global _bootstrapping
-        if self is not globals().get("default_registry") or _bootstrapping or "slides" in self._workflows:
+        if self is not globals().get("default_registry") or _bootstrapping or {"slides", "news"}.issubset(self._workflows):
             return
         _bootstrapping = True
         try:
             from app.services.slides.adapter import slides_adapter
+            from app.services.news.adapter import news_adapter
 
             if "slides" not in self._workflows:
                 self.register("slides", slides_adapter)
+            if "news" not in self._workflows:
+                self.register("news", news_adapter)
         finally:
             _bootstrapping = False
 

@@ -60,3 +60,6 @@ graphify-out/
 
 # Deployment tooling
 .vercel/
+
+# documents
+docs/

@@ -119,6 +119,18 @@ Open:
 
 The backend waits for healthy PostgreSQL and Redis. Keep both workers and the scheduler running for uploads, cleanup recovery, and agent jobs to finish.
 
+### Edit the frontend with Docker
+
+To run the full stack while developing the frontend, use the development Compose override from the repository root:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --watch
+```
+
+Open <http://localhost:3000>. Keep this command running while editing files in `frontend/`; Compose syncs saved source changes into the container and Next.js refreshes the page. Changes to frontend dependencies or the Dockerfile rebuild only the frontend development image. The backend and workers run as containers, as in the regular Compose setup. Stop with Ctrl+C. This development override uses a separate `nhi-ai-frontend:dev` image; the regular `docker compose up` command still uses the production frontend image.
+
+The first run may build images that are missing. It requires the same `.env` and `backend/.env` setup described above. Docker Compose Watch is available in recent Docker Compose versions.
+
 ### Developer telemetry console
 
 The unauthenticated agent telemetry endpoints and `/dev/agents` console are

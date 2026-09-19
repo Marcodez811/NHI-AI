@@ -1,6 +1,6 @@
 import type { ChatStatusPhase, Citation } from "../api/chat";
 
-export type View = "chat" | "files" | "slides" | "workflows";
+export type View = "chat" | "files" | "slides" | "news" | "workflows";
 
 export type ChatMessage = {
     id?: string;

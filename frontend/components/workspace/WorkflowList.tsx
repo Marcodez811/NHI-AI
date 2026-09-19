@@ -12,10 +12,11 @@ const workflows = [
         available: true,
     },
     {
+        href: "/news",
         label: "新聞稿生成",
         description: "根據來源文件整理並撰寫新聞稿",
         icon: Newspaper,
-        available: false,
+        available: true,
     },
     {
         label: "政策摘要",
