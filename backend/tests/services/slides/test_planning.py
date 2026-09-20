@@ -178,6 +178,8 @@ def test_build_prompt_is_unchanged_without_an_outline():
 
     assert with_outline_none == without_kwarg
     assert "Approved outline" not in with_outline_none
+    assert "Do not create or write speaker notes" in without_kwarg
+    assert "no `ppt/notesSlides/` parts" in without_kwarg
 
 
 def test_build_prompt_instructs_node_order_and_emphasis_when_outline_is_approved():
@@ -192,5 +194,7 @@ def test_build_prompt_instructs_node_order_and_emphasis_when_outline_is_approved
     assert "Follow the node order below exactly" in prompt
     assert "`intro`" in prompt
     assert "emphasis: normal" in prompt
-    assert "standalone line in the speaker" in prompt
-    assert "exactly the ID" in prompt
+    assert "work/outline_mapping.json" in prompt
+    assert '"node_id":"intro"' in prompt
+    assert "inclusive" in prompt
+    assert "Do not include any references slide" in prompt

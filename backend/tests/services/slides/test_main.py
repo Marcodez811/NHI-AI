@@ -230,6 +230,7 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertIn("verify each blocking finding individually", prompt)
         self.assertIn("2026 / Taiwan: NHI briefing", prompt)
         self.assertIn("audience-facing source footers", prompt)
+        self.assertIn("remove any speaker notes", prompt)
 
     def test_review_context_lists_semantic_review_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -251,6 +252,8 @@ class SlidesServiceTests(unittest.TestCase):
             writable = slides_adapter.stage_writable_paths("author", workspace)
             self.assertTrue(all(path.exists() for path in writable))
             self.assertNotIn(workspace / "work" / "rendered" / "final", writable)
+            self.assertIn(workspace / "work" / "outline_mapping.json", writable)
+            self.assertNotIn(workspace / "work", writable)
 
     def test_validator_candidate_findings_are_structured_retry_feedback(self):
         with tempfile.TemporaryDirectory() as temporary:

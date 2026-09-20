@@ -37,7 +37,7 @@ from xml.etree import ElementTree as ET
 from .contracts import JobError
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance only
-    from app.models.slides import OutlineNode, SlideOutline
+    from app.models.slides import SlideOutline
 
 try:  # Pillow is a production dependency, but keep module import lightweight.
     from PIL import Image, ImageChops
@@ -1106,35 +1106,87 @@ def _title_present(snapshot: Mapping[str, Any], requested_title: str) -> bool:
     return normalized in visible_shapes
 
 
-def _normalize_visible_text(value: str) -> str:
-    """Collapse whitespace so OOXML soft-wrap breaks never defeat a text match."""
+@dataclass(frozen=True)
+class _OutlineMappingEntry:
+    """One author-declared, inclusive content-slide range."""
 
-    return " ".join(value.split())
+    node_id: str
+    slide_start: int
+    slide_end: int
 
 
-def _outline_node_represented(snapshot: Mapping[str, Any], node: "OutlineNode") -> bool:
-    """Decide whether a candidate deck explicitly marks an outline node.
+def _read_outline_mapping(path: Path) -> tuple[list[_OutlineMappingEntry] | None, ValidationFinding | None]:
+    """Load the narrow author sidecar without accepting ambiguous shapes."""
 
-    Node IDs are required as standalone speaker-notes lines. Exact equality avoids
-    both false positives from body text and accidental matches in citation details.
-    """
+    if not path.is_file() or path.is_symlink():
+        return None, ValidationFinding(
+            "outline_mapping_missing",
+            "work/outline_mapping.json is required for an approved outline",
+            details={"path": "work/outline_mapping.json"},
+            origin="candidate",
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return None, ValidationFinding(
+            "outline_mapping_invalid",
+            "work/outline_mapping.json is not valid JSON",
+            details={"error": str(exc)},
+            origin="candidate",
+        )
+    if not isinstance(payload, Mapping) or set(payload) != {"nodes"}:
+        return None, ValidationFinding(
+            "outline_mapping_invalid",
+            "outline mapping must contain only a nodes array",
+            origin="candidate",
+        )
+    raw_entries = payload["nodes"]
+    if not isinstance(raw_entries, list):
+        return None, ValidationFinding(
+            "outline_mapping_invalid",
+            "outline mapping nodes must be an array",
+            origin="candidate",
+        )
 
-    target = _normalize_visible_text(node.id)
-    if not target:
-        return False
-    for slide in snapshot.get("slides", []):
-        if not isinstance(slide, Mapping):
-            continue
-        for note in slide.get("notes", []):
-            if _normalize_visible_text(str(note)) == target:
-                return True
-    return False
+    entries: list[_OutlineMappingEntry] = []
+    expected_keys = {"node_id", "slide_start", "slide_end"}
+    for index, raw_entry in enumerate(raw_entries):
+        if not isinstance(raw_entry, Mapping) or set(raw_entry) != expected_keys:
+            return None, ValidationFinding(
+                "outline_mapping_invalid",
+                "each outline mapping entry must contain only node_id, slide_start, and slide_end",
+                details={"entry_index": index},
+                origin="candidate",
+            )
+        node_id = raw_entry.get("node_id")
+        slide_start = raw_entry.get("slide_start")
+        slide_end = raw_entry.get("slide_end")
+        if (
+            not isinstance(node_id, str)
+            or not node_id.strip()
+            or type(slide_start) is not int
+            or type(slide_end) is not int
+        ):
+            return None, ValidationFinding(
+                "outline_mapping_invalid",
+                "outline mapping IDs must be non-empty strings and slide bounds must be integers",
+                details={"entry_index": index},
+                origin="candidate",
+            )
+        entries.append(
+            _OutlineMappingEntry(
+                node_id=node_id,
+                slide_start=slide_start,
+                slide_end=slide_end,
+            )
+        )
+    return entries, None
 
 
 def _outline_cross_check(
     outline: "SlideOutline",
-    snapshot: Mapping[str, Any],
-    slide_count: int | None,
+    mapping_path: Path,
+    content_slide_count: int | None,
 ) -> list[ValidationFinding]:
     """Catch a candidate that silently drifted from the human-approved outline.
 
@@ -1146,23 +1198,159 @@ def _outline_cross_check(
     """
 
     findings: list[ValidationFinding] = []
+    entries, mapping_finding = _read_outline_mapping(mapping_path)
+    if mapping_finding is not None:
+        findings.append(mapping_finding)
+    if entries is None:
+        if content_slide_count is not None and content_slide_count != outline.total_slides:
+            findings.append(
+                ValidationFinding(
+                    "outline_slide_count_mismatch",
+                    "candidate content-slide count does not match the approved outline's total_slides",
+                    details={"expected": outline.total_slides, "actual": content_slide_count},
+                    origin="candidate",
+                )
+            )
+        return findings
+
+    approved_nodes = {node.id: node for node in outline.nodes}
+    approved_positions = {node.id: index for index, node in enumerate(outline.nodes)}
+    occurrences: dict[str, list[_OutlineMappingEntry]] = {node.id: [] for node in outline.nodes}
+    for entry in entries:
+        if entry.node_id not in approved_nodes:
+            findings.append(
+                ValidationFinding(
+                    "outline_node_unknown",
+                    f"outline mapping contains unapproved node ID `{entry.node_id}`",
+                    details={"node_id": entry.node_id},
+                    origin="candidate",
+                )
+            )
+            continue
+        occurrences[entry.node_id].append(entry)
+
     for node in outline.nodes:
-        if not _outline_node_represented(snapshot, node):
+        count = len(occurrences[node.id])
+        if count == 0:
             findings.append(
                 ValidationFinding(
                     "outline_node_missing",
-                    f"approved outline section `{node.id}` ({node.heading!r}) has no "
-                    "exact node ID in speaker notes",
+                    f"approved outline section `{node.id}` ({node.heading!r}) is absent from the mapping",
                     details={"node_id": node.id, "heading": node.heading},
                     origin="candidate",
                 )
             )
-    if slide_count is not None and slide_count != outline.total_slides:
+        elif count > 1:
+            findings.append(
+                ValidationFinding(
+                    "outline_node_duplicate",
+                    f"approved outline section `{node.id}` appears more than once in the mapping",
+                    details={"node_id": node.id, "occurrences": count},
+                    origin="candidate",
+                )
+            )
+
+    mapped_approved_ids = [entry.node_id for entry in entries if entry.node_id in approved_positions]
+    if mapped_approved_ids != sorted(mapped_approved_ids, key=approved_positions.__getitem__):
+        findings.append(
+            ValidationFinding(
+                "outline_node_order",
+                "outline mapping nodes are not in the approved order",
+                details={
+                    "expected": [node.id for node in outline.nodes],
+                    "actual": mapped_approved_ids,
+                },
+                origin="candidate",
+            )
+        )
+
+    valid_ranges: list[_OutlineMappingEntry] = []
+    for entry in entries:
+        if entry.slide_start > entry.slide_end:
+            findings.append(
+                ValidationFinding(
+                    "outline_range_invalid",
+                    f"outline mapping range for `{entry.node_id}` starts after it ends",
+                    details={
+                        "node_id": entry.node_id,
+                        "slide_start": entry.slide_start,
+                        "slide_end": entry.slide_end,
+                    },
+                    origin="candidate",
+                )
+            )
+            continue
+        if content_slide_count is not None and (
+            entry.slide_start < 1 or entry.slide_end > content_slide_count
+        ):
+            findings.append(
+                ValidationFinding(
+                    "outline_range_out_of_bounds",
+                    f"outline mapping range for `{entry.node_id}` falls outside the content slides",
+                    details={
+                        "node_id": entry.node_id,
+                        "slide_start": entry.slide_start,
+                        "slide_end": entry.slide_end,
+                        "content_slide_count": content_slide_count,
+                    },
+                    origin="candidate",
+                )
+            )
+            continue
+        valid_ranges.append(entry)
+
+    for previous, current in zip(valid_ranges, valid_ranges[1:]):
+        if current.slide_start < previous.slide_start:
+            findings.append(
+                ValidationFinding(
+                    "outline_range_order",
+                    f"outline mapping range for `{current.node_id}` precedes `{previous.node_id}`",
+                    details={"previous_node_id": previous.node_id, "node_id": current.node_id},
+                    origin="candidate",
+                )
+            )
+        elif current.slide_start <= previous.slide_end:
+            findings.append(
+                ValidationFinding(
+                    "outline_range_overlap",
+                    f"outline mapping ranges for `{previous.node_id}` and `{current.node_id}` overlap",
+                    details={"previous_node_id": previous.node_id, "node_id": current.node_id},
+                    origin="candidate",
+                )
+            )
+        elif current.slide_start != previous.slide_end + 1:
+            findings.append(
+                ValidationFinding(
+                    "outline_range_gap",
+                    f"outline mapping leaves a gap between `{previous.node_id}` and `{current.node_id}`",
+                    details={"previous_node_id": previous.node_id, "node_id": current.node_id},
+                    origin="candidate",
+                )
+            )
+
+    if content_slide_count is not None:
+        coverage = [0] * content_slide_count
+        for entry in valid_ranges:
+            for slide_number in range(entry.slide_start, entry.slide_end + 1):
+                coverage[slide_number - 1] += 1
+        missing_slides = [index for index, count in enumerate(coverage, start=1) if count == 0]
+        repeated_slides = [index for index, count in enumerate(coverage, start=1) if count > 1]
+        if missing_slides or repeated_slides:
+            findings.append(
+                ValidationFinding(
+                    "outline_slide_coverage",
+                    "outline mapping must cover each content slide exactly once",
+                    details={"missing_slides": missing_slides, "repeated_slides": repeated_slides},
+                    origin="candidate",
+                )
+            )
+
+    if content_slide_count is not None and content_slide_count != outline.total_slides:
         findings.append(
             ValidationFinding(
                 "outline_slide_count_mismatch",
-                "candidate slide count does not match the approved outline's total_slides",
-                details={"expected": outline.total_slides, "actual": slide_count},
+                "candidate content-slide count does not match the approved outline's total_slides",
+                details={"expected": outline.total_slides, "actual": content_slide_count},
                 origin="candidate",
             )
         )
@@ -1371,7 +1559,13 @@ def _validate_candidate_deck_in_render_root(
         # Only run against a snapshot that actually parsed; a broken package
         # already produced ``pptx_invalid``/``snapshot_error`` above, and an
         # "every node missing" pile-on would just be noise on top of that.
-        findings.extend(_outline_cross_check(outline, snapshot, slide_count))
+        findings.extend(
+            _outline_cross_check(
+                outline,
+                job_dir / "work" / "outline_mapping.json",
+                slide_count,
+            )
+        )
 
     content_report["validator_binding"] = {
         **dict(content_report.get("validator_binding", {})),

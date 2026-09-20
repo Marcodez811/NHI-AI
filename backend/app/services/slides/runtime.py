@@ -52,9 +52,12 @@ the total should land near the requested {requested_slide_count}-slide brief.
 
 Narrative through-line: {outline.narrative}
 
-For machine validation, write each outline node ID as a standalone line in the speaker
-notes of every slide belonging to that node. The line must contain exactly the ID (for
-example, ``intro``), with no heading text, label, punctuation, or markdown around it.
+For machine validation, write `work/outline_mapping.json` after the deck is complete.
+Use exactly this shape, with one entry per approved node in the same order and inclusive,
+one-based content-slide ranges:
+`{{"nodes":[{{"node_id":"intro","slide_start":1,"slide_end":2}}]}}`.
+Every content slide must belong to exactly one range. Do not include any references slide
+in the mapping.
 """
 
 
@@ -97,7 +100,7 @@ or `work/extracted/`.
 internal workflow details. Never show them in slide text, citations, speaker notes, or the
 cover. Cite audience-facing sources from each evidence block's `citation` object instead:
 use its `display_text` in a readable slide footer and its source name, section path, and
-locator in speaker notes. Cite slides that contain factual claims, figures, or charts; do not
+locator. Cite slides that contain factual claims, figures, or charts; do not
 add a pipeline explanation to the cover or an unsupported bibliography slide.
 For a retained evidence block without `citation`, derive a conservative reference from
 `provenance.source`'s basename and its available PDF page or text line locator. Use the
@@ -107,8 +110,8 @@ section, publisher, date, or office.
 Keep simple charts editable. For combination or dual-axis charts, dense labels, heatmaps,
 or a native chart that still renders incorrectly after one correction, create a data-rendered
 PNG from exact evidence values with the bundled chart-image script and add that image alone.
-Keep all surrounding text and citations editable, and put chart values, units, and calculation
-notes in speaker notes.
+Keep all surrounding text and citations editable. Do not create or write speaker notes; the
+delivered PPTX must contain no `ppt/notesSlides/` parts.
 
 If template/ contains a PPTX, use it as the visual basis.
 Assume network access and package installation are unavailable.

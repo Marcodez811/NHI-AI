@@ -116,6 +116,23 @@ def _outline_node(node_id: str, heading: str) -> dict[str, object]:
     }
 
 
+def _write_outline_mapping(root: Path, nodes: list[tuple[str, int, int]]) -> Path:
+    mapping_path = root / "work" / "outline_mapping.json"
+    mapping_path.parent.mkdir(parents=True, exist_ok=True)
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"node_id": node_id, "slide_start": slide_start, "slide_end": slide_end}
+                    for node_id, slide_start, slide_end in nodes
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return mapping_path
+
+
 def _validate(root: Path, **kwargs: object):
     options: dict[str, object] = {
         "expected_slide_count": 2,
@@ -347,6 +364,7 @@ def test_approved_outline_matching_the_deck_passes(tmp_path: Path) -> None:
         nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
         total_slides=2,
     )
+    _write_outline_mapping(tmp_path, [("cover", 1, 1), ("body", 2, 2)])
 
     result = _validate(tmp_path)
 
@@ -361,6 +379,7 @@ def test_outline_node_missing_from_deck_is_a_candidate_finding(tmp_path: Path) -
         nodes=[_outline_node("cover", "Cover title"), _outline_node("missing", "Regional Risk Outlook")],
         total_slides=2,
     )
+    _write_outline_mapping(tmp_path, [("cover", 1, 2)])
 
     result = _validate(tmp_path)
 
@@ -378,6 +397,7 @@ def test_outline_total_slides_mismatch_is_a_candidate_finding(tmp_path: Path) ->
         nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
         total_slides=5,
     )
+    _write_outline_mapping(tmp_path, [("cover", 1, 1), ("body", 2, 2)])
 
     result = _validate(tmp_path)
 
@@ -385,3 +405,115 @@ def test_outline_total_slides_mismatch_is_a_candidate_finding(tmp_path: Path) ->
     finding = next(finding for finding in result.findings if finding.code == "outline_slide_count_mismatch")
     assert finding.origin == "candidate"
     assert finding.details == {"expected": 5, "actual": 2}
+
+
+def test_missing_outline_mapping_is_a_candidate_finding(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=2,
+    )
+
+    result = _validate(tmp_path)
+
+    finding = next(finding for finding in result.findings if finding.code == "outline_mapping_missing")
+    assert finding.origin == "candidate"
+
+
+def test_malformed_outline_mapping_is_a_candidate_finding(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=2,
+    )
+    mapping_path = tmp_path / "work" / "outline_mapping.json"
+    mapping_path.write_text("not JSON", encoding="utf-8")
+
+    result = _validate(tmp_path)
+
+    finding = next(finding for finding in result.findings if finding.code == "outline_mapping_invalid")
+    assert finding.origin == "candidate"
+
+
+def test_outline_mapping_rejects_extra_top_level_fields(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=2,
+    )
+    mapping_path = _write_outline_mapping(tmp_path, [("cover", 1, 1), ("body", 2, 2)])
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    payload["unexpected"] = True
+    mapping_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _validate(tmp_path)
+
+    assert any(finding.code == "outline_mapping_invalid" for finding in result.findings)
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected_codes"),
+    [
+        (
+            [("cover", 1, 1), ("cover", 2, 2), ("body", 2, 2)],
+            {"outline_node_duplicate", "outline_range_overlap", "outline_slide_coverage"},
+        ),
+        (
+            [("body", 1, 1), ("cover", 2, 2)],
+            {"outline_node_order"},
+        ),
+        (
+            [("cover", 2, 2), ("body", 1, 1)],
+            {"outline_range_order"},
+        ),
+        (
+            [("cover", 1, 1), ("body", 3, 3)],
+            {"outline_range_out_of_bounds", "outline_slide_coverage"},
+        ),
+    ],
+)
+def test_outline_mapping_structural_violations_are_candidate_findings(
+    tmp_path: Path,
+    mapping: list[tuple[str, int, int]],
+    expected_codes: set[str],
+) -> None:
+    _write_deck(tmp_path)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=2,
+    )
+    _write_outline_mapping(tmp_path, mapping)
+
+    result = _validate(tmp_path)
+
+    finding_codes = {finding.code for finding in result.findings}
+    assert expected_codes <= finding_codes
+    assert all(
+        finding.origin == "candidate"
+        for finding in result.findings
+        if finding.code in expected_codes
+    )
+
+
+def test_outline_mapping_ranges_must_be_contiguous_and_cover_content_slides(tmp_path: Path) -> None:
+    _write_deck(tmp_path, slide_count=3)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 3")],
+        total_slides=3,
+    )
+    _write_outline_mapping(tmp_path, [("cover", 1, 1), ("body", 3, 3)])
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=3,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    finding_codes = {finding.code for finding in result.findings}
+    assert "outline_range_gap" in finding_codes
+    assert "outline_slide_coverage" in finding_codes

@@ -215,6 +215,13 @@ def create_job_workspace(job_id: str, jobs_root: Path) -> Path:
         "output",
     ):
         (job_dir / relative_path).mkdir(parents=True, exist_ok=True)
+    # Bubblewrap grants resolve existing paths before entering the sandbox.
+    # Seed only the exact author-owned sidecar file; the author replaces this
+    # placeholder after laying out an approved outline.
+    outline_mapping = job_dir / "work" / "outline_mapping.json"
+    if outline_mapping.is_symlink() or (outline_mapping.exists() and not outline_mapping.is_file()):
+        raise JobError("workspace", "outline mapping path is invalid")
+    outline_mapping.touch(exist_ok=True)
     return job_dir
 
 

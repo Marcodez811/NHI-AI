@@ -270,6 +270,7 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
                 workspace / "work" / "rendered" / "preview",
                 workspace / "work" / "rendered" / "preview-pdf",
                 workspace / "work" / "images",
+                workspace / "work" / "outline_mapping.json",
             )
         return ()
 
@@ -394,7 +395,7 @@ explicitly rather than presenting both sides unreconciled.
                 "Address every blocking finding below. After changes, regenerate affected preview renders, "
                 "then stop; the backend validator owns content_check.json and deck_snapshot.json. "
                 "The frozen evidence.json and work/extracted/ tree are read-only and authoritative. "
-                "Preserve or repair audience-facing source footers and speaker-note references; never add "
+                "Preserve or repair audience-facing source footers and remove any speaker notes; never add "
                 "EvidenceStore names, paths, hashes, or block IDs to the delivered presentation. "
                 "Before finishing, verify each blocking finding individually "
                 "and state which slide or artifact change resolves it.\n\n"
