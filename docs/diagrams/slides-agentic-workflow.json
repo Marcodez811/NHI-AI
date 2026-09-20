@@ -1,0 +1,223 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Slides backend agentic workflow",
+    "locale": "en",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "intake",
+      "label": "API and job control"
+    },
+    {
+      "id": "evidence",
+      "label": "Source preparation"
+    },
+    {
+      "id": "agents",
+      "label": "Authoring"
+    },
+    {
+      "id": "validation",
+      "label": "Deterministic validation"
+    },
+    {
+      "id": "review",
+      "label": "Independent review"
+    },
+    {
+      "id": "delivery",
+      "label": "Delivery"
+    }
+  ],
+  "mainPath": [
+    "request",
+    "queued",
+    "claimed",
+    "prepared",
+    "extracted",
+    "frozen",
+    "authored",
+    "validated",
+    "reviewed",
+    "published"
+  ],
+  "nodes": [
+    {
+      "id": "request",
+      "lane": "intake",
+      "col": 0,
+      "type": "backend",
+      "label": "POST /slides/jobs",
+      "width": 152
+    },
+    {
+      "id": "queued",
+      "lane": "intake",
+      "col": 1,
+      "type": "database",
+      "label": "Queue job",
+      "width": 144
+    },
+    {
+      "id": "claimed",
+      "lane": "intake",
+      "col": 2,
+      "type": "backend",
+      "label": "agents.run",
+      "width": 144
+    },
+    {
+      "id": "prepared",
+      "lane": "evidence",
+      "col": 2,
+      "type": "backend",
+      "label": "Prepare workspace",
+      "width": 150
+    },
+    {
+      "id": "extracted",
+      "lane": "evidence",
+      "col": 3,
+      "type": "cloud",
+      "label": "Extraction agent",
+      "width": 150
+    },
+    {
+      "id": "frozen",
+      "lane": "evidence",
+      "col": 4,
+      "type": "database",
+      "label": "Frozen evidence",
+      "width": 150
+    },
+    {
+      "id": "authored",
+      "lane": "agents",
+      "col": 4,
+      "type": "cloud",
+      "label": "Author agent",
+      "width": 150
+    },
+    {
+      "id": "validated",
+      "lane": "validation",
+      "col": 4,
+      "type": "security",
+      "label": "Deck validator",
+      "width": 150
+    },
+    {
+      "id": "reviewed",
+      "lane": "review",
+      "col": 4,
+      "type": "cloud",
+      "label": "Semantic reviewer",
+      "width": 160
+    },
+    {
+      "id": "published",
+      "lane": "delivery",
+      "col": 4,
+      "type": "backend",
+      "label": "Publish PPTX",
+      "width": 152
+    },
+    {
+      "id": "revision",
+      "lane": "delivery",
+      "col": 3,
+      "type": "messagebus",
+      "label": "Revision feedback",
+      "width": 156
+    }
+  ],
+  "edges": [
+    {
+      "from": "request",
+      "to": "queued",
+      "label": "create durable job"
+    },
+    {
+      "from": "queued",
+      "to": "claimed",
+      "label": "agents.run task",
+      "role": "async"
+    },
+    {
+      "from": "claimed",
+      "to": "prepared"
+    },
+    {
+      "from": "prepared",
+      "to": "extracted"
+    },
+    {
+      "from": "extracted",
+      "to": "frozen",
+      "label": "extraction artifacts"
+    },
+    {
+      "from": "frozen",
+      "to": "authored",
+      "label": "read-only evidence"
+    },
+    {
+      "from": "authored",
+      "to": "validated",
+      "label": "candidate PPTX"
+    },
+    {
+      "from": "validated",
+      "to": "reviewed",
+      "label": "pass + snapshot"
+    },
+    {
+      "from": "reviewed",
+      "to": "published",
+      "label": "no blockers"
+    },
+    {
+      "from": "validated",
+      "to": "revision",
+      "label": "correctable findings",
+      "role": "branch",
+      "variant": "dashed"
+    },
+    {
+      "from": "reviewed",
+      "to": "revision",
+      "label": "blocking findings",
+      "role": "branch",
+      "variant": "dashed"
+    },
+    {
+      "from": "revision",
+      "to": "authored",
+      "label": "retry, max 5 authors",
+      "role": "return",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Trust boundaries",
+      "items": [
+        "Only extraction opens original documents; author and reviewer use frozen evidence.",
+        "Validator and reviewer run after each write-capable author attempt."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Outcome",
+      "items": [
+        "Correctable findings return to the author; exhausted attempts or infrastructure errors fail the job.",
+        "Postgres is authoritative for terminal status; Redis progress is advisory.",
+        "Completed jobs are served by GET /slides/jobs/{job_id}/download."
+      ]
+    }
+  ]
+}
