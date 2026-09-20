@@ -143,6 +143,51 @@ describe("useSlideJob", () => {
         expect(result.current.phaseHistory).toContain("reviewing");
     });
 
+    it("parks polling while an outline awaits human review", async () => {
+        vi.mocked(api.getSlideJob).mockResolvedValue(
+            job({ status: "awaiting_input", phase: "awaiting_outline", stage: "awaiting_outline" }),
+        );
+        const { result } = renderHook(() => useSlideJob({ pollIntervalMs: 250 }));
+
+        await act(async () => {
+            await result.current.startJob(payload);
+            await vi.advanceTimersByTimeAsync(250);
+        });
+        expect(result.current.phase).toBe("awaiting_outline");
+        expect(result.current.polling).toBe(false);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(api.getSlideJob).toHaveBeenCalledTimes(1);
+    });
+
+    it("resumes polling after outline approval and leaves the parked phase", async () => {
+        vi.mocked(api.getSlideJob)
+            .mockResolvedValueOnce(
+                job({ status: "awaiting_input", phase: "awaiting_outline", stage: "awaiting_outline" }),
+            )
+            .mockResolvedValueOnce(
+                job({ status: "awaiting_input", phase: "awaiting_outline", stage: "awaiting_outline" }),
+            )
+            .mockResolvedValueOnce(job({ phase: "drafting", stage: "drafting" }));
+        const { result } = renderHook(() => useSlideJob({ pollIntervalMs: 250 }));
+
+        await act(async () => {
+            await result.current.startJob(payload);
+            await vi.advanceTimersByTimeAsync(250);
+        });
+        expect(result.current.phase).toBe("awaiting_outline");
+
+        act(() => result.current.resumePolling());
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(500);
+        });
+
+        expect(result.current.phase).toBe("polling");
+        expect(result.current.job?.phase).toBe("drafting");
+        expect(api.getSlideJob).toHaveBeenCalledTimes(3);
+    });
+
     it("stops as expired for a missing job and surfaces terminal backend errors", async () => {
         vi.mocked(api.getSlideJob).mockRejectedValueOnce(new ApiError(404, "missing"));
         const { result } = renderHook(() =>

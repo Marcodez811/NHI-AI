@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
+from app.config import settings
 from app.models.slides import JobStatus, SlidesTaskPayload
 from app.services.agentic.contracts import (
     DeterministicValidationError,
@@ -137,48 +138,21 @@ class SlidesServiceTests(unittest.TestCase):
             self.assertEqual(existing.read_bytes(), b"existing deck")
             self.assertEqual(source.read_bytes(), b"new deck")
 
-    def test_semantic_review_rejects_malformed_findings(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ValueError):
-                slides_adapter.parse_review(
-                    '{"summary":"ok","findings":[{"finding_id":null,"status":"open","severity":"blocking","category":"factual","issue_key":"bad","locations":[],"description":"bad","correction":"fix"}]}',
-                    Path(temporary),
-                )
+    def test_extraction_and_reviewer_runner_follow_settings(self):
+        self.assertEqual(slides_adapter.extraction_runner, "codex")
+        self.assertEqual(slides_adapter.reviewer_runner, "codex")
+        with (
+            patch.object(settings, "agent_extraction_runner", "agents"),
+            patch.object(settings, "agent_reviewer_runner", "agents"),
+        ):
+            self.assertEqual(slides_adapter.extraction_runner, "agents")
+            self.assertEqual(slides_adapter.reviewer_runner, "agents")
+        # Both default back to "codex" once the override is gone: a developer
+        # who changes no settings sees no behavior change.
+        self.assertEqual(slides_adapter.extraction_runner, "codex")
+        self.assertEqual(slides_adapter.reviewer_runner, "codex")
 
-    def test_semantic_review_schema_and_parser_use_structured_findings(self):
-        schema = slides_adapter.review_output_schema
-        self.assertIn("findings", schema["properties"])
-        self.assertNotIn("blocking_findings", schema["properties"])
-        with tempfile.TemporaryDirectory() as temporary:
-            workspace = Path(temporary)
-            evidence = workspace / "work" / "evidence.json"
-            evidence.parent.mkdir(parents=True)
-            evidence.write_text(
-                json.dumps({"blocks": [{"id": "evidence_123"}], "assets": []}),
-                encoding="utf-8",
-            )
-            snapshot = workspace / "work" / "intermediate" / "deck_snapshot.json"
-            snapshot.parent.mkdir(parents=True)
-            snapshot.write_text(json.dumps({"slide_count": 8}), encoding="utf-8")
-            review = slides_adapter.parse_review(
-                '{"summary":"Two issues found.","findings":[{"severity":"blocking","category":"contradicted_claim","slide_number":4,"claim":"Growth is 8.2%.","judgement":"contradicted","evidence_refs":["evidence_123"],"reason":"The evidence states 4.1%.","correction":"Change the value to 4.1%."},{"severity":"advisory","category":"other","slide_number":2,"claim":"The title is vague.","judgement":"unclear","evidence_refs":[],"reason":"The wording is broad.","correction":"Clarify the title."}]}',
-                workspace,
-            )
-            self.assertIsInstance(review, ReviewOutcome)
-            self.assertEqual(review.findings[0].severity, ReviewSeverity.BLOCKING)
-            self.assertEqual(
-                json.loads((workspace / "work/intermediate/semantic_review.json").read_text(encoding="utf-8")),
-                review.model_dump(mode="json"),
-            )
-            with self.assertRaises(ValueError):
-                slides_adapter.parse_review('{"summary":"bad"}', workspace)
-            self.assertFalse((workspace / "work/intermediate/semantic_review.json").exists())
-            with self.assertRaisesRegex(ValueError, "malformed"):
-                slides_adapter.parse_review(
-                    '{"summary":"bad","findings":[{"severity":"blocking","category":"other","slide_number":"four","claim":"Claim","judgement":"unclear","evidence_refs":[],"reason":"Reason","correction":"Fix"}]}',
-                    workspace,
-                )
-
+    def test_review_prompt_includes_policy_guidance_and_ignores_history_argument(self):
         prompt = slides_adapter.build_review_prompt(_payload(uuid4()), Path("/tmp/workspace"), None, None)
         self.assertIn("authoritative requested presentation title", prompt)
         self.assertIn("ordinary rounding", prompt)

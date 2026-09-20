@@ -170,6 +170,8 @@ export type AgentJobPhase =
     | "queued"
     | "preparing"
     | "extracting"
+    | "planning"
+    | "awaiting_outline"
     | "drafting"
     | "validating"
     | "reviewing"
@@ -264,7 +266,7 @@ export interface AgentEventListResponse {
     next_after: number | null;
 }
 
-export type SlideJobStatus = "queued" | "running" | "completed" | "failed";
+export type SlideJobStatus = "queued" | "running" | "awaiting_input" | "completed" | "failed";
 
 export interface CreateSlidesJobResponse {
     job_id: string;
@@ -298,6 +300,40 @@ export interface SlidesJobStatusResponse {
 
 /** Existing UI callers use this name for the polling response. */
 export type SlideJob = SlidesJobStatusResponse;
+
+export type OutlineEmphasis = "light" | "normal" | "deep";
+
+export interface SlideOutlineNode {
+    id: string;
+    heading: string;
+    intent: string;
+    key_points: string[];
+    emphasis: OutlineEmphasis;
+    approx_slides: number;
+}
+
+export interface SlideOutline {
+    title: string;
+    narrative: string;
+    nodes: SlideOutlineNode[];
+    total_slides: number;
+}
+
+export interface OutlineRevisionResponse {
+    job_id: string;
+    revision: number;
+    outline: SlideOutline;
+    session_id: string;
+    created_at: string;
+    approved_at: string | null;
+}
+
+export interface ApproveOutlineResponse {
+    job_id: string;
+    status: SlideJobStatus;
+    phase: AgentJobPhase;
+    approved_revision: number;
+}
 
 export interface CreateNewsPayload {
     document_ids: string[];
@@ -563,7 +599,7 @@ export interface StreamHandlers {
     onDone?: (citations: Citation[]) => void;
 }
 
-export type ChatStatusPhase = "preparing" | "searching" | "drafting" | "validating";
+export type ChatStatusPhase = "preparing" | "searching" | "drafting" | "validating" | "planning";
 
 export type ChatStreamEvent =
     | { type: "status"; phase: ChatStatusPhase }
@@ -632,7 +668,8 @@ export function parseSseEventBlock(block: string): ChatStreamEvent | null {
             phase === "preparing" ||
             phase === "searching" ||
             phase === "drafting" ||
-            phase === "validating"
+            phase === "validating" ||
+            phase === "planning"
         ) {
             return { type: "status", phase };
         }
@@ -677,8 +714,9 @@ export function parseSseEventBlock(block: string): ChatStreamEvent | null {
     return null;
 }
 
-export async function streamChat(
-    payload: ChatRequest,
+async function streamSse(
+    path: string,
+    payload: unknown,
     handlers: StreamHandlers,
     options: { signal?: AbortSignal } = {},
 ): Promise<void> {
@@ -702,7 +740,7 @@ export async function streamChat(
 
     let response: Response;
     try {
-        response = await fetch(`${API_ROOT}/chat/stream`, {
+        response = await fetch(`${API_ROOT}${path}`, {
             method: "POST",
             headers: {
                 Accept: "text/event-stream",
@@ -786,6 +824,15 @@ export async function streamChat(
     }
 }
 
+/** Stream a retrieval chat response through the shared application SSE parser. */
+export async function streamChat(
+    payload: ChatRequest,
+    handlers: StreamHandlers,
+    options: { signal?: AbortSignal } = {},
+): Promise<void> {
+    return streamSse("/chat/stream", payload, handlers, options);
+}
+
 export async function createSlideJob(
     payload: CreateSlidePayload,
     options: { signal?: AbortSignal } = {},
@@ -803,6 +850,41 @@ export async function getSlideJob(
     options: { signal?: AbortSignal } = {},
 ): Promise<SlideJob> {
     return request<SlideJob>(`/slides/jobs/${encodeURIComponent(id)}`, options);
+}
+
+export async function getSlideJobOutline(
+    id: string,
+    options: { signal?: AbortSignal } = {},
+): Promise<OutlineRevisionResponse> {
+    return request<OutlineRevisionResponse>(`/slides/jobs/${encodeURIComponent(id)}/outline`, options);
+}
+
+/** The planner uses the same SSE vocabulary as retrieval chat. */
+export async function streamSlideJobOutlineMessage(
+    id: string,
+    message: string,
+    handlers: StreamHandlers,
+    options: { signal?: AbortSignal } = {},
+): Promise<void> {
+    return streamSse(
+        `/slides/jobs/${encodeURIComponent(id)}/outline/messages`,
+        { message },
+        handlers,
+        options,
+    );
+}
+
+export async function approveSlideJobOutline(
+    id: string,
+    expectedRevision: number,
+    options: { signal?: AbortSignal } = {},
+): Promise<ApproveOutlineResponse> {
+    return request<ApproveOutlineResponse>(`/slides/jobs/${encodeURIComponent(id)}/outline/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_revision: expectedRevision }),
+        signal: options.signal,
+    });
 }
 
 export async function createNewsJob(

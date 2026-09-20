@@ -30,11 +30,14 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from xml.etree import ElementTree as ET
 
 from .contracts import JobError
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance only
+    from app.models.slides import OutlineNode, SlideOutline
 
 try:  # Pillow is a production dependency, but keep module import lightweight.
     from PIL import Image, ImageChops
@@ -1103,6 +1106,69 @@ def _title_present(snapshot: Mapping[str, Any], requested_title: str) -> bool:
     return normalized in visible_shapes
 
 
+def _normalize_visible_text(value: str) -> str:
+    """Collapse whitespace so OOXML soft-wrap breaks never defeat a text match."""
+
+    return " ".join(value.split())
+
+
+def _outline_node_represented(snapshot: Mapping[str, Any], node: "OutlineNode") -> bool:
+    """Decide whether a candidate deck explicitly marks an outline node.
+
+    Node IDs are required as standalone speaker-notes lines. Exact equality avoids
+    both false positives from body text and accidental matches in citation details.
+    """
+
+    target = _normalize_visible_text(node.id)
+    if not target:
+        return False
+    for slide in snapshot.get("slides", []):
+        if not isinstance(slide, Mapping):
+            continue
+        for note in slide.get("notes", []):
+            if _normalize_visible_text(str(note)) == target:
+                return True
+    return False
+
+
+def _outline_cross_check(
+    outline: "SlideOutline",
+    snapshot: Mapping[str, Any],
+    slide_count: int | None,
+) -> list[ValidationFinding]:
+    """Catch a candidate that silently drifted from the human-approved outline.
+
+    This is additive to, not a replacement for, the plain ``expected_slide_count``
+    check above: that one enforces the brief's requested count, this one enforces
+    the planner's approved structure. Both findings are ``origin="candidate"`` so
+    they flow through the existing validate-then-revise loop like any other
+    deterministic finding -- there is no separate failure path for outline drift.
+    """
+
+    findings: list[ValidationFinding] = []
+    for node in outline.nodes:
+        if not _outline_node_represented(snapshot, node):
+            findings.append(
+                ValidationFinding(
+                    "outline_node_missing",
+                    f"approved outline section `{node.id}` ({node.heading!r}) has no "
+                    "exact node ID in speaker notes",
+                    details={"node_id": node.id, "heading": node.heading},
+                    origin="candidate",
+                )
+            )
+    if slide_count is not None and slide_count != outline.total_slides:
+        findings.append(
+            ValidationFinding(
+                "outline_slide_count_mismatch",
+                "candidate slide count does not match the approved outline's total_slides",
+                details={"expected": outline.total_slides, "actual": slide_count},
+                origin="candidate",
+            )
+        )
+    return findings
+
+
 def _load_trusted_checker(path: Path = TRUSTED_CONTENT_CHECKER) -> Callable[[Path], dict[str, Any]]:
     """Load the repository-owned content checker, never one from the job.
 
@@ -1191,6 +1257,7 @@ def _validate_candidate_deck_in_render_root(
     expected_slide_count: int | None = None,
     requested_title: str | None = None,
     evidence_path: Path | None = None,
+    outline_path: Path | None = None,
     logo_dir: Path | None = DEFAULT_LOGO_ASSET_DIR,
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
@@ -1202,6 +1269,7 @@ def _validate_candidate_deck_in_render_root(
 
     deck = job_dir / "output" / "presentation.pptx"
     evidence = Path(evidence_path) if evidence_path is not None else job_dir / "work" / "evidence.json"
+    outline_file = Path(outline_path) if outline_path is not None else job_dir / "work" / "outline.json"
     artifact_dir = job_dir / "work" / "intermediate"
     content_path = artifact_dir / "content_check.json"
     snapshot_path = artifact_dir / "deck_snapshot.json"
@@ -1220,6 +1288,17 @@ def _validate_candidate_deck_in_render_root(
         evidence_sha256 = sha256_file(evidence)
     if deck.is_file() and not deck.is_symlink():
         pptx_sha256 = sha256_file(deck)
+
+    # Outline-driven jobs write ``work/outline.json`` once a human approves the
+    # planner's proposal (Stage 5b); every other job never creates that file, so
+    # this stays absent and the cross-check below never runs -- behavior for a
+    # non-planning job is unchanged. Imported locally, matching evidence.py's
+    # own avoidance of a module-level ``app.models`` dependency.
+    outline: "SlideOutline | None" = None
+    if outline_file.is_file() and not outline_file.is_symlink():
+        from app.models.slides import SlideOutline
+
+        outline = SlideOutline.model_validate(json.loads(outline_file.read_text(encoding="utf-8")))
 
     package: _PptxPackage | None = None
     try:
@@ -1288,6 +1367,12 @@ def _validate_candidate_deck_in_render_root(
     else:
         snapshot = _unavailable_snapshot(pptx_sha256, evidence_sha256, "PPTX package validation failed")
 
+    if outline is not None and snapshot.get("status") == "available":
+        # Only run against a snapshot that actually parsed; a broken package
+        # already produced ``pptx_invalid``/``snapshot_error`` above, and an
+        # "every node missing" pile-on would just be noise on top of that.
+        findings.extend(_outline_cross_check(outline, snapshot, slide_count))
+
     content_report["validator_binding"] = {
         **dict(content_report.get("validator_binding", {})),
         "pptx_sha256": pptx_sha256,
@@ -1333,6 +1418,7 @@ def validate_candidate_deck(
     expected_slide_count: int | None = None,
     requested_title: str | None = None,
     evidence_path: Path | None = None,
+    outline_path: Path | None = None,
     logo_dir: Path | None = DEFAULT_LOGO_ASSET_DIR,
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
@@ -1348,6 +1434,11 @@ def validate_candidate_deck(
     ``slide-<number>.png`` files there (or return their directory).  Its
     temporary directory is removed on every exit path, including unexpected
     validation and artifact-publication errors.
+
+    ``outline_path`` defaults to ``job_dir / "work" / "outline.json"``, exactly
+    where the approve route (Stage 5b) writes it. When that file is absent --
+    every job that never ran a planner -- no outline cross-check runs and
+    validation behaves exactly as it did before this check existed.
     """
 
     job_dir = Path(job_dir)
@@ -1360,6 +1451,7 @@ def validate_candidate_deck(
             expected_slide_count=expected_slide_count,
             requested_title=requested_title,
             evidence_path=evidence_path,
+            outline_path=outline_path,
             logo_dir=logo_dir,
             command_runner=command_runner,
             runner=runner,

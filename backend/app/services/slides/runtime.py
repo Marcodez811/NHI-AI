@@ -15,7 +15,7 @@ from typing import Any
 from loguru import logger
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox, SkillInput, TextInput, TurnResult
 
-from app.models.slides import DEFAULT_TIMEOUT_MINUTES, SlidesTaskPayload
+from app.models.slides import DEFAULT_TIMEOUT_MINUTES, SlideOutline, SlidesTaskPayload
 
 from .artifacts import BACKEND_ROOT, PPTX_SKILL, SOURCE_SKILL
 from .contracts import JobError, ProgressCallback
@@ -23,15 +23,59 @@ from .contracts import JobError, ProgressCallback
 DEFAULT_PROGRESS_HEARTBEAT_SECONDS = 60.0
 
 
-def build_prompt(request: SlidesTaskPayload, staged_names: list[str], font_family: str | None = None) -> str:
+def _outline_instructions(outline: SlideOutline, requested_slide_count: int) -> str:
+    """Render the approved outline as a node-order/emphasis instruction block.
+
+    Stage 5 (docs/agents-sdk-migration-plan.md): a human already negotiated
+    this structure with the planner. The author must honor node order and use
+    ``emphasis`` as a relative attention budget rather than silently
+    redesigning the deck's shape.
+    """
+
+    nodes = "\n".join(
+        f"{index}. `{node.id}` -- {node.heading} (emphasis: {node.emphasis}, "
+        f"~{node.approx_slides} slides): {node.intent}\n"
+        f"   Key points: {'; '.join(node.key_points)}"
+        for index, node in enumerate(outline.nodes, start=1)
+    )
+    return f"""
+
+## Approved outline (must be honored)
+A human has already reviewed and approved the following outline for this presentation.
+Follow the node order below exactly: do not reorder, merge, split, drop, or introduce a
+section the outline does not name. Treat `emphasis` as a relative attention budget across
+sections -- a "deep" node earns more slides, more supporting detail, and more of the
+evidence than a "light" one; `approx_slides` is a hint, not a hard per-node page count, but
+the total should land near the requested {requested_slide_count}-slide brief.
+
+{nodes}
+
+Narrative through-line: {outline.narrative}
+
+For machine validation, write each outline node ID as a standalone line in the speaker
+notes of every slide belonging to that node. The line must contain exactly the ID (for
+example, ``intro``), with no heading text, label, punctuation, or markdown around it.
+"""
+
+
+def build_prompt(
+    request: SlidesTaskPayload,
+    staged_names: list[str],
+    font_family: str | None = None,
+    *,
+    outline: SlideOutline | None = None,
+) -> str:
     """Build the author brief from the frozen EvidenceStore contract.
 
     ``staged_names`` remains an argument for callers on the old runtime API,
     but source paths are intentionally absent from the author prompt.
+    ``outline`` is the human-approved planning proposal (Stage 5); it is
+    ``None`` for every workflow run that never declares a planner, so the
+    prompt this function returns is completely unchanged for those runs.
     """
 
     del staged_names
-    return f"""# Presentation job
+    prompt = f"""# Presentation job
 
 Create a polished, editable, source-grounded presentation from the frozen
 EvidenceStore at `work/evidence.json`. This JSON file and assets under
@@ -77,6 +121,9 @@ author artifacts:
 
 The backend independently generates work/rendered/final/*.png for validation and semantic review.
 """
+    if outline is not None:
+        prompt += _outline_instructions(outline, request.slides_count)
+    return prompt
 
 
 def build_job_environment(backend_root: Path = BACKEND_ROOT, *, fontconfig_file: Path | None = None, cjk_font: str | None = None) -> dict[str, str]:

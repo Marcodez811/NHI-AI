@@ -50,7 +50,10 @@ class DocumentStorage:
         raise NotImplementedError
 
 
-_UNSAFE_FILENAME = re.compile(r"[^\w._ -]+", re.UNICODE) 
+# Traditional Chinese filenames must survive sanitization intact; the
+# hardening that matters comes from ``Path(...).name`` stripping directory
+# components, not from restricting the alphabet to ASCII (commit 5baedbc2).
+_UNSAFE_FILENAME = re.compile(r"[^\w._ -]+", re.UNICODE)
 
 
 def safe_filename(filename: str | None) -> str:

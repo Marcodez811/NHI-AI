@@ -33,6 +33,7 @@ import { analyzeSlideReadiness } from "./slide-readiness";
 import { SlideSettings } from "./SlideSettings";
 import { SlideGenerationStatus } from "./SlideGenerationStatus";
 import { SlideCompletedResult } from "./SlideCompletedResult";
+import { OutlineReview } from "./OutlineReview";
 
 export function SlidesView({
     docs,
@@ -54,6 +55,7 @@ export function SlidesView({
     error,
     warning,
     pollNow,
+    resumePolling,
     start,
     retry,
     onNewPresentation,
@@ -77,6 +79,7 @@ export function SlidesView({
     error: string | null;
     warning: string | null;
     pollNow?: () => Promise<SlideJob | undefined>;
+    resumePolling?: () => void;
     start: () => Promise<void>;
     retry: () => Promise<void>;
     onNewPresentation?: () => void;
@@ -102,6 +105,7 @@ export function SlidesView({
         );
     });
     const completed = job?.status === "completed";
+    const awaitingOutline = job?.status === "awaiting_input" && job.phase === "awaiting_outline";
     const sourceFormats = "PDF、DOCX、Markdown、TXT";
     const downloadUrl = job ? slideDownloadUrl(job) : null;
     const beginNewPresentation = () => {
@@ -431,6 +435,8 @@ export function SlidesView({
                             tone={tone}
                             setTone={setTone}
                         />
+
+                        {awaitingOutline && job && <OutlineReview jobId={job.job_id} onApproved={resumePolling} />}
 
                         <SlideGenerationStatus
                             job={job}

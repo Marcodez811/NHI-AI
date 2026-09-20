@@ -37,6 +37,12 @@ class AgentPhase(StrEnum):
     QUEUED = "queued"
     PREPARING = "preparing"
     EXTRACTING = "extracting"
+    # Planning sits between extraction and authoring: the outline must be
+    # grounded in already-frozen evidence, so it cannot run earlier.
+    PLANNING = "planning"
+    # Non-terminal pause while a human reviews or discusses the outline.
+    # The worker releases its lease in this phase rather than blocking.
+    AWAITING_OUTLINE = "awaiting_outline"
     DRAFTING = "drafting"
     VALIDATING = "validating"
     REVIEWING = "reviewing"
@@ -345,6 +351,13 @@ class AgentTaskPayload(BaseModel):
     job_id: UUID | str = Field()
     workflow: str = Field(min_length=1, max_length=80)
     input: Any
+    # Stage 5 (docs/agents-sdk-migration-plan.md): ``None`` is an ordinary first
+    # pass. ``"author"`` re-enters a paused workflow after a human has approved an
+    # outline -- extraction and planning are skipped and the frozen
+    # ``work/outline.json`` the approval endpoint wrote is read instead. This stays
+    # on the generic task envelope, not a workflow-specific payload, because any
+    # workflow with a human-in-the-loop pause could eventually name a resume point.
+    resume_from: str | None = Field(default=None, min_length=1, max_length=80)
 
     @field_validator("job_id", "workflow")
     @classmethod
@@ -356,6 +369,16 @@ class AgentTaskPayload(BaseModel):
         # syntax at deserialization, before any workspace or SDK is touched.
         if not value or value in {".", ".."} or "/" in value or "\\" in value:
             raise ValueError("job_id and workflow must be simple names")
+        return value
+
+    @field_validator("resume_from")
+    @classmethod
+    def safe_resume_point(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or value in {".", ".."} or "/" in value or "\\" in value:
+            raise ValueError("resume_from must be a simple stage name")
         return value
 
 
@@ -435,7 +458,14 @@ class AgentExecutionRequest(BaseModel):
     workspace: Path
     prompt: str = Field(min_length=1)
     sandbox: Any = None
+    # A raw provider JSON schema, understood only by Codex's per-turn schema
+    # pass-through.  ``output_type`` below is the provider-neutral successor:
+    # a runner that can validate structured output natively (the Agents SDK)
+    # or by deriving a schema from the type itself (Codex) uses it to hand
+    # the coordinator an already-validated model instead of free-form text.
+    # A request is expected to set at most one of the two.
     output_schema: dict[str, Any] | None = None
+    output_type: type[BaseModel] | None = None
     skill_names: tuple[str, ...] = Field(default=(), validation_alias=AliasChoices("skill_names", "staged_skills"))
     audit_path: Path | None = None
     # Paths the provider process must not be able to inspect for this stage.
@@ -481,6 +511,11 @@ class AgentExecutionResult(BaseModel):
     duration_ms: int | None = None
     usage: Any = None
     audits: list[TurnAudit] = Field(default_factory=list)
+    # Populated only when the originating ``AgentExecutionRequest`` declared
+    # ``output_type``: the runner-validated model (e.g. ``ReviewOutcome``),
+    # so a caller that asked for typed output never has to re-parse
+    # ``response`` text itself.
+    output: BaseModel | None = None
 
     @property
     def thread_id(self) -> str:
@@ -574,6 +609,10 @@ class WorkflowAdapter(Protocol, Generic[InputT, OutputT]):
         revision_feedback: str | None = None,
     ) -> str: ...
 
+    def build_planning_prompt(self, value: InputT, workspace: Path) -> str: ...
+
+    def post_planning(self, value: InputT, result: AgentExecutionResult, workspace: Path) -> Any: ...
+
     def prepare_workspace(self, value: InputT, workspace: Path) -> Any: ...
 
     def prepare_input(self, value: InputT, workspace: Path) -> Any: ...
@@ -632,6 +671,18 @@ class BaseWorkflowAdapter(Generic[InputT, OutputT]):
     reviewer_skills: Sequence[str] = ()
     independent_semantic_review = False
     stage_isolation = False
+    # Stage 5: planning is opt-in the same way extraction is -- ``planner_role``
+    # stays ``None`` for every workflow that does not declare a planning agent, so
+    # ``_execute_workflow`` never runs or pauses for one and existing workflows
+    # (e.g. ``news``) are byte-for-byte unaffected by this stage's addition.
+    planner_role: str | None = None
+    planner_skills: Sequence[str] = ()
+    planner_model: str | None = None
+    planner_reasoning_effort: AgentReasoningEffort | None = None
+    planner_runner = "codex"
+    # The concrete structured-output contract (e.g. ``SlideOutline``) belongs to
+    # the workflow, not to this workflow-neutral module.
+    planner_output_type: type[BaseModel] | None = None
 
     def validate_input(self, value: Any) -> InputT:
         if self.input_type is None:
@@ -668,6 +719,28 @@ class BaseWorkflowAdapter(Generic[InputT, OutputT]):
 
     def post_extraction(self, value: InputT, workspace: Path) -> Any:
         """Validate and freeze extraction artifacts into the EvidenceStore."""
+
+        return None
+
+    def build_planning_prompt(self, value: InputT, workspace: Path) -> str:
+        """Return the prompt for the planning activation.
+
+        Only called when ``planner_role`` is set; a workflow that declares a
+        planner is expected to override this the same way it overrides
+        ``build_extraction_prompt``.
+        """
+
+        return str(value)
+
+    def post_planning(self, value: InputT, result: Any, workspace: Path) -> Any:
+        """Persist the planner's typed output as a durable, immutable revision.
+
+        The generic coordinator only knows a planning activation completed with
+        some ``AgentExecutionResult``; it is deliberately ignorant of any
+        concrete outline schema or storage, so a workflow that declares a
+        planner is expected to override this the same way it overrides
+        ``post_extraction``.
+        """
 
         return None
 

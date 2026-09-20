@@ -54,6 +54,8 @@ _PHASE_MESSAGES = {
     AgentPhase.QUEUED: "Agent workflow is queued.",
     AgentPhase.PREPARING: "Preparing the agent workflow.",
     AgentPhase.EXTRACTING: "Extracting source documents into the frozen evidence store.",
+    AgentPhase.PLANNING: "Proposing a presentation outline.",
+    AgentPhase.AWAITING_OUTLINE: "Waiting for outline approval.",
     AgentPhase.DRAFTING: "Drafting the presentation.",
     AgentPhase.VALIDATING: "Validating the generated presentation.",
     AgentPhase.REVIEWING: "Reviewing the generated presentation.",
@@ -220,23 +222,6 @@ async def _build_review_prompt(adapter: Any, value: Any, workspace: Path, audit:
     return str(await _call(hook, value, workspace, audit, context, **kwargs))
 
 
-async def _parse_review(adapter: Any, response: str | None, workspace: Path, previous: ReviewOutcome | None, attempt: int) -> ReviewOutcome:
-    """Parse and normalize one strict reviewer response."""
-
-    parser = getattr(adapter, "parse_review", None)
-    if parser is None:
-        raise WorkflowExecutionError("semantic review parser is missing")
-    try:
-        parameters = inspect.signature(parser).parameters
-    except (TypeError, ValueError):
-        parameters = {}
-    kwargs = {"previous_review": previous} if "previous_review" in parameters else {}
-    parsed = await _call(parser, response, workspace, **kwargs)
-    if not isinstance(parsed, ReviewOutcome):
-        raise ValueError("semantic review parser returned an invalid contract")
-    return normalize_review_outcome(parsed, previous, attempt=attempt)
-
-
 def _uses_execution_request(runner: Any) -> bool:
     """Identify the new runner contract while retaining old test doubles.
 
@@ -367,7 +352,11 @@ def _stage_skills(adapter: Any, stage: str, staged: Sequence[str]) -> tuple[str,
     """Resolve the adapter's allowlisted skill set for one activation."""
 
     configured = getattr(adapter, f"{stage}_skills", ())
-    if stage == "extraction":
+    if stage in {"extraction", "planner"}:
+        # Both stages get an explicit, narrow skill set rather than falling
+        # back to every staged skill: extraction is the only stage allowed to
+        # open sources, and the planner needs no skill at all -- it only reads
+        # the frozen evidence store through its sandbox grant.
         return tuple(configured)
     return tuple(configured or staged)
 
@@ -416,7 +405,9 @@ def _stage_sandbox(adapter: Any, stage: str) -> Any:
 
     if not bool(getattr(adapter, "stage_isolation", False)):
         return Sandbox.full_access
-    return Sandbox.read_only if stage == "reviewer" else Sandbox.workspace_write
+    # The planner never writes to the workspace -- it returns its proposal as
+    # typed output, the same reason the reviewer is read-only.
+    return Sandbox.read_only if stage in {"reviewer", "planner"} else Sandbox.workspace_write
 
 
 async def _execute_extraction(
@@ -513,6 +504,111 @@ async def _execute_extraction(
         duration_ms=result.duration_ms or round((asyncio.get_running_loop().time() - started) * 1000),
     )
     return result
+
+
+async def _execute_planning(
+    *,
+    run_id: str,
+    adapter: Any,
+    value: Any,
+    workspace: Path,
+    staged: list[str],
+    selected_runner: Any,
+    progress_callback: Any,
+    event_callback: Any = None,
+) -> None:
+    """Run the planner exactly once and hand its typed output to the adapter.
+
+    Stage 5 (docs/agents-sdk-migration-plan.md): placement is extraction ->
+    planning -> author, because an outline must be grounded in already-frozen
+    evidence. This mirrors ``_execute_extraction``'s shape deliberately: one
+    request, one runner activation, adapter-owned finalization
+    (``post_planning`` here plays the role ``post_extraction`` plays there).
+    Persistence of the resulting revision is entirely the adapter's concern --
+    this module stays ignorant of any concrete outline schema -- so the only
+    thing the caller does after this returns is transition the workflow to
+    ``AgentPhase.AWAITING_OUTLINE`` and pause.
+    """
+
+    role = str(getattr(adapter, "planner_role", "") or "")
+    if not role:
+        return None
+    await _emit_phase(progress_callback, AgentPhase.PLANNING)
+    prompt_hook = getattr(adapter, "build_planning_prompt", None)
+    prompt = str(await _call(prompt_hook, value, workspace)) if prompt_hook else str(value)
+    runner_name = str(getattr(adapter, "planner_runner", "codex"))
+    runner = _runner_for_node(selected_runner, runner_name)
+    request = AgentExecutionRequest(
+        run_id=run_id,
+        node_id="planning",
+        role=role,
+        attempt=1,
+        model=getattr(adapter, "planner_model", None),
+        reasoning_effort=getattr(adapter, "planner_reasoning_effort", None),
+        workspace=workspace,
+        prompt=prompt,
+        sandbox=_stage_sandbox(adapter, "planner"),
+        output_type=getattr(adapter, "planner_output_type", None),
+        skill_names=_stage_skills(adapter, "planner", staged),
+        audit_path=_attempt_audit_path(workspace, "planning", 1),
+        hidden_paths=_stage_hidden_paths(adapter, "planner", workspace),
+        read_only_paths=_stage_read_only_paths(adapter, "planner", workspace),
+        writable_paths=_stage_writable_paths(adapter, "planner", workspace),
+        restrict_workspace=bool(getattr(adapter, "stage_isolation", False)),
+    )
+    await _emit_event(
+        event_callback,
+        "node_started",
+        node_id="planning",
+        role=request.role,
+        model=request.model,
+        reasoning_effort=request.reasoning_effort,
+        runner=runner_name,
+        attempt=1,
+        status="running",
+        message="Planning agent started.",
+    )
+    started = asyncio.get_running_loop().time()
+    try:
+        result = await _run_agent(
+            runner,
+            request,
+            progress_callback=_node_progress_callback(progress_callback, request, runner_name),
+        )
+        finalize = getattr(adapter, "post_planning", None)
+        if finalize is None:
+            raise WorkflowExecutionError("planning finalization hook is missing")
+        await _call(finalize, value, result, workspace)
+    except Exception:
+        await _emit_event(
+            event_callback,
+            "node_failed",
+            node_id="planning",
+            role=request.role,
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
+            runner=runner_name,
+            attempt=1,
+            status="failed",
+            message="Planning failed.",
+            duration_ms=round((asyncio.get_running_loop().time() - started) * 1000),
+        )
+        raise
+    await _emit_event(
+        event_callback,
+        "node_completed",
+        node_id="planning",
+        role=request.role,
+        model=request.model,
+        reasoning_effort=request.reasoning_effort,
+        runner=runner_name,
+        attempt=1,
+        status="completed",
+        provider_run_id=result.provider_run_id,
+        message="Planning revision 1 was persisted for human review.",
+        duration_ms=result.duration_ms or round((asyncio.get_running_loop().time() - started) * 1000),
+    )
+    return None
 
 
 async def _execute_bounded_agents(
@@ -757,7 +853,12 @@ async def _execute_bounded_agents(
             workspace=workspace,
             prompt=str(review_prompt),
             sandbox=_stage_sandbox(adapter, "reviewer"),
-            output_schema=getattr(adapter, "review_output_schema", None),
+            # The reviewer always requests the provider-neutral typed output
+            # (docs/agents-sdk-migration-plan.md Stage 2): the selected runner
+            # -- Codex or the Agents SDK -- hands back an already-validated
+            # ``ReviewOutcome`` on ``AgentExecutionResult.output`` rather than
+            # text this coordinator would have to parse itself.
+            output_type=ReviewOutcome,
             skill_names=reviewer_skills,
             audit_path=_attempt_audit_path(workspace, "reviewer", reviewer_attempt),
             hidden_paths=_stage_hidden_paths(adapter, "reviewer", workspace),
@@ -802,7 +903,13 @@ async def _execute_bounded_agents(
             raise
         try:
             continuity = None if independent_review else previous_review
-            review = await _parse_review(adapter, review_result.response, workspace, continuity, reviewer_attempt)
+            if not isinstance(review_result.output, ReviewOutcome):
+                # Both runners are required to populate ``output`` for a
+                # typed request (see ``output_type=ReviewOutcome`` above); a
+                # runner that returns free-form text instead is a defect in
+                # that runner, not a correctable reviewer finding.
+                raise WorkflowExecutionError("reviewer runner did not return a validated review outcome")
+            review = normalize_review_outcome(review_result.output, continuity, attempt=reviewer_attempt)
             evaluation = evaluate_review(
                 review,
                 continuity,
@@ -906,6 +1013,11 @@ async def _execute_workflow(
     value: Any = None
     workspace: Path | None = None
     success = False
+    # Set only on the Stage 5 human-in-the-loop pause: the workspace (frozen
+    # evidence, and soon a pending outline revision) must survive for the
+    # eventual ``resume_from="author"`` re-entry, so the ordinary success/failure
+    # cleanup in ``finally`` below must not run for it.
+    paused = False
     try:
         payload = payload if isinstance(payload, AgentTaskPayload) else AgentTaskPayload.model_validate(payload)
         await _emit_phase(progress_callback, AgentPhase.PREPARING)
@@ -944,6 +1056,7 @@ async def _execute_workflow(
             selected_runner is None
             or isinstance(selected_runner, RunnerRegistry)
             or bool(getattr(adapter, "extraction_skills", ()))
+            or bool(getattr(adapter, "planner_role", None))
         )
         if selected_runner is not None and not isinstance(selected_runner, RunnerRegistry):
             if callable(getattr(selected_runner, "resolve", None)) and not callable(getattr(selected_runner, "run", None)):
@@ -951,10 +1064,16 @@ async def _execute_workflow(
             else:
                 modern_runner = isinstance(selected_runner, CodexRunner) or _uses_execution_request(selected_runner)
 
+        # ``resume_from`` is set only on re-entry after a human has approved an
+        # outline (Stage 5).  Extraction and planning already ran -- and their
+        # outputs are already frozen on disk -- the first time this job's
+        # workspace was prepared, so both are skipped here.
+        resuming = payload.resume_from is not None
+
         # Extraction is a distinct, one-time activation.  It is intentionally
         # completed before the author prompt is built so author revisions can
         # never cause a source document to be reinterpreted.
-        if getattr(adapter, "extraction_skills", ()):
+        if not resuming and getattr(adapter, "extraction_skills", ()):
             await _execute_extraction(
                 run_id=str(payload.job_id),
                 adapter=adapter,
@@ -965,6 +1084,48 @@ async def _execute_workflow(
                 progress_callback=progress_callback,
                 event_callback=event_callback,
             )
+
+        # Planning sits between extraction and authoring: the outline must be
+        # grounded in already-frozen evidence, so it cannot run any earlier.
+        # A declared planner always pauses after its first revision -- there is
+        # no author-style retry loop here, and no adapter opts out per run.
+        if not resuming and getattr(adapter, "planner_role", None):
+            await _execute_planning(
+                run_id=str(payload.job_id),
+                adapter=adapter,
+                value=value,
+                workspace=workspace,
+                staged=staged,
+                selected_runner=selected_runner,
+                progress_callback=progress_callback,
+                event_callback=event_callback,
+            )
+            await _emit_phase(progress_callback, AgentPhase.AWAITING_OUTLINE)
+            paused = True
+            # A non-terminal result: ``status`` stays RUNNING (WorkflowStatus has
+            # no AWAITING_INPUT of its own -- that distinction belongs to
+            # ``JobStatus`` at the durable-job boundary) and ``phase`` carries the
+            # pause.  ``app/tasks/agents.py`` is responsible for recognizing this
+            # combination and releasing the worker's lease without marking the
+            # job failed or retried.
+            return AgentTaskResult(
+                job_id=payload.job_id,
+                workflow=payload.workflow,
+                status=WorkflowStatus.RUNNING,
+                phase=AgentPhase.AWAITING_OUTLINE,
+                output=None,
+                started_at=started,
+                finished_at=datetime.now(timezone.utc),
+                error=None,
+            )
+
+        if resuming:
+            outline_path = workspace / "work" / "outline.json"
+            if not await asyncio.to_thread(outline_path.is_file):
+                raise WorkflowExecutionError(
+                    "workflow resume was requested before an approved outline was written"
+                )
+
         context_hook = getattr(adapter, "semantic_review_context", None) or getattr(adapter, "build_semantic_review_context", None)
         review_context = await _call(context_hook, value, workspace) if context_hook is not None else None
         prompt = await _call(adapter.build_prompt, value, workspace, semantic_review_context=review_context)
@@ -1153,7 +1314,26 @@ async def _execute_workflow(
                 if audit.kind != "review":
                     raise WorkflowExecutionError("workflow turn sequence is invalid")
                 reviewer_attempt += 1
-                review = await _parse_review(adapter, response, workspace, previous_review, reviewer_attempt)
+                # This legacy per-turn-callback path (service.py:1063-1270, removed in
+                # Stage 4) predates ``AgentExecutionRequest.output_type`` and only ever
+                # gets a raw provider ``output_schema`` here, so it still needs an
+                # adapter-supplied parser to turn that text into a ``ReviewOutcome``.
+                # The modern node path above no longer needs this dispatch -- it reads
+                # an already-validated outcome straight off the runner result -- so it
+                # is kept inline for this single remaining caller rather than as a
+                # shared helper.
+                parser = getattr(adapter, "parse_review", None)
+                if parser is None:
+                    raise WorkflowExecutionError("semantic review parser is missing")
+                try:
+                    parser_parameters = inspect.signature(parser).parameters
+                except (TypeError, ValueError):
+                    parser_parameters = {}
+                parser_kwargs = {"previous_review": previous_review} if "previous_review" in parser_parameters else {}
+                parsed_review = await _call(parser, response, workspace, **parser_kwargs)
+                if not isinstance(parsed_review, ReviewOutcome):
+                    raise ValueError("semantic review parser returned an invalid contract")
+                review = normalize_review_outcome(parsed_review, previous_review, attempt=reviewer_attempt)
                 evaluation = evaluate_review(
                     review,
                     previous_review,
@@ -1262,7 +1442,7 @@ async def _execute_workflow(
             error="Workflow execution failed.",
         )
     finally:
-        if adapter is not None and workspace is not None:
+        if adapter is not None and workspace is not None and not paused:
             try:
                 await _call(adapter.cleanup, value, workspace, success=success)
             except Exception:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -39,6 +40,7 @@ def _write_deck(root: Path, slide_count: int = 2) -> Path:
           <Default Extension="xml" ContentType="application/xml"/>
           <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
           {''.join(f'<Override PartName="/ppt/slides/slide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>' for i in range(1, slide_count + 1))}
+          {''.join(f'<Override PartName="/ppt/notesSlides/notesSlide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>' for i in range(1, slide_count + 1))}
         </Types>''',
         "ppt/presentation.xml": f'''<p:presentation xmlns:p="{P_NS}" xmlns:r="{R_NS}">
           <p:sldIdLst>{''.join(f'<p:sldId id="{i}" r:id="rId{i}"/>' for i in range(1, slide_count + 1))}</p:sldIdLst>
@@ -54,6 +56,12 @@ def _write_deck(root: Path, slide_count: int = 2) -> Path:
             <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr/><a:t>{text}</a:t></a:r></a:p></p:txBody>
           </p:sp></p:spTree></p:cSld>
         </p:sld>'''
+        parts[f"ppt/slides/_rels/slide{index}.xml.rels"] = f'''<Relationships xmlns="{REL_NS}">
+          <Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide{index}.xml"/>
+        </Relationships>'''
+        parts[f"ppt/notesSlides/notesSlide{index}.xml"] = f'''<p:notes xmlns:p="{P_NS}" xmlns:a="{A_NS}">
+          <p:notesText><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{"cover" if index == 1 else "body"}</a:t></a:r></a:p></p:txBody></p:notesText>
+        </p:notes>'''
     with zipfile.ZipFile(deck, "w") as archive:
         for name, value in parts.items():
             archive.writestr(name, value)
@@ -76,6 +84,35 @@ def _pass_checker(path: Path) -> dict[str, object]:
         "presentation": {"path": str(path), "sha256": "test", "slide_count": 2},
         "status": "pass",
         "findings": [],
+    }
+
+
+def _write_outline(root: Path, *, nodes: list[dict[str, object]], total_slides: int) -> Path:
+    outline_path = root / "work" / "outline.json"
+    outline_path.parent.mkdir(parents=True, exist_ok=True)
+    outline_path.write_text(
+        json.dumps(
+            {
+                "title": "Cover title",
+                "narrative": "A through-line covering the approved sections.",
+                "nodes": nodes,
+                "total_slides": total_slides,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return outline_path
+
+
+def _outline_node(node_id: str, heading: str) -> dict[str, object]:
+    return {
+        "id": node_id,
+        "heading": heading,
+        "intent": f"Cover {heading} with grounded evidence.",
+        "key_points": ["first point", "second point"],
+        "evidence_refs": [],
+        "emphasis": "normal",
+        "approx_slides": 1,
     }
 
 
@@ -291,3 +328,60 @@ def test_pdftoppm_canonicalization_rejects_padded_name_collisions(tmp_path: Path
     else:
         raise AssertionError("padded names must collide")
     assert not destination.exists()
+
+
+def test_no_outline_file_leaves_validation_unaffected(tmp_path: Path) -> None:
+    """A non-planning job never writes ``work/outline.json``; behavior must be unchanged."""
+
+    _write_deck(tmp_path)
+    result = _validate(tmp_path)
+
+    assert result.status is ValidationStatus.PASS
+    assert not any(finding.code.startswith("outline_") for finding in result.findings)
+
+
+def test_approved_outline_matching_the_deck_passes(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=2,
+    )
+
+    result = _validate(tmp_path)
+
+    assert result.status is ValidationStatus.PASS
+    assert not any(finding.code.startswith("outline_") for finding in result.findings)
+
+
+def test_outline_node_missing_from_deck_is_a_candidate_finding(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("missing", "Regional Risk Outlook")],
+        total_slides=2,
+    )
+
+    result = _validate(tmp_path)
+
+    assert result.status is ValidationStatus.FAIL
+    finding = next(finding for finding in result.findings if finding.code == "outline_node_missing")
+    assert finding.origin == "candidate"
+    assert finding.details["node_id"] == "missing"
+    assert finding.details["heading"] == "Regional Risk Outlook"
+
+
+def test_outline_total_slides_mismatch_is_a_candidate_finding(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=5,
+    )
+
+    result = _validate(tmp_path)
+
+    assert result.status is ValidationStatus.FAIL
+    finding = next(finding for finding in result.findings if finding.code == "outline_slide_count_mismatch")
+    assert finding.origin == "candidate"
+    assert finding.details == {"expected": 5, "actual": 2}

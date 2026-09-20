@@ -114,6 +114,7 @@ export function WorkspaceContent({
                     error={workspace.slideJob.error?.message || null}
                     warning={workspace.slideJob.warning}
                     pollNow={workspace.slideJob.pollNow}
+                    resumePolling={workspace.slideJob.resumePolling}
                     start={workspace.startSlides}
                     retry={workspace.startSlides}
                     onNewPresentation={workspace.startNewSlides}

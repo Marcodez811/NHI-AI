@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from app.config import settings
-from app.models.slides import JobStatus, SlidesTaskPayload, SlidesTaskResult
+from app.models.slides import JobStatus, SlideOutline, SlidesTaskPayload, SlidesTaskResult
 from app.services.agentic.contracts import (
+    AgentExecutionResult,
     AgentReasoningEffort,
     BaseWorkflowAdapter,
     DeterministicValidationError,
@@ -116,47 +116,49 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
     def extraction_reasoning_effort(self) -> AgentReasoningEffort:
         return settings.agent_extraction_reasoning_effort or settings.agent_default_reasoning_effort
 
-    # The parser below remains authoritative so malformed provider responses
-    # fail closed even when an older SDK ignores output_schema.
-    review_output_schema = {
-        "type": "object",
-        "required": ["findings", "summary"],
-        "properties": {
-            "summary": {"type": "string"},
-            "findings": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": ["severity", "category", "slide_number", "claim", "judgement", "evidence_refs", "reason", "correction"],
-                    "properties": {
-                        "severity": {"type": "string", "enum": ["blocking", "advisory"]},
-                        "category": {
-                            "type": "string",
-                            "enum": [
-                                "unsupported_claim",
-                                "contradicted_claim",
-                                "misleading_synthesis",
-                                "material_omission",
-                                "unreadable_claim",
-                                "other",
-                            ],
-                        },
-                        "slide_number": {"type": ["integer", "null"], "minimum": 1},
-                        "claim": {"type": "string"},
-                        "judgement": {
-                            "type": "string",
-                            "enum": ["supported", "unsupported", "contradicted", "misleading", "unclear"],
-                        },
-                        "evidence_refs": {"type": "array", "items": {"type": "string"}},
-                        "reason": {"type": "string"},
-                        "correction": {"type": "string"},
-                    },
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "additionalProperties": False,
-    }
+    @property
+    def extraction_runner(self) -> str:
+        # docs/agents-sdk-migration-plan.md Stage 1: the extraction node's
+        # runner is a per-node configuration choice, not a deploy. Defaults to
+        # "codex" through the setting itself.
+        return settings.agent_extraction_runner
+
+    @property
+    def reviewer_runner(self) -> str:
+        # Stage 2: same seam as ``extraction_runner``, for the reviewer node.
+        # The reviewer requests ``output_type=ReviewOutcome`` regardless of
+        # which runner this resolves to (app/services/agentic/service.py);
+        # both runners hand the coordinator an already-validated outcome.
+        return settings.agent_reviewer_runner
+
+    # Stage 5 (docs/agents-sdk-migration-plan.md): declaring a non-empty
+    # ``planner_role`` is what opts this workflow into the planning phase --
+    # ``_execute_workflow`` gates on it exactly the way it gates extraction on
+    # ``extraction_skills``. Unlike extraction/reviewer runner selection, this
+    # gate guards a whole new pause in the pipeline, not just which provider
+    # runs an existing one, so it defaults *off*: ``settings.agent_planner_enabled``
+    # keeps every existing slides job completing exactly as it does today until an
+    # operator opts in by configuration, matching this migration's "flip by
+    # config, not by deploy" pattern (Stage 0).
+    planner_output_type = SlideOutline
+
+    @property
+    def planner_role(self) -> str | None:
+        return "presentation_planner" if settings.agent_planner_enabled else None
+
+    @property
+    def planner_model(self) -> str:
+        return settings.agent_planner_model or settings.agent_default_model
+
+    @property
+    def planner_reasoning_effort(self) -> AgentReasoningEffort:
+        return settings.agent_planner_reasoning_effort or settings.agent_default_reasoning_effort
+
+    @property
+    def planner_runner(self) -> str:
+        # Same per-node runner seam as extraction/reviewer; defaults to
+        # "codex" through the setting itself.
+        return settings.agent_planner_runner
 
     @property
     def max_author_attempts(self) -> int:
@@ -233,11 +235,21 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
 
         if stage == "extraction":
             return (workspace / "input",)
+        if stage == "planner":
+            # Read-only, exactly like the author: the planner sees the frozen
+            # evidence through the sandbox filesystem grant, never inlined into
+            # its prompt, so it and the author are grounded in byte-identical
+            # evidence (docs/agents-sdk-migration-plan.md, Stage 5 decision).
+            return (workspace / "work" / "evidence.json",)
         if stage == "author":
             return (
                 workspace / "work" / "evidence.json",
                 workspace / "work" / "extracted" / "assets",
                 workspace / "template",
+                # The human-approved outline (Stage 5); absent on a run whose
+                # workflow never declares a planner, so this grant is a no-op
+                # for those workflows.
+                workspace / "work" / "outline.json",
             )
         if stage == "reviewer":
             return (
@@ -288,6 +300,64 @@ the frozen `work/evidence.json` store after this activation.
         except EvidenceError as exc:
             raise JobError("extraction", "extraction artifacts could not be consolidated") from exc
 
+    async def build_planning_prompt(self, value: SlidesTaskPayload, workspace: Path) -> str:
+        del workspace
+        return f"""# Planning stage
+
+Propose a structured outline for a presentation grounded entirely in the frozen
+EvidenceStore at `work/evidence.json` (already mounted read-only; you cannot write to it
+or to any other workspace path from this stage). Do not draft slide content or write any
+file -- return only the structured outline.
+
+## Brief
+- Title: {value.title}
+- Tone: {value.tone}
+- Target length: {value.slides_count} slides.
+- Additional guidance: {value.guidance}
+
+Organize the presentation into sections, not per-slide breakdowns: each node needs a
+`heading`, an `intent` describing what it must accomplish, 2-5 evidence-grounded
+`key_points`, and `evidence_refs` -- ids copied verbatim from `work/evidence.json` blocks.
+An id that does not exist in that store will be rejected before a human ever reviews this
+outline. Set `emphasis` (light/normal/deep) to reflect how much author attention each
+section deserves relative to the others, and `approx_slides` as a realistic hint whose sum
+lands near the requested {value.slides_count}-slide brief. Resolve conflicting evidence
+explicitly rather than presenting both sides unreconciled.
+"""
+
+    async def post_planning(self, value: SlidesTaskPayload, result: AgentExecutionResult, workspace: Path) -> None:
+        """Validate and persist the planner's proposal as durable revision 1.
+
+        The generic coordinator only knows a planning activation finished with
+        some result; turning its typed ``SlideOutline`` into a `slide_outlines`
+        row -- and rejecting one that cites evidence the extractor never
+        produced -- is slides-specific policy, so it lives here rather than in
+        ``app/services/agentic/service.py``.
+        """
+
+        from sqlmodel import Session
+
+        from app.db import engine
+
+        from .evidence import EvidenceError, validate_outline_evidence_references
+        from .outline_repository import SQLModelSlideOutlineRepository
+
+        outline = result.output
+        if not isinstance(outline, SlideOutline):
+            raise JobError("planning", "planner did not return a structured outline")
+        try:
+            validate_outline_evidence_references(outline, workspace / "work" / "evidence.json")
+        except EvidenceError as exc:
+            raise JobError("planning", "outline referenced evidence the extractor never produced") from exc
+
+        # ``create_next_revision`` is an ``async def`` that does synchronous
+        # SQLModel work internally, awaited directly rather than offloaded to a
+        # thread -- the same pattern ``app/tasks/agents.py`` already uses for
+        # every other durable-row write on this workflow's boundary.
+        with Session(engine) as session:
+            repository = SQLModelSlideOutlineRepository(session)
+            await repository.create_next_revision(value.job_id, outline, session_id=str(value.job_id))
+
     async def semantic_review_context(self, value: SlidesTaskPayload, workspace: Path) -> Any:
         return {
             "requested_title": value.title,
@@ -307,7 +377,12 @@ the frozen `work/evidence.json` store after this activation.
     async def build_prompt(self, value: SlidesTaskPayload, workspace: Path, *, semantic_review_context: Any = None, revision_feedback: str | None = None) -> str:
         context_path = workspace / "work" / "slide_context.json"
         context = json.loads(await asyncio.to_thread(context_path.read_text, encoding="utf-8"))
-        prompt = build_prompt(value, context.get("staged_names", []), font_family=context.get("font"))
+        outline_path = workspace / "work" / "outline.json"
+        outline: SlideOutline | None = None
+        if await asyncio.to_thread(outline_path.is_file):
+            outline_text = await asyncio.to_thread(outline_path.read_text, encoding="utf-8")
+            outline = SlideOutline.model_validate(json.loads(outline_text))
+        prompt = build_prompt(value, context.get("staged_names", []), font_family=context.get("font"), outline=outline)
         if revision_feedback:
             prompt += (
                 "\n\n## Corrective revision instructions\n"
@@ -429,92 +504,6 @@ the frozen `work/evidence.json` store after this activation.
                 findings=rendered,
                 diagnostic_codes=diagnostic_codes,
             )
-
-    def parse_review(
-        self,
-        response: str | None,
-        workspace: Path,
-        previous_review: ReviewOutcome | None = None,
-    ) -> ReviewOutcome:
-        semantic_review_path = workspace / "work" / "intermediate" / "semantic_review.json"
-        semantic_review_path.unlink(missing_ok=True)
-        if not response or not isinstance(response, str):
-            raise ValueError("semantic review response was empty")
-        text = response.strip()
-        fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.IGNORECASE | re.DOTALL)
-        if fence:
-            text = fence.group(1).strip()
-        try:
-            review = json.loads(text)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("semantic review response was malformed") from exc
-        if not isinstance(review, dict) or set(review) != {"summary", "findings"}:
-            raise ValueError("semantic review response was malformed")
-        required_finding_fields = {
-            "severity",
-            "category",
-            "slide_number",
-            "claim",
-            "judgement",
-            "evidence_refs",
-            "reason",
-            "correction",
-        }
-        findings = review.get("findings")
-        if not isinstance(findings, list):
-            raise ValueError("semantic review response was malformed")
-        allowed_categories = {
-            "unsupported_claim",
-            "contradicted_claim",
-            "misleading_synthesis",
-            "material_omission",
-            "unreadable_claim",
-            "other",
-        }
-        for finding in findings:
-            if not isinstance(finding, dict) or set(finding) != required_finding_fields:
-                raise ValueError("semantic review response was malformed")
-            if finding["category"] not in allowed_categories:
-                raise ValueError("semantic review response was malformed")
-            if finding["judgement"] not in {"supported", "unsupported", "contradicted", "misleading", "unclear"}:
-                raise ValueError("semantic review response was malformed")
-            if finding["judgement"] == "contradicted" and not finding["evidence_refs"]:
-                raise ValueError("contradicted findings must cite evidence")
-        try:
-            # Parse types before applying cross-artifact checks. This turns a
-            # wrong provider type into a controlled schema failure instead of
-            # leaking a comparison TypeError from the coordinator.
-            outcome = ReviewOutcome.model_validate(review)
-        except Exception as exc:
-            raise ValueError("semantic review response was malformed") from exc
-        evidence_path = workspace / "work" / "evidence.json"
-        snapshot_path = workspace / "work" / "intermediate" / "deck_snapshot.json"
-        try:
-            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            slide_count = snapshot.get("slide_count")
-            if not isinstance(slide_count, int) or slide_count < 1:
-                raise ValueError
-            evidence_ids = {
-                str(item.get("id"))
-                for key in ("blocks", "assets")
-                for item in evidence.get(key, [])
-                if isinstance(item, dict) and item.get("id")
-            }
-        except (OSError, TypeError, ValueError):
-            raise ValueError("semantic review inputs were missing or malformed")
-        if any(
-            item.slide_number is not None and item.slide_number > slide_count
-            for item in outcome.findings
-        ):
-            raise ValueError("semantic review referenced an unknown slide")
-        if any(ref not in evidence_ids for item in outcome.findings for ref in item.evidence_refs):
-            raise ValueError("semantic review referenced unknown evidence")
-        semantic_review_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = semantic_review_path.with_suffix(".json.tmp")
-        temporary_path.write_text(outcome.model_dump_json(indent=2) + "\n", encoding="utf-8")
-        temporary_path.replace(semantic_review_path)
-        return outcome
 
     def revision_feedback(self, value: SlidesTaskPayload, review: ReviewOutcome, result: Any) -> str:
         del value, result

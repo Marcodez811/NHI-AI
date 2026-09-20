@@ -4,22 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Annotated
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from taskiq.depends.progress_tracker import TaskProgress
 from taskiq_redis.exceptions import ResultIsMissingError
 
+from app.api.routes.chat import _stream_with_heartbeat
 from app.broker import result_backend
 from app.config import settings
 from app.models.slides import (
+    ApproveOutlineRequest,
+    ApproveOutlineResponse,
     CreateSlidesJobResponse,
     GenerateSlidesRequest,
     JobStatus,
+    OutlineMessageRequest,
+    OutlineRevisionResponse,
     SlideJobBrief,
     SUPPORTED_SLIDE_SOURCE_EXTENSIONS,
     SlidesJobStatusResponse,
@@ -28,6 +34,15 @@ from app.models.slides import (
 )
 from app.services.agentic import AgentPhase, AgentTaskPayload
 from app.services.documents.repository import DocumentRepository
+from app.services.slides.outline_repository import (
+    InMemorySlideOutlineRepository,
+    OutlineAlreadyApprovedError,
+    OutlineRevisionNotFoundError,
+    SlideOutlineRepository,
+    StaleOutlineRevisionError,
+)
+from app.services.slides.approval_outbox import dispatch_approval_outbox
+from app.services.slides.planner import PlannerConversationService
 from app.services.slides.repository import InMemorySlideJobRepository, SlideJobRepository
 from app.models.documents import DocumentStatus
 from app.api.routes.documents import get_document_repository
@@ -36,12 +51,26 @@ from app.tasks.agents import run as agents_run
 router = APIRouter(prefix="/slides", tags=["slides"])
 
 _slide_repository = InMemorySlideJobRepository()
+_outline_repository = InMemorySlideOutlineRepository()
+_planner_conversation_service = PlannerConversationService()
 
 
 def get_slide_job_repository() -> SlideJobRepository:
     """Default dependency for direct use; production overrides this in main."""
 
     return _slide_repository
+
+
+def get_slide_outline_repository() -> SlideOutlineRepository:
+    """Default dependency for direct use; production overrides this in main."""
+
+    return _outline_repository
+
+
+def get_planner_conversation_service() -> PlannerConversationService:
+    """Default dependency; tests override this with a fake, network-free runner."""
+
+    return _planner_conversation_service
 
 _PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 _SAFE_STAGE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -473,4 +502,143 @@ async def download_slides_job(
         artifact,
         media_type=_PPTX_MEDIA_TYPE,
         filename=_safe_filename(result.download_filename, job_id),
+    )
+
+
+@router.get("/jobs/{job_id}/outline", response_model=OutlineRevisionResponse)
+async def get_slide_job_outline(
+    job_id: UUID,
+    outline_repository: Annotated[SlideOutlineRepository, Depends(get_slide_outline_repository)],
+) -> OutlineRevisionResponse:
+    """Return the latest planner proposal for one job (Stage 5)."""
+
+    revision = await outline_repository.get_latest(job_id)
+    if revision is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Outline was not found.")
+    return OutlineRevisionResponse(
+        job_id=job_id,
+        revision=revision.revision,
+        outline=revision.to_outline(),
+        session_id=revision.session_id,
+        created_at=revision.created_at,
+        approved_at=revision.approved_at,
+    )
+
+
+@router.post("/jobs/{job_id}/outline/messages")
+async def send_slide_job_outline_message(
+    job_id: UUID,
+    request: OutlineMessageRequest,
+    outline_repository: Annotated[SlideOutlineRepository, Depends(get_slide_outline_repository)],
+    planner: Annotated[PlannerConversationService, Depends(get_planner_conversation_service)],
+) -> StreamingResponse:
+    """Continue the outline conversation and persist the resulting revision.
+
+    Mirrors ``app.api.routes.chat.stream_chat``'s SSE shape exactly --
+    ``_stream_with_heartbeat`` is the same helper, not a reimplementation --
+    so the frontend parses both endpoints' events identically.
+    """
+
+    latest = await outline_repository.get_latest(job_id)
+    if latest is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Outline was not found.")
+    if latest.approved_at is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Outline has already been approved.")
+
+    async def _generate() -> AsyncGenerator[str, None]:
+        source = planner.continue_conversation(
+            job_id=job_id,
+            message=request.message,
+            latest=latest,
+            outline_repository=outline_repository,
+        )
+        async for chunk in _stream_with_heartbeat(
+            source,
+            heartbeat_seconds=settings.chat_stream_heartbeat_seconds,
+            timeout_seconds=settings.chat_timeout_seconds,
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/jobs/{job_id}/outline/approve", response_model=ApproveOutlineResponse)
+async def approve_slide_job_outline(
+    job_id: UUID,
+    request: ApproveOutlineRequest,
+    outline_repository: Annotated[SlideOutlineRepository, Depends(get_slide_outline_repository)],
+    task: Annotated[Any, Depends(get_generate_slides_task)],
+    slide_repository: Annotated[SlideJobRepository, Depends(get_slide_job_repository)] = None,
+) -> ApproveOutlineResponse:
+    """Approve one outline revision and resume authoring from it.
+
+    The SQL repository commits the approval and one unique outbox row in the
+    same transaction.  The dispatcher writes the existing author input file
+    and publishes that row to TaskIQ afterwards.  It marks delivery only
+    after publication, giving intentional at-least-once behavior across a
+    crash; ``agents.run`` then uses its durable lease claim to make a repeat
+    delivery harmless.
+    """
+
+    if slide_repository is not None:
+        durable = await slide_repository.get(job_id)
+        if durable is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Slide job was not found.")
+
+    try:
+        approved = await outline_repository.approve(job_id, expected_revision=request.expected_revision)
+    except OutlineAlreadyApprovedError:
+        approved = await outline_repository.get_revision(job_id, request.expected_revision)
+        if approved is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Outline revision was not found.")
+    except OutlineRevisionNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Outline was not found.") from exc
+    except StaleOutlineRevisionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Revision {exc.expected_revision} is no longer current; the latest revision is {exc.latest_revision}.",
+        ) from exc
+
+    event = await outline_repository.get_approval_outbox(job_id, approved.revision)
+    if event is None:
+        # This is an invariant violation (not a normal client error): a SQL
+        # approval commits with the event, while the in-memory implementation
+        # mirrors it for local/default behavior and tests.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Presentation authoring is awaiting dispatch.",
+        )
+    try:
+        await dispatch_approval_outbox(
+            event=event,
+            revision=approved,
+            repository=outline_repository,
+            task=task,
+            jobs_root=Path(settings.agent_jobs_root),
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Approved outline could not be written.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Presentation authoring could not be resumed.",
+        ) from exc
+
+    durable = await slide_repository.get(job_id) if slide_repository is not None else None
+    return ApproveOutlineResponse(
+        job_id=job_id,
+        status=JobStatus(durable.status) if durable is not None else JobStatus.AWAITING_INPUT,
+        phase=(
+            _safe_phase(durable.phase, status=JobStatus(durable.status), stage=durable.stage)
+            if durable is not None
+            else AgentPhase.AWAITING_OUTLINE
+        ),
+        approved_revision=approved.revision,
     )
