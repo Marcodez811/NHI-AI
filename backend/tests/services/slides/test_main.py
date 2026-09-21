@@ -159,6 +159,11 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertIn("fresh semantic-only review", prompt)
         self.assertIn("internal EvidenceStore/block-ID/path/hash leakage", prompt)
         self.assertIn("image-chart values", prompt)
+        self.assertIn("expanded references on the final references slide", prompt)
+        self.assertIn("unsupported or fabricated reference entry as blocking", prompt)
+        self.assertIn("every footer and reference entry as an author claim", prompt)
+        self.assertNotIn("expanded references in slide notes", prompt)
+        self.assertNotIn("Speaker notes are author claims", prompt)
         self.assertNotIn("Prior blocking findings", prompt)
 
         previous = ReviewOutcome(

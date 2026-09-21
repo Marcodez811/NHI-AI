@@ -530,13 +530,16 @@ rather than presenting both sides unreconciled.
             "identify the correct value in reason and provide a concrete correction. "
             "Review citations as part of factual quality: factual slides, figures, and charts need a "
             "recognizable source filename and available section, page, or line locator in the visible "
-            "footer, with expanded references in slide notes. Treat missing or misleading attribution, "
+            "numbered footer, with expanded references on the final references slide. Treat every footer "
+            "and reference entry as an author claim that must match frozen evidence. Treat an unsupported "
+            "or fabricated reference entry as blocking, just like an unsupported slide claim. Treat missing "
+            "or misleading attribution, "
             "internal EvidenceStore/block-ID/path/hash leakage, incorrect image-chart values, or unreadable "
             "image-chart labels as blocking. A retained block may lack derived citation metadata; in that "
             "case accept a conservative filename and available provenance locator. Treat workflow terms as "
             "leakage only when they describe generation or serve as citations, not when the source material "
             "legitimately discusses software, JSON, paths, or hashes. Treat harmless citation-style "
-            "differences as advisory. Speaker notes are author claims that must still match frozen evidence. "
+            "differences as advisory. The delivered deck must not use speaker notes. "
             f"Review inputs: {json.dumps(review_context or {}, ensure_ascii=False)}"
         )
 
