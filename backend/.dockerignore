@@ -1,0 +1,45 @@
+# Build context exclusions.
+#
+# The Dockerfile copies explicitly (app, .agents, alembic, scripts, and the
+# dependency manifests), so nothing here ever reached the image. The cost was
+# the context transfer itself: .venv and node_modules alone are ~650MB, sent to
+# the daemon on every build, and four services build from this same context.
+#
+# Keeping .env out is also a standing guard: it is not copied today, but a
+# future `COPY . .` would otherwise bake credentials into a layer.
+#
+# Do NOT add app/services/slides/fonts here. Those CJK fonts are required at
+# runtime to render Traditional Chinese slides.
+
+# Python environment and caches
+.venv
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Node dependencies: the image runs `npm ci` from package-lock.json instead
+node_modules
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Tests and local development artifacts
+tests
+graphify-out
+*.db
+*.sqlite3
+
+# Editor and VCS
+.git
+.gitignore
+.vscode
+.idea
+
+# Docs
+README.md
+AGENTIC_WORKFLOW.md
