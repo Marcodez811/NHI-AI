@@ -332,8 +332,26 @@ class SlidesServiceTests(unittest.TestCase):
                 archive.writestr("ppt/slides/slide2.xml", "slide")
                 archive.writestr("padding.bin", "x" * 12_000)
 
-            with self.assertRaisesRegex(JobError, "expected 8 slides, found 2"):
+            with self.assertRaisesRegex(
+                JobError,
+                "expected 8 content slides plus one references slide",
+            ):
                 verify_output(root, expected_slide_count=8)
+
+    def test_verify_output_rejects_speaker_notes_parts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            deck = root / "output" / "presentation.pptx"
+            deck.parent.mkdir()
+            with zipfile.ZipFile(deck, "w") as archive:
+                archive.writestr("[Content_Types].xml", "content")
+                archive.writestr("ppt/slides/slide1.xml", "slide")
+                archive.writestr("ppt/slides/slide2.xml", "slide")
+                archive.writestr("ppt/notesSlides/notesSlide1.xml", "notes")
+                archive.writestr("padding.bin", "x" * 12_000)
+
+            with self.assertRaisesRegex(JobError, "contains speaker notes"):
+                verify_output(root, expected_slide_count=1)
 
     def test_verify_output_rejects_identical_final_renders(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -367,7 +385,7 @@ class SlidesServiceTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
             with self.assertRaisesRegex(JobError, "all final slide renders are identical"):
-                verify_output(root, expected_slide_count=2, runner=office_runner)
+                verify_output(root, expected_slide_count=1, runner=office_runner)
 
     def test_preflight_requires_thumbnail_renderer(self):
         def tool_lookup(name):

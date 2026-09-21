@@ -277,6 +277,16 @@ def _pptx_slide_count(path: Path) -> int:
         raise JobError("verify_output", "presentation is not a valid PPTX/ZIP") from exc
     if "[Content_Types].xml" not in names:
         raise JobError("verify_output", "presentation has no OOXML content types")
+    note_parts = sorted(
+        name
+        for name in names
+        if name.startswith("ppt/notesSlides/") and not name.endswith("/")
+    )
+    if note_parts:
+        raise JobError(
+            "verify_output",
+            "presentation contains speaker notes: " + ", ".join(note_parts),
+        )
     slides = [name for name in names if name.startswith("ppt/slides/slide") and name.endswith(".xml")]
     if not slides:
         raise JobError("verify_output", "presentation contains no slides")
@@ -342,14 +352,18 @@ def verify_output(
     deck = job_dir / "output" / "presentation.pptx"
     slide_count = _pptx_slide_count(deck)
 
+    expected_total_slide_count = (
+        expected_slide_count + 1 if expected_slide_count is not None else None
+    )
     if (
-        expected_slide_count is not None
-        and slide_count != expected_slide_count
+        expected_total_slide_count is not None
+        and slide_count != expected_total_slide_count
     ):
         raise JobError(
             "verify_output",
             (
-                f"expected {expected_slide_count} slides, "
+                f"expected {expected_slide_count} content slides plus one references slide "
+                f"({expected_total_slide_count} total), "
                 f"found {slide_count}"
             ),
         )

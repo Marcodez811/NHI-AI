@@ -38,6 +38,7 @@ def _write_deck(
     slide_count: int = 2,
     *,
     paragraphs_by_slide: dict[int, list[str]] | None = None,
+    include_notes: bool = False,
 ) -> Path:
     deck = root / "output" / "presentation.pptx"
     deck.parent.mkdir(parents=True)
@@ -47,7 +48,7 @@ def _write_deck(
           <Default Extension="xml" ContentType="application/xml"/>
           <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
           {''.join(f'<Override PartName="/ppt/slides/slide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>' for i in range(1, slide_count + 1))}
-          {''.join(f'<Override PartName="/ppt/notesSlides/notesSlide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>' for i in range(1, slide_count + 1))}
+          {''.join(f'<Override PartName="/ppt/notesSlides/notesSlide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>' for i in range(1, slide_count + 1)) if include_notes else ''}
         </Types>''',
         "ppt/presentation.xml": f'''<p:presentation xmlns:p="{P_NS}" xmlns:r="{R_NS}">
           <p:sldIdLst>{''.join(f'<p:sldId id="{i}" r:id="rId{i}"/>' for i in range(1, slide_count + 1))}</p:sldIdLst>
@@ -76,12 +77,13 @@ def _write_deck(
             <p:txBody><a:bodyPr/><a:lstStyle/>{text_xml}</p:txBody>
           </p:sp></p:spTree></p:cSld>
         </p:sld>'''
-        parts[f"ppt/slides/_rels/slide{index}.xml.rels"] = f'''<Relationships xmlns="{REL_NS}">
-          <Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide{index}.xml"/>
-        </Relationships>'''
-        parts[f"ppt/notesSlides/notesSlide{index}.xml"] = f'''<p:notes xmlns:p="{P_NS}" xmlns:a="{A_NS}">
-          <p:notesText><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{"cover" if index == 1 else "body"}</a:t></a:r></a:p></p:txBody></p:notesText>
-        </p:notes>'''
+        if include_notes:
+            parts[f"ppt/slides/_rels/slide{index}.xml.rels"] = f'''<Relationships xmlns="{REL_NS}">
+              <Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide{index}.xml"/>
+            </Relationships>'''
+            parts[f"ppt/notesSlides/notesSlide{index}.xml"] = f'''<p:notes xmlns:p="{P_NS}" xmlns:a="{A_NS}">
+              <p:notesText><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{"cover" if index == 1 else "body"}</a:t></a:r></a:p></p:txBody></p:notesText>
+            </p:notes>'''
     with zipfile.ZipFile(deck, "w") as archive:
         for name, value in parts.items():
             archive.writestr(name, value)
@@ -158,7 +160,7 @@ def _validate(root: Path, **kwargs: object):
     if "sources_path" not in kwargs and not sources_path.exists():
         write_source_manifest(sources_path, ["source.pdf"], ["年度報告.pdf"])
     options: dict[str, object] = {
-        "expected_slide_count": 2,
+        "expected_slide_count": 1,
         "requested_title": "Cover title",
         "content_checker": _pass_checker,
         "require_logo": False,
@@ -224,6 +226,36 @@ def test_backend_renders_replace_stale_author_previews_and_bind_snapshot(tmp_pat
     assert (final / "slide-1.png").read_bytes() != (preview / "slide-1.png").read_bytes()
     assert result.deck_snapshot["artifact_binding"]["pptx_sha256"] == result.pptx_sha256
     assert result.deck_snapshot["trusted_renders"] == []
+
+
+def test_requested_count_excludes_the_final_references_slide(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+
+    result = _validate(tmp_path, expected_slide_count=2)
+
+    finding = next(finding for finding in result.findings if finding.code == "slide_count")
+    assert finding.details == {
+        "expected_content_slides": 2,
+        "expected_total_slides": 3,
+        "actual_total_slides": 2,
+    }
+
+
+def test_speaker_notes_parts_are_a_candidate_finding(tmp_path: Path) -> None:
+    deck = _write_deck(tmp_path, include_notes=True)
+
+    result = _validate(tmp_path)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "speaker_notes_present"
+    )
+    assert finding.origin == "candidate"
+    assert finding.details["parts"] == [
+        "ppt/notesSlides/notesSlide1.xml",
+        "ppt/notesSlides/notesSlide2.xml",
+    ]
+    snapshot = validation_module.build_deck_snapshot(deck)
+    assert snapshot["slides"][0]["notes"] == ["cover"]
 
 
 def test_failed_validation_clears_old_final_renders(tmp_path: Path) -> None:
@@ -556,7 +588,7 @@ def test_references_slide_matches_unique_numbered_content_sources(tmp_path: Path
 
     result = _validate(
         tmp_path,
-        expected_slide_count=3,
+        expected_slide_count=2,
         renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
     )
 
@@ -607,7 +639,7 @@ def test_references_slide_rejects_duplicate_numbers_sources_and_mismatch(tmp_pat
 
     result = _validate(
         tmp_path,
-        expected_slide_count=3,
+        expected_slide_count=2,
         renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
     )
 
@@ -637,7 +669,7 @@ def test_content_footers_reuse_reference_number_for_a_repeated_source(tmp_path: 
 
     result = _validate(
         tmp_path,
-        expected_slide_count=4,
+        expected_slide_count=3,
         renderer=_renderer(
             ((10, 20, 30), (20, 30, 40), (30, 40, 50), (40, 50, 60))
         ),
@@ -693,7 +725,7 @@ def test_content_footer_markers_must_map_one_to_one_with_references(tmp_path: Pa
 
     result = _validate(
         tmp_path,
-        expected_slide_count=4,
+        expected_slide_count=3,
         renderer=_renderer(
             ((10, 20, 30), (20, 30, 40), (30, 40, 50), (40, 50, 60))
         ),
@@ -733,7 +765,7 @@ def test_source_manifest_missing_or_malformed_is_infrastructure_failure(
 
 
 def test_approved_outline_matching_the_deck_passes(tmp_path: Path) -> None:
-    _write_deck(tmp_path)
+    _write_deck(tmp_path, slide_count=3)
     _write_outline(
         tmp_path,
         nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
@@ -741,14 +773,18 @@ def test_approved_outline_matching_the_deck_passes(tmp_path: Path) -> None:
     )
     _write_outline_mapping(tmp_path, [("cover", 1, 1), ("body", 2, 2)])
 
-    result = _validate(tmp_path)
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
 
     assert result.status is ValidationStatus.PASS
     assert not any(finding.code.startswith("outline_") for finding in result.findings)
 
 
 def test_outline_node_missing_from_deck_is_a_candidate_finding(tmp_path: Path) -> None:
-    _write_deck(tmp_path)
+    _write_deck(tmp_path, slide_count=3)
     _write_outline(
         tmp_path,
         nodes=[_outline_node("cover", "Cover title"), _outline_node("missing", "Regional Risk Outlook")],
@@ -756,7 +792,11 @@ def test_outline_node_missing_from_deck_is_a_candidate_finding(tmp_path: Path) -
     )
     _write_outline_mapping(tmp_path, [("cover", 1, 2)])
 
-    result = _validate(tmp_path)
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
 
     assert result.status is ValidationStatus.FAIL
     finding = next(finding for finding in result.findings if finding.code == "outline_node_missing")
@@ -766,7 +806,7 @@ def test_outline_node_missing_from_deck_is_a_candidate_finding(tmp_path: Path) -
 
 
 def test_outline_total_slides_mismatch_is_a_candidate_finding(tmp_path: Path) -> None:
-    _write_deck(tmp_path)
+    _write_deck(tmp_path, slide_count=3)
     _write_outline(
         tmp_path,
         nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
@@ -774,7 +814,11 @@ def test_outline_total_slides_mismatch_is_a_candidate_finding(tmp_path: Path) ->
     )
     _write_outline_mapping(tmp_path, [("cover", 1, 1), ("body", 2, 2)])
 
-    result = _validate(tmp_path)
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
 
     assert result.status is ValidationStatus.FAIL
     finding = next(finding for finding in result.findings if finding.code == "outline_slide_count_mismatch")
@@ -783,21 +827,25 @@ def test_outline_total_slides_mismatch_is_a_candidate_finding(tmp_path: Path) ->
 
 
 def test_missing_outline_mapping_is_a_candidate_finding(tmp_path: Path) -> None:
-    _write_deck(tmp_path)
+    _write_deck(tmp_path, slide_count=3)
     _write_outline(
         tmp_path,
         nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
         total_slides=2,
     )
 
-    result = _validate(tmp_path)
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
 
     finding = next(finding for finding in result.findings if finding.code == "outline_mapping_missing")
     assert finding.origin == "candidate"
 
 
 def test_malformed_outline_mapping_is_a_candidate_finding(tmp_path: Path) -> None:
-    _write_deck(tmp_path)
+    _write_deck(tmp_path, slide_count=3)
     _write_outline(
         tmp_path,
         nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
@@ -806,14 +854,18 @@ def test_malformed_outline_mapping_is_a_candidate_finding(tmp_path: Path) -> Non
     mapping_path = tmp_path / "work" / "outline_mapping.json"
     mapping_path.write_text("not JSON", encoding="utf-8")
 
-    result = _validate(tmp_path)
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
 
     finding = next(finding for finding in result.findings if finding.code == "outline_mapping_invalid")
     assert finding.origin == "candidate"
 
 
 def test_outline_mapping_rejects_extra_top_level_fields(tmp_path: Path) -> None:
-    _write_deck(tmp_path)
+    _write_deck(tmp_path, slide_count=3)
     _write_outline(
         tmp_path,
         nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
@@ -824,7 +876,11 @@ def test_outline_mapping_rejects_extra_top_level_fields(tmp_path: Path) -> None:
     payload["unexpected"] = True
     mapping_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    result = _validate(tmp_path)
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
 
     assert any(finding.code == "outline_mapping_invalid" for finding in result.findings)
 
@@ -855,7 +911,7 @@ def test_outline_mapping_structural_violations_are_candidate_findings(
     mapping: list[tuple[str, int, int]],
     expected_codes: set[str],
 ) -> None:
-    _write_deck(tmp_path)
+    _write_deck(tmp_path, slide_count=3)
     _write_outline(
         tmp_path,
         nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
@@ -863,7 +919,11 @@ def test_outline_mapping_structural_violations_are_candidate_findings(
     )
     _write_outline_mapping(tmp_path, mapping)
 
-    result = _validate(tmp_path)
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
 
     finding_codes = {finding.code for finding in result.findings}
     assert expected_codes <= finding_codes
@@ -875,7 +935,7 @@ def test_outline_mapping_structural_violations_are_candidate_findings(
 
 
 def test_outline_mapping_ranges_must_be_contiguous_and_cover_content_slides(tmp_path: Path) -> None:
-    _write_deck(tmp_path, slide_count=3)
+    _write_deck(tmp_path, slide_count=4)
     _write_outline(
         tmp_path,
         nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 3")],
@@ -886,7 +946,9 @@ def test_outline_mapping_ranges_must_be_contiguous_and_cover_content_slides(tmp_
     result = _validate(
         tmp_path,
         expected_slide_count=3,
-        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+        renderer=_renderer(
+            ((10, 20, 30), (20, 30, 40), (30, 40, 50), (40, 50, 60))
+        ),
     )
 
     finding_codes = {finding.code for finding in result.findings}

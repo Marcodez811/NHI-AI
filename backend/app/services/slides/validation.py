@@ -1852,11 +1852,37 @@ def _validate_candidate_deck_in_render_root(
     try:
         package = _load_pptx_package(deck)
         slide_count = len(package.ordered_slides)
+        content_slide_count = slide_count - 1
         if sources is not None:
             findings.extend(_citation_source_name_findings(package, sources))
             findings.extend(_references_slide_findings(package, sources))
-        if expected_slide_count is not None and slide_count != expected_slide_count:
-            findings.append(ValidationFinding("slide_count", "PPTX slide count does not match the requested count", details={"expected": expected_slide_count, "actual": slide_count}, origin="candidate"))
+        if expected_slide_count is not None and content_slide_count != expected_slide_count:
+            findings.append(
+                ValidationFinding(
+                    "slide_count",
+                    "PPTX content-slide count does not match the requested count",
+                    details={
+                        "expected_content_slides": expected_slide_count,
+                        "expected_total_slides": expected_slide_count + 1,
+                        "actual_total_slides": slide_count,
+                    },
+                    origin="candidate",
+                )
+            )
+        note_parts = sorted(
+            member
+            for member in package.members
+            if member.startswith("ppt/notesSlides/") and not member.endswith("/")
+        )
+        if note_parts:
+            findings.append(
+                ValidationFinding(
+                    "speaker_notes_present",
+                    "delivered PPTX must not contain speaker-notes parts",
+                    details={"parts": note_parts},
+                    origin="candidate",
+                )
+            )
     except PptxPackageError as exc:
         findings.append(ValidationFinding("pptx_invalid", str(exc), origin="candidate"))
 
@@ -1927,7 +1953,7 @@ def _validate_candidate_deck_in_render_root(
             _outline_cross_check(
                 outline,
                 job_dir / "work" / "outline_mapping.json",
-                slide_count,
+                slide_count - 1 if slide_count is not None else None,
             )
         )
 
