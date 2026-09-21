@@ -4,6 +4,37 @@ Handoff document. Written for coding agents who were **not** present for the wor
 describes, so it carries its own context. Read "Context" and "Ground rules" before
 touching anything; each work item below is self-contained after that.
 
+## 2026-09-21 citation/no-notes implementation handoff
+
+`9_20_citation_and_notes_plan.md` WI-0 through WI-8 is implemented on
+`agents-sdk-migration` as separate work-item commits: `cd51c833`
+(WI-1 and WI-6 atomically: no author-written notes, exact
+`work/outline_mapping.json` sidecar and structural outline checks), `8edf1423`
+(WI-0: knowledge-base `display_name` allowlist via `work/sources.json`),
+`a7ebd30b` (WI-2: final evidence-derived `參考資料` slide), `9e327a7c` (WI-3:
+numbered footers tied to references), `8548fe4f` (WI-4: native chart titles),
+`0d5d0cd4` (WI-5: exact N content slides plus one references slide, no notes
+parts, and legacy verifier parity), and `1a512d6f` (WI-7: visible citations are
+reviewable author claims). `49d12553` hardens WI-2/WI-3 against malformed
+reference entries, title spoofing, and internal-artifact leaks; `10e981dd`
+completes the WI-8 skill-documentation sweep.
+
+Important correction to the plan: PptxGenJS emits referenced empty notes parts
+even without `slide.addNotes()`. The WI-5 commit therefore extends the existing
+`clean.py` with safe, atomic PPTX cleanup and instructs the author to run it
+after generation. No path grant was widened. The plan also omitted the legacy
+`artifacts.verify_output` count gate; WI-5 migrated it to N+1 and no-notes
+enforcement. Final backend result: **346 passed / 3 skipped** (requested
+baseline: 307 passed / 3 skipped), a net gain of 39 passing tests. Most came
+from this work's structural coverage; other pre-existing uncommitted tests
+were also present during the run. This is not a live-model acceptance run. Visible text
+alone cannot prove that a page/line locator is truthful, so WI-7 asks the
+semantic reviewer to compare citations against frozen evidence. Two different
+knowledge-base documents may also share the same `display_name`; the visible
+citations cannot distinguish those identities without a product decision on
+unique labels or an additional source-identity contract. No reviewer path grant
+was widened to paper over that ambiguity.
+
 Companion documents:
 
 - [`agents-sdk-migration-plan.md`](./agents-sdk-migration-plan.md) — the migration's
