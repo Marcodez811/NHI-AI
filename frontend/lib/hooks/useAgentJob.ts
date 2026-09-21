@@ -54,7 +54,9 @@ export interface UseAgentJobOptions<Payload, Job extends AgentJobRecord, Created
     /** Maximum delay after transient poll failures. Defaults to ten seconds. */
     maxPollIntervalMs?: number;
     /** Session-storage key used to resume a job after a page refresh. */
-    storageKey?: string;
+    storageKey?: string | null;
+    /** A route-owned job id takes precedence over optional browser persistence. */
+    initialJobId?: string;
     terminalStatuses?: readonly string[];
 }
 
@@ -93,7 +95,10 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
         pollInterval,
         options.maxPollIntervalMs ?? 10_000,
     );
-    const storageKey = options.storageKey ?? DEFAULT_STORAGE_KEY;
+    const storageKey = options.storageKey === undefined
+        ? DEFAULT_STORAGE_KEY
+        : options.storageKey;
+    const initialJobId = options.initialJobId;
     const terminalStatuses = options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES;
 
     const mounted = useRef(true);
@@ -104,7 +109,6 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
     const activeJobId = useRef<string | null>(null);
     const lastPayload = useRef<Payload | null>(null);
     const failureCount = useRef(0);
-    const resumed = useRef(false);
     const resumingAfterOutlineApproval = useRef(false);
     const createJobRef = useRef(options.createJob);
     const getJobRef = useRef(options.getJob);
@@ -189,7 +193,7 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
             setJob(next);
             setPhaseHistory((history) => {
                 const nextHistory = appendPhase(history, phaseForJob(next));
-                writePhaseHistory(storageKey, nextHistory);
+                if (storageKey) writePhaseHistory(storageKey, nextHistory);
                 return nextHistory;
             });
             if (terminalStatuses.includes(next.status)) {
@@ -217,8 +221,10 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
             }
             const apiError = asApiError(requestError, "Agent job status is temporarily unavailable.");
             if (apiError.status === 404) {
-                writeActiveJobId(storageKey, null);
-                writePhaseHistory(storageKey, []);
+                if (storageKey) {
+                    writeActiveJobId(storageKey, null);
+                    writePhaseHistory(storageKey, []);
+                }
                 setError(new ApiError(404, "This agent job has expired or is no longer available."));
                 setWarning(null);
                 finish("expired");
@@ -249,17 +255,23 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
 
     pollForRef.current = pollFor;
 
-    // A refresh has no in-memory job, so resume with an immediate status read.
+    // Route-owned jobs fetch immediately; persistent workflows may still resume
+    // from storage when no route id was supplied.
     useEffect(() => {
-        if (resumed.current) return;
-        resumed.current = true;
-        const storedId = readActiveJobId(storageKey);
-        if (!storedId) return;
-        activeJobId.current = storedId;
-        setPhaseHistory(readPhaseHistory(storageKey));
+        const jobId = initialJobId ?? (storageKey ? readActiveJobId(storageKey) : null);
+        if (!jobId) return;
+        cancelPending();
+        activeJobId.current = jobId;
+        failureCount.current = 0;
+        resumingAfterOutlineApproval.current = false;
+        setJob(null);
+        setError(null);
+        setWarning(null);
+        setConsecutivePollFailures(0);
+        setPhaseHistory(storageKey && !initialJobId ? readPhaseHistory(storageKey) : []);
         setPhase("polling");
-        void pollForRef.current(storedId, generation.current);
-    }, [storageKey]);
+        void pollForRef.current(jobId, generation.current);
+    }, [cancelPending, initialJobId, storageKey]);
 
     const startJob = useCallback(async (
         payload: Payload,
@@ -268,8 +280,10 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
         const token = generation.current;
         lastPayload.current = payload;
         activeJobId.current = null;
-        writeActiveJobId(storageKey, null);
-        writePhaseHistory(storageKey, []);
+        if (storageKey) {
+            writeActiveJobId(storageKey, null);
+            writePhaseHistory(storageKey, []);
+        }
         failureCount.current = 0;
         resumingAfterOutlineApproval.current = false;
         setConsecutivePollFailures(0);
@@ -285,10 +299,10 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
             const created = await createJobRef.current(payload, { signal: controller.signal });
             if (!mounted.current || token !== generation.current) return created;
             activeJobId.current = created.job_id;
-            writeActiveJobId(storageKey, created.job_id);
+            if (storageKey) writeActiveJobId(storageKey, created.job_id);
             const createdPhase = created.phase ?? (created.status === "queued" ? "queued" : "preparing");
             setPhaseHistory([createdPhase]);
-            writePhaseHistory(storageKey, [createdPhase]);
+            if (storageKey) writePhaseHistory(storageKey, [createdPhase]);
             setJob({
                 job_id: created.job_id,
                 status: created.status,
@@ -352,8 +366,10 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
         cancelPending();
         activeJobId.current = null;
         lastPayload.current = null;
-        writeActiveJobId(storageKey, null);
-        writePhaseHistory(storageKey, []);
+        if (storageKey) {
+            writeActiveJobId(storageKey, null);
+            writePhaseHistory(storageKey, []);
+        }
         failureCount.current = 0;
         setJob(null);
         setPhase("idle");

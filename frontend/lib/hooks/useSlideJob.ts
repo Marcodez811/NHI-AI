@@ -14,8 +14,8 @@ export interface UseSlideJobOptions {
     pollIntervalMs?: number;
     /** Maximum delay after transient poll failures. Defaults to ten seconds. */
     maxPollIntervalMs?: number;
-    /** Override only for isolated consumers; the default survives refreshes. */
-    storageKey?: string;
+    /** The job page supplies this from the URL; the index has no active job. */
+    jobId?: string;
 }
 
 export type UseSlideJobResult = UseAgentJobResult<
@@ -24,8 +24,6 @@ export type UseSlideJobResult = UseAgentJobResult<
     CreateSlidesJobResponse
 >;
 
-const SLIDE_JOB_STORAGE_KEY = "nhi-ai:active-slide-job-id";
-
 /** Slides adapter for the workflow-neutral agent job lifecycle hook. */
 export function useSlideJob(options: UseSlideJobOptions = {}): UseSlideJobResult {
     return useAgentJob<CreateSlidePayload, SlideJob, CreateSlidesJobResponse>({
@@ -33,6 +31,7 @@ export function useSlideJob(options: UseSlideJobOptions = {}): UseSlideJobResult
         getJob: getSlideJob,
         pollIntervalMs: options.pollIntervalMs,
         maxPollIntervalMs: options.maxPollIntervalMs,
-        storageKey: options.storageKey ?? SLIDE_JOB_STORAGE_KEY,
+        storageKey: null,
+        initialJobId: options.jobId,
     });
 }

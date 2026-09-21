@@ -121,26 +121,38 @@ describe("useSlideJob", () => {
         expect(result.current.phaseHistory).toEqual(["queued", "reviewing", "revising"]);
     });
 
-    it("resumes an active job from session storage after mount", async () => {
-        window.sessionStorage.setItem("nhi-ai:active-slide-job-id", "job-resume");
+    it("loads the URL-owned job id and ignores the former single-slot storage key", async () => {
+        window.sessionStorage.setItem("nhi-ai:active-slide-job-id", "job-stale");
         vi.mocked(api.getSlideJob).mockResolvedValueOnce(
-            job({ job_id: "job-resume", phase: "reviewing", stage: "reviewing" }),
+            job({ job_id: "job-route", phase: "reviewing", stage: "reviewing" }),
         );
 
         const { result } = renderHook(() =>
-            useSlideJob({ pollIntervalMs: 250, maxPollIntervalMs: 500 }),
+            useSlideJob({ jobId: "job-route", pollIntervalMs: 250, maxPollIntervalMs: 500 }),
         );
 
         await act(async () => {
             await Promise.resolve();
             await Promise.resolve();
         });
-        expect(result.current.job?.job_id).toBe("job-resume");
+        expect(result.current.job?.job_id).toBe("job-route");
         expect(api.getSlideJob).toHaveBeenCalledWith(
-            "job-resume",
+            "job-route",
             expect.objectContaining({ signal: expect.any(AbortSignal) }),
         );
         expect(result.current.phaseHistory).toContain("reviewing");
+        expect(window.sessionStorage.getItem("nhi-ai:active-slide-job-id")).toBe("job-stale");
+    });
+
+    it("does not persist a newly created slide job as a competing job selector", async () => {
+        const { result } = renderHook(() => useSlideJob());
+
+        await act(async () => {
+            await result.current.startJob(payload);
+        });
+
+        expect(result.current.job?.job_id).toBe("job-1");
+        expect(window.sessionStorage.getItem("nhi-ai:active-slide-job-id")).toBeNull();
     });
 
     it("parks polling while an outline awaits human review", async () => {
