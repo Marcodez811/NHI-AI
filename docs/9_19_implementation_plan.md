@@ -418,8 +418,12 @@ imported by `sdk_runner.py`. They must **move to a shared module**, not be delet
 
 If WI-6 lands, update the baseline in this document from "299 + 2" to the new numbers.
 
-**Outcome (landed 2026-09-20).** Both failures were fixed on their own terms and are now
-covered by the 305-passing backend baseline above.
+**Outcome (landed 2026-09-20).** The `SecretStr` failure was fixed correctly. The
+`test_safe_filename_unicode_sanitized` failure was **not**: it was made to pass by
+reverting `documents/storage.py` to `re.ASCII`, which undid commit `5baedbc2` and would
+have turned every Traditional Chinese filename into underscores. That change has been
+reverted and the stale test replaced — see "Test baseline" above for the full account.
+The backend baseline is **306 passed / 3 skipped**, not 305.
 
 ---
 
@@ -447,6 +451,55 @@ are covered by tests.
 
 ---
 
+### WI-8 — Agent dashboard: reflect the current architecture
+
+**Size:** small. **Depends on:** nothing. **Useful before manual testing, not after.**
+
+`frontend/components/dev/agent/` renders the agent run dashboard (`RunList.tsx`,
+`RunDetail.tsx`, `NodeCard.tsx`, `Timeline.tsx`, `format.ts`), fed by
+`useAgentDevRuns.ts` and `backend/app/api/routes/dev_agents.py`. It predates the planner
+node and the runner seam, and no longer describes what the system does.
+
+The backend emits five node ids — `extraction`, `planning`, `author`, `validator`,
+`reviewer` (`service.py`, `planner.py:108`). Confirmed gaps:
+
+1. **`RunDetail.tsx:37`** — `const lifecycleOrder = ["author", "validator", "reviewer"]`.
+   Missing `planning` (new) and `extraction` (pre-existing). Nodes outside this list do
+   not take their proper position in the lifecycle view.
+2. **`format.ts:54-60`** — `nodeLabel()` maps only author / review / valid to Chinese
+   labels; `extraction` and `planning` fall through to the raw English `node_id`, so they
+   render inconsistently beside 作者 Agent / 審查 Agent / 驗證器.
+3. **Runner is never shown.** Lifecycle events already carry `runner` (`"codex"` or
+   `"agents"`), plus `model` and `reasoning_effort`. Per-node runner selection is the
+   central fact of the migration, and WI-3's parity testing is exactly the task of
+   comparing one runner against another — the dashboard should surface which runner each
+   node actually used.
+4. **A parked run has no distinct state.** `awaiting_outline` renders as a raw phase
+   string, so a run deliberately waiting on human approval looks the same as one that
+   hung. It needs its own visual treatment and, ideally, a link into the outline review.
+
+**Task.** Extend `lifecycleOrder` and `nodeLabel` to cover all five nodes; surface
+`runner` (and `model` / `reasoning_effort`) on `NodeCard`; give `awaiting_outline` a
+distinct, clearly-not-failed presentation. Mirror the existing test patterns in
+`frontend/tests/RunDetail.test.tsx` and `agentAttempts.test.ts`.
+
+**Acceptance.** A run with planning enabled shows all five nodes in lifecycle order with
+consistent labels; each node states its runner; a parked run reads as waiting, not stalled.
+
+**Outcome (landed 2026-09-20).** `RunDetail.tsx` now orders `extraction`, `planning`,
+`author`, `validator`, and `reviewer`, while preserving unknown nodes afterward in their
+original order. `format.ts` labels the new model-backed nodes `擷取 Agent` and
+`規劃 Agent`. The `awaiting_outline` phase renders as a neutral waiting badge reading
+`等待人工核准大綱`, distinct from blue running and red failed states. Contrary to the
+task's initial finding, `NodeCard.tsx` already rendered runner, model, and reasoning
+effort through `MetaValue` with `—` fallbacks, so it needed no production change;
+regression coverage now locks that behavior down. Changes are confined to
+`RunDetail.tsx`, `format.ts`, `RunDetail.test.tsx`, and `agentAttempts.test.ts`. The full
+frontend suite passes with 72 tests across 17 files (six tests above the documented
+baseline), and `npm run typecheck` passes.
+
+---
+
 ## Sequencing
 
 ```
@@ -455,6 +508,7 @@ WI-6 (pre-existing tests) ───┼ complete
 WI-7 (approval outbox) ──────┘ complete
 
 WI-2 (frontend) ─────────────> complete (live browser/backend exercise still recommended)
+WI-8 (agent dashboard) ──────> complete
 
 WI-3 (live parity, HUMAN) ───> blocks everything below
         │
