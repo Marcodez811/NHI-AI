@@ -4,6 +4,37 @@ Handoff document. Written for coding agents who were **not** present for the wor
 describes, so it carries its own context. Read "Context" and "Ground rules" before
 touching anything; each work item below is self-contained after that.
 
+## 2026-09-21 slides job page handoff
+
+`9_21_slides_job_page_brief.md` is implemented on `agents-sdk-migration` in four
+commits: `59fa4236` (backend recent-jobs repository method and `GET /slides/jobs`),
+`9392fcc4` (segment-aware `/slides/:jobId` routing and navigation after create),
+`96b1b7f5` (URL-owned lifecycle page), and `498f28e1` (recent jobs on `/slides`).
+The list endpoint returns a bare newest-first array of `job_id`, `title`, `status`,
+`phase`, `created_at`, `started_at`, and `finished_at` (default limit 20, maximum
+100). The slides-specific `nhi-ai:active-slide-job-id` sessionStorage key is gone;
+the route parameter alone selects a job. Other workflows retain their existing
+storage behavior. `OutlineReview` was reused unchanged. No path grant was widened.
+
+Final suites: backend **355 passed / 3 skipped** (brief baseline 351 / 3;
++4 passing tests); frontend **86 passed / 20 files** (baseline 72 / 17;
++14 tests and +3 files); `npm run typecheck` clean. Worktree was clean after
+the four commits. A read-only UI reviewer found no clear route or label regression.
+
+Live walkthrough: a fresh job navigated to its own URL, reached
+`awaiting_outline`, survived a page refresh while parked, reopened from the
+index list, and resumed drafting after approval. It did **not** complete or
+download: the stack stopped during authoring; after restart, retrying exposed
+an existing `repository.claim` bug comparing a timezone-naive persisted lease
+with an aware `now`. For this one stopped job only, the expired lease was
+cleared locally and the approved author step re-enqueued; the job then failed
+the existing deterministic validator with `references_entry_invalid`,
+`renderer_error`, and `chart_title_missing`. Neither failure was fixed because
+the brief permits no backend change beyond the list endpoint. A separate,
+already-completed job still returned HTTP 200 and a 620,735-byte PPTX from the
+download endpoint. The local stack was left running. These live-model failures
+are the only material gap against the requested start-to-download walkthrough.
+
 ## 2026-09-21 citation/no-notes implementation handoff
 
 `9_20_citation_and_notes_plan.md` WI-0 through WI-8 is implemented on
