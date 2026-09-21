@@ -301,6 +301,17 @@ export interface SlidesJobStatusResponse {
 /** Existing UI callers use this name for the polling response. */
 export type SlideJob = SlidesJobStatusResponse;
 
+/** Fields needed to find and reopen a slide job from the index. */
+export interface SlideJobSummary {
+    job_id: string;
+    title: string;
+    status: SlideJobStatus;
+    phase: AgentJobPhase;
+    created_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+}
+
 export type OutlineEmphasis = "light" | "normal" | "deep";
 
 export interface SlideOutlineNode {
@@ -850,6 +861,13 @@ export async function getSlideJob(
     options: { signal?: AbortSignal } = {},
 ): Promise<SlideJob> {
     return request<SlideJob>(`/slides/jobs/${encodeURIComponent(id)}`, options);
+}
+
+export async function listSlideJobs(
+    limit = 20,
+    options: { signal?: AbortSignal } = {},
+): Promise<SlideJobSummary[]> {
+    return request<SlideJobSummary[]>(`/slides/jobs${queryString({ limit })}`, options);
 }
 
 export async function getSlideJobOutline(

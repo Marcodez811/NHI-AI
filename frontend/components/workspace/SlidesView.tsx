@@ -34,6 +34,7 @@ import { SlideSettings } from "./SlideSettings";
 import { SlideGenerationStatus } from "./SlideGenerationStatus";
 import { SlideCompletedResult } from "./SlideCompletedResult";
 import { OutlineReview } from "./OutlineReview";
+import { RecentSlideJobs } from "./RecentSlideJobs";
 
 export function SlidesView({
     docs,
@@ -455,6 +456,7 @@ export function SlidesView({
                         />
                     </div>
                 </div>
+                <RecentSlideJobs />
             </div>
         </section>
     );
