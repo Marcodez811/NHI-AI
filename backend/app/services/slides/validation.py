@@ -1157,10 +1157,39 @@ _CITATION_FOOTER_RE = re.compile(
     r"^(?:\[\s*(?P<number>\d+)\s*\]\s*)?資料來源\s*[：:]\s*(?P<source>.+)$"
 )
 _REFERENCE_ENTRY_RE = re.compile(
-    r"^\[\s*(?P<number>\d+)\s*\]\s*(?P<source>.+)$"
+    r"^\[(?P<number>[1-9]\d*)\] (?P<source>(?!.*\[\d+\] ).+)$"
 )
 _REFERENCES_SLIDE_TITLE = "參考資料"
 _SHA256_TOKEN_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
+_INTERNAL_ARTIFACT_RE = re.compile(
+    r"(?<!\w)(?:work[/\\][\w./\\-]+\.json|(?:ppt|word|xl)[/\\][\w./\\-]+\.xml|[\w.-]+\.(?:json|xml))\b",
+    re.IGNORECASE,
+)
+
+
+def _references_title_paragraph(root: ET.Element) -> tuple[str | None, ET.Element | None]:
+    """Prefer PowerPoint title placeholders; support minimal single-shape test decks.
+
+    A body paragraph saying ``參考資料`` cannot stand in for a present title
+    placeholder. Minimal OOXML fixtures have no placeholder metadata, so their
+    first visible paragraph is treated as the title instead.
+    """
+
+    shapes = root.findall(f".//{_P}sp")
+    for shape in shapes:
+        placeholder = shape.find(f"{_P}nvSpPr/{_P}nvPr/{_P}ph")
+        if placeholder is None or placeholder.get("type") not in {"title", "ctrTitle"}:
+            continue
+        paragraphs = [paragraph for paragraph in shape.findall(f".//{_A}p") if _text(paragraph)]
+        if paragraphs:
+            return _normalize_visible_text(_text(shape)), paragraphs[0]
+        return None, None
+    for shape in shapes:
+        for paragraph in shape.findall(f".//{_A}p"):
+            value = _normalize_visible_text(_text(paragraph))
+            if value:
+                return value, paragraph
+    return None, None
 
 
 def _catalog_source_name(value: str, sources: Sequence[SlideSource]) -> str | None:
@@ -1192,12 +1221,6 @@ def _citation_source_name(value: str, sources: Sequence[SlideSource]) -> str | N
     return _catalog_source_name(source_text, sources)
 
 
-def _source_name_allowed(value: str, sources: Sequence[SlideSource]) -> bool:
-    """Match one manifest name with an exact citation-detail boundary."""
-
-    return _citation_source_name(value, sources) is not None
-
-
 def _citation_abstraction_leaks(
     value: str,
     sources: Sequence[SlideSource],
@@ -1207,9 +1230,14 @@ def _citation_abstraction_leaks(
     normalized = _normalize_visible_text(value)
     folded = normalized.casefold()
     leaks: set[str] = set()
-    for token in ("EvidenceStore", "work/evidence.json"):
+    for token in ("EvidenceStore",):
         if token.casefold() in folded:
             leaks.add(token)
+    display_names = {_normalize_visible_text(source.display_name).casefold() for source in sources}
+    for match in _INTERNAL_ARTIFACT_RE.finditer(normalized):
+        artifact = match.group()
+        if artifact.casefold() not in display_names:
+            leaks.add(artifact)
     if _SHA256_TOKEN_RE.search(normalized):
         leaks.add("sha256")
     for source in sources:
@@ -1233,10 +1261,8 @@ def _citation_source_name_findings(
     last_slide_index = len(package.slide_roots) - 1
     for slide_index, root in enumerate(package.slide_roots):
         paragraphs = [_normalize_visible_text(value) for value in _paragraph_texts(root)]
-        references_slide = (
-            slide_index == last_slide_index
-            and _REFERENCES_SLIDE_TITLE in paragraphs
-        )
+        title, _ = _references_title_paragraph(root)
+        references_slide = slide_index == last_slide_index and title == _REFERENCES_SLIDE_TITLE
         for paragraph in paragraphs:
             footer_match = _CITATION_FOOTER_RE.fullmatch(paragraph)
             reference_match = (
@@ -1258,7 +1284,12 @@ def _citation_source_name_findings(
                 )
                 continue
             source_text = matched.group("source").strip()
-            if _source_name_allowed(source_text, sources):
+            source_name = (
+                _catalog_source_name(source_text, sources)
+                if reference_match is not None
+                else _citation_source_name(source_text, sources)
+            )
+            if source_name is not None:
                 continue
             findings.append(
                 ValidationFinding(
@@ -1279,18 +1310,15 @@ def _references_slide_findings(
     """Validate the last-slide reference index against visible content citations."""
 
     last_slide_number = len(package.slide_roots)
-    last_paragraphs = [
-        _normalize_visible_text(value)
-        for value in _paragraph_texts(package.slide_roots[-1])
-    ]
-    title_count = last_paragraphs.count(_REFERENCES_SLIDE_TITLE)
-    if title_count != 1:
+    last_root = package.slide_roots[-1]
+    title, title_paragraph = _references_title_paragraph(last_root)
+    if title != _REFERENCES_SLIDE_TITLE:
         return [
             ValidationFinding(
                 "references_slide_missing",
                 "the last slide must be titled exactly `參考資料`",
                 slide_number=last_slide_number,
-                details={"title": _REFERENCES_SLIDE_TITLE, "matches": title_count},
+                details={"title": _REFERENCES_SLIDE_TITLE, "actual": title},
                 origin="candidate",
             )
         ]
@@ -1328,13 +1356,27 @@ def _references_slide_findings(
     numbers: list[int] = []
     referenced_sources: list[str] = []
     reference_citations: list[tuple[int, str]] = []
-    for paragraph in last_paragraphs:
+    for paragraph_element in last_root.findall(f".//{_A}p"):
+        if paragraph_element is title_paragraph:
+            continue
+        paragraph = _normalize_visible_text(_text(paragraph_element))
+        if not paragraph:
+            continue
         entry_match = _REFERENCE_ENTRY_RE.fullmatch(paragraph)
         if entry_match is None:
+            findings.append(
+                ValidationFinding(
+                    "references_entry_invalid",
+                    "each non-title references paragraph must be one numbered source entry",
+                    slide_number=last_slide_number,
+                    details={"paragraph": paragraph},
+                    origin="candidate",
+                )
+            )
             continue
         number = int(entry_match.group("number"))
         numbers.append(number)
-        source_name = _citation_source_name(entry_match.group("source"), sources)
+        source_name = _catalog_source_name(entry_match.group("source"), sources)
         if source_name is not None:
             referenced_sources.append(source_name)
             reference_citations.append((number, source_name))

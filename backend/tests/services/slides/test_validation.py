@@ -39,6 +39,7 @@ def _write_deck(
     *,
     paragraphs_by_slide: dict[int, list[str]] | None = None,
     include_notes: bool = False,
+    title_placeholder_by_slide: set[int] | None = None,
 ) -> Path:
     deck = root / "output" / "presentation.pptx"
     deck.parent.mkdir(parents=True)
@@ -72,8 +73,18 @@ def _write_deck(
             f"<a:p><a:r><a:rPr/><a:t>{text}</a:t></a:r></a:p>"
             for text in paragraphs
         )
+        title_shape_xml = ""
+        if index in (title_placeholder_by_slide or set()):
+            title_shape_xml = (
+                f'<p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/>'
+                f'<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{paragraphs[0]}</a:t></a:r></a:p></p:txBody></p:sp>'
+            )
+            text_xml = "".join(
+                f"<a:p><a:r><a:rPr/><a:t>{text}</a:t></a:r></a:p>"
+                for text in paragraphs[1:]
+            )
         parts[f"ppt/slides/slide{index}.xml"] = f'''<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}">
-          <p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/><p:sp><p:nvSpPr/><p:spPr/>
+          <p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>{title_shape_xml}<p:sp><p:nvSpPr/><p:spPr/>
             <p:txBody><a:bodyPr/><a:lstStyle/>{text_xml}</p:txBody>
           </p:sp></p:spTree></p:cSld>
         </p:sld>'''
@@ -611,6 +622,88 @@ def test_references_slide_requires_exact_last_title(tmp_path: Path) -> None:
     )
     assert finding.slide_number == 2
     assert finding.details["title"] == "參考資料"
+
+
+def test_references_slide_rejects_body_title_spoofing_a_title_placeholder(
+    tmp_path: Path,
+) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: ["附錄", "參考資料", "[1] 年度報告.pdf"],
+        },
+        title_placeholder_by_slide={2},
+    )
+
+    result = _validate(tmp_path)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "references_slide_missing"
+    )
+    assert finding.details["actual"] == "附錄"
+
+
+def test_references_slide_rejects_each_unnumbered_or_malformed_paragraph(
+    tmp_path: Path,
+) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "[1] 資料來源：年度報告.pdf"],
+            2: [
+                "參考資料",
+                "[1] 年度報告.pdf",
+                "年度報告.pdf，PDF 第 12 頁",
+                "[2]資料來源：年度報告.pdf",
+                "[3] 年度報告.pdf，[4] 政策說明.docx",
+            ],
+        },
+    )
+
+    result = _validate(tmp_path)
+
+    invalid = [
+        finding.details["paragraph"]
+        for finding in result.findings
+        if finding.code == "references_entry_invalid"
+    ]
+    assert invalid == [
+        "年度報告.pdf，PDF 第 12 頁",
+        "[2]資料來源：年度報告.pdf",
+        "[3] 年度報告.pdf，[4] 政策說明.docx",
+    ]
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        "work/sources.json",
+        "work/outline_mapping.json",
+        "trace.json",
+        "ppt/charts/chart1.xml",
+        "ppt/slides/slide2.xml",
+        "word/document.xml",
+    ],
+)
+def test_citation_rejects_additional_internal_artifact_names(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "[1] 資料來源：年度報告.pdf"],
+            2: ["參考資料", f"[1] 年度報告.pdf，{artifact}"],
+        },
+    )
+
+    result = _validate(tmp_path)
+
+    leak = next(
+        finding for finding in result.findings if finding.code == "citation_abstraction_leak"
+    )
+    assert artifact in leak.details["leaks"]
 
 
 def test_references_slide_rejects_duplicate_numbers_sources_and_mismatch(tmp_path: Path) -> None:

@@ -185,3 +185,5 @@ async def test_source_manifest_grants_and_prompts_are_exact(tmp_path: Path) -> N
     assert "numbers that agree with the content footers" in author_prompt
     assert "Every chart must carry a descriptive title" in author_prompt
     assert "units on the relevant\naxis label" in author_prompt
+    assert "Put exactly one entry in each paragraph" in author_prompt
+    assert "[N] <allowlisted display_name>，<evidence-backed detail>" in author_prompt
