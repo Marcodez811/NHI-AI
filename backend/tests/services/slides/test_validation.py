@@ -12,6 +12,7 @@ import app.services.slides.validation as validation_module
 from app.services.slides.validation import (
     ValidationStatus,
     _canonicalize_pdftoppm_output,
+    _chart_title_findings,
     validate_candidate_deck,
 )
 from app.services.slides.source_manifest import write_source_manifest
@@ -165,6 +166,47 @@ def _validate(root: Path, **kwargs: object):
     }
     options.update(kwargs)
     return validate_candidate_deck(root, **options)
+
+
+def test_chart_title_findings_rejects_an_untitled_native_chart() -> None:
+    findings = _chart_title_findings(
+        {
+            "slides": [
+                {
+                    "slide_number": 3,
+                    "charts": [
+                        {"part": "ppt/charts/chart1.xml", "title": None},
+                        {"part": "ppt/charts/chart2.xml", "title": "給付件數年度趨勢"},
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert [finding.code for finding in findings] == ["chart_title_missing"]
+    assert findings[0].slide_number == 3
+    assert findings[0].details == {
+        "chart_index": 1,
+        "part": "ppt/charts/chart1.xml",
+    }
+
+
+def test_chart_title_findings_accepts_non_empty_native_chart_titles() -> None:
+    assert not _chart_title_findings(
+        {
+            "slides": [
+                {
+                    "slide_number": 2,
+                    "charts": [
+                        {
+                            "part": "ppt/charts/chart1.xml",
+                            "title": "各年度門診申報件數",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
 
 
 def test_backend_renders_replace_stale_author_previews_and_bind_snapshot(tmp_path: Path) -> None:

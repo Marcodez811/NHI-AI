@@ -22,7 +22,7 @@ async function main() {
 
   slide = pptx.addSlide();
   title(slide, "原生可編輯圖表");
-  slide.addChart("bar", [{ name: "件數", labels: ["112年", "113年", "114年"], values: [80, 100, 120] }], { x: 1.2, y: 1.35, w: 10.8, h: 4.9, catAxisLabelFontFace: "Noto Sans CJK TC", valAxisLabelFontFace: "Noto Sans CJK TC", showLegend: false, showTitle: false, showValue: true });
+  slide.addChart("bar", [{ name: "件數", labels: ["112年", "113年", "114年"], values: [80, 100, 120] }], { x: 1.2, y: 1.35, w: 10.8, h: 4.9, catAxisLabelFontFace: "Noto Sans CJK TC", valAxisLabelFontFace: "Noto Sans CJK TC", showLegend: false, showTitle: true, title: "年度申報件數", showValue: true });
   footer(slide, "資料來源：年度報告.pdf，PDF 第 12 頁");
   slide.addNotes("主張：年度件數為80、100、120件。\n資料來源：年度報告.pdf，PDF 第 12 頁\n單位：件。");
 

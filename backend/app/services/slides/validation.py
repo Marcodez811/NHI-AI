@@ -412,7 +412,10 @@ def _chart_snapshot(root: ET.Element, member: str) -> dict[str, Any]:
             "title": series_title or None,
             "caches": _chart_cache_points(item),
         })
-    chart_title = _text(root.find(f".//{_C}title") or ET.Element("empty"))
+    title_element = root.find(f".//{_C}title")
+    chart_title = _text(
+        title_element if title_element is not None else ET.Element("empty")
+    )
     return {
         "part": member,
         "title": chart_title or None,
@@ -530,6 +533,43 @@ def build_deck_snapshot(
             "The semantic reviewer must use the renders for content that is not represented as visible OOXML text.",
         ],
     }
+
+
+def _chart_title_findings(snapshot: Mapping[str, Any]) -> list[ValidationFinding]:
+    """Reject native charts whose subject is invisible to the audience."""
+
+    findings: list[ValidationFinding] = []
+    slides = snapshot.get("slides")
+    if not isinstance(slides, list):
+        return findings
+    for fallback_slide_number, slide in enumerate(slides, start=1):
+        if not isinstance(slide, Mapping):
+            continue
+        slide_number = slide.get("slide_number")
+        if type(slide_number) is not int:
+            slide_number = fallback_slide_number
+        charts = slide.get("charts")
+        if not isinstance(charts, list):
+            continue
+        for chart_index, chart in enumerate(charts, start=1):
+            if not isinstance(chart, Mapping):
+                continue
+            title = chart.get("title")
+            if isinstance(title, str) and title.strip():
+                continue
+            findings.append(
+                ValidationFinding(
+                    "chart_title_missing",
+                    "every native chart must have a non-empty descriptive title",
+                    slide_number=slide_number,
+                    details={
+                        "chart_index": chart_index,
+                        "part": chart.get("part"),
+                    },
+                    origin="candidate",
+                )
+            )
+    return findings
 
 
 def _unavailable_snapshot(
@@ -1872,6 +1912,7 @@ def _validate_candidate_deck_in_render_root(
                 render_records=[record.as_dict() for record in render_records],
                 evidence_sha256=evidence_sha256,
             )
+            findings.extend(_chart_title_findings(snapshot))
         except Exception as exc:
             snapshot = _unavailable_snapshot(pptx_sha256, evidence_sha256, str(exc))
             findings.append(ValidationFinding("snapshot_error", "deck snapshot could not be generated", details={"error": str(exc)}, origin="infrastructure"))

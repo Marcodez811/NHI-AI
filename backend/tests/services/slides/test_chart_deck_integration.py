@@ -90,6 +90,7 @@ def test_mixed_chart_deck_snapshot_preserves_editable_chart_citations_and_notes(
 
     assert snapshot["slide_count"] == 4
     assert len(snapshot["slides"][1]["charts"]) == 1
+    assert snapshot["slides"][1]["charts"][0]["title"] == "年度申報件數"
     assert len(snapshot["slides"][2]["images"]) == 1
     assert len(snapshot["slides"][3]["images"]) == 1
     assert any("年度報告.pdf，PDF 第 12 頁" in item["text"] for item in snapshot["slides"][1]["text"])

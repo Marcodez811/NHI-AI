@@ -121,7 +121,8 @@ derived from the frozen evidence: never fabricate a bibliography entry or add a 
 explanation to the cover. Never expose an XML path or invent a page, section, publisher,
 date, or office.
 
-Keep simple charts editable. For combination or dual-axis charts, dense labels, heatmaps,
+Every chart must carry a descriptive title naming what it shows, with units on the relevant
+axis label. Keep simple charts editable. For combination or dual-axis charts, dense labels, heatmaps,
 or a native chart that still renders incorrectly after one correction, create a data-rendered
 PNG from exact evidence values with the bundled chart-image script and add that image alone.
 Keep all surrounding text and citations editable. Do not create or write speaker notes; the

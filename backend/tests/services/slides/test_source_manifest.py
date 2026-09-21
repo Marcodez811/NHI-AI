@@ -183,3 +183,5 @@ async def test_source_manifest_grants_and_prompts_are_exact(tmp_path: Path) -> N
     assert "collision suffix" in author_prompt
     assert "[N] 資料來源：<allowlisted display_name>，<locator>" in author_prompt
     assert "numbers that agree with the content footers" in author_prompt
+    assert "Every chart must carry a descriptive title" in author_prompt
+    assert "units on the relevant\naxis label" in author_prompt
