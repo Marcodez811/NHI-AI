@@ -58,7 +58,13 @@ def _write_deck(
     for index in range(1, slide_count + 1):
         paragraphs = (paragraphs_by_slide or {}).get(
             index,
-            ["Cover title" if index == 1 else f"Slide {index}"],
+            [
+                "Cover title"
+                if index == 1
+                else "參考資料"
+                if index == slide_count
+                else f"Slide {index}"
+            ],
         )
         text_xml = "".join(
             f"<a:p><a:r><a:rPr/><a:t>{text}</a:t></a:r></a:p>"
@@ -428,6 +434,151 @@ def test_citation_source_name_rejects_unknown_and_prefix_names(tmp_path: Path) -
     ]
     assert [finding.slide_number for finding in findings] == [2, 2]
     assert all(finding.origin == "candidate" for finding in findings)
+
+
+def test_citation_rejects_internal_tokens_after_an_allowed_source_name(tmp_path: Path) -> None:
+    digest = "a" * 64
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "參考資料",
+                "[1] 年度報告.pdf，report__2.pdf",
+                "[2] 年度報告.pdf，EvidenceStore，work/evidence.json",
+                f"[3] 年度報告.pdf，{digest}",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report__2.pdf"],
+        ["年度報告.pdf"],
+    )
+
+    result = _validate(tmp_path)
+
+    findings = [
+        finding for finding in result.findings if finding.code == "citation_abstraction_leak"
+    ]
+    assert [finding.slide_number for finding in findings] == [2, 2, 2]
+    assert findings[0].details["leaks"] == ["report__2.pdf"]
+    assert findings[1].details["leaks"] == ["EvidenceStore", "work/evidence.json"]
+    assert findings[2].details["leaks"] == ["sha256"]
+
+
+def test_citation_does_not_treat_a_filename_inside_its_display_name_as_leakage(
+    tmp_path: Path,
+) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "資料來源：Annual report.pdf"],
+            2: ["參考資料", "[1] Annual report.pdf"],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf"],
+        ["Annual report.pdf"],
+    )
+
+    result = _validate(tmp_path, requested_title=None)
+
+    assert result.status is ValidationStatus.PASS
+
+
+def test_references_slide_matches_unique_numbered_content_sources(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        slide_count=3,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "Policy result",
+                "資料來源：年度報告.pdf，PDF 第 12 頁",
+                "資料來源：政策說明.docx，〈給付範圍〉",
+            ],
+            3: [
+                "參考資料",
+                "[1] 年度報告.pdf，〈財務〉，PDF 第 12 頁",
+                "[2] 政策說明.docx，〈給付範圍〉",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf", "policy.docx"],
+        ["年度報告.pdf", "政策說明.docx"],
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=3,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    assert result.status is ValidationStatus.PASS
+
+
+def test_references_slide_requires_exact_last_title(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "資料來源：年度報告.pdf"],
+            2: ["參考文獻", "[1] 年度報告.pdf"],
+        },
+    )
+
+    result = _validate(tmp_path)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "references_slide_missing"
+    )
+    assert finding.slide_number == 2
+    assert finding.details["title"] == "參考資料"
+
+
+def test_references_slide_rejects_duplicate_numbers_sources_and_mismatch(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        slide_count=3,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "Policy result",
+                "資料來源：年度報告.pdf，PDF 第 12 頁",
+                "資料來源：政策說明.docx，〈給付範圍〉",
+            ],
+            3: [
+                "參考資料",
+                "[1] 年度報告.pdf，PDF 第 12 頁",
+                "[1] 年度報告.pdf，〈財務〉",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf", "policy.docx"],
+        ["年度報告.pdf", "政策說明.docx"],
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=3,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    finding_codes = {finding.code for finding in result.findings}
+    assert "references_number_duplicate" in finding_codes
+    assert "references_source_duplicate" in finding_codes
+    mismatch = next(
+        finding for finding in result.findings if finding.code == "references_source_mismatch"
+    )
+    assert mismatch.details == {
+        "missing_sources": ["政策說明.docx"],
+        "unused_sources": [],
+    }
 
 
 @pytest.mark.parametrize("manifest_contents", [None, "not JSON"])

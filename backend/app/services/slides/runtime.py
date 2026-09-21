@@ -46,7 +46,9 @@ Follow the node order below exactly: do not reorder, merge, split, drop, or intr
 section the outline does not name. Treat `emphasis` as a relative attention budget across
 sections -- a "deep" node earns more slides, more supporting detail, and more of the
 evidence than a "light" one; `approx_slides` is a hint, not a hard per-node page count, but
-the total should land near the requested {requested_slide_count}-slide brief.
+the content-slide total should land near the requested {requested_slide_count}-slide brief.
+The final references slide is deck furniture and is not part of this approved outline or
+its `total_slides` value.
 
 {nodes}
 
@@ -87,7 +89,8 @@ EvidenceStore at `work/evidence.json`. This JSON file and assets under
 ## Brief
 - Title: {request.title}
 - Tone: {request.tone}
-- Length: Exactly {request.slides_count} slides.
+- Length: Exactly {request.slides_count} content slides, followed by one final references
+  slide titled exactly `參考資料` ({request.slides_count + 1} slides total).
 - Font: Use {font_family or "a detected Traditional-Chinese/CJK-safe font"} consistently for slide text and charts.
 - Additional guidance: {request.guidance}
 
@@ -103,11 +106,17 @@ or a parsed document title disagrees. Keep available section, PDF-page, or text-
 detail from the evidence block, but never show a staged filename or collision suffix.
 `EvidenceStore`, evidence IDs, hashes, JSON filenames, and extraction-process language are
 internal workflow details. Never show them in slide text, citations, or the cover. Cite slides
-that contain factual claims, figures, or charts; do not add a pipeline explanation to the
-cover or an unsupported bibliography slide. For a retained block without `citation`, use
+that contain factual claims, figures, or charts. End the deck with the required `參考資料`
+slide. List each source cited by the content slides exactly once, numbered `[1]`, `[2]`, and
+so on, using its allowlisted `display_name` from `work/sources.json` followed by every
+available evidence-backed section path and page or line locator. A source cited on several
+slides keeps one reference number. For a retained block without `citation`, use
 `provenance.source` only to select the matching staged filename in `work/sources.json`, then
-use that entry's `display_name` plus any reliable provenance locator. Never expose an XML
-path or invent a page, section, publisher, date, or office.
+use that entry's `display_name` plus any reliable provenance locator; use the allowlisted
+name alone only when no reliable locator exists. The required references slide must be
+derived from the frozen evidence: never fabricate a bibliography entry or add a pipeline
+explanation to the cover. Never expose an XML path or invent a page, section, publisher,
+date, or office.
 
 Keep simple charts editable. For combination or dual-axis charts, dense labels, heatmaps,
 or a native chart that still renders incorrectly after one correction, create a data-rendered

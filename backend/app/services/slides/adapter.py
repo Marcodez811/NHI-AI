@@ -401,7 +401,9 @@ derived document title.
 ## Brief
 - Title: {value.title}
 - Tone: {value.tone}
-- Target length: {value.slides_count} slides.
+- Target length: {value.slides_count} content slides. `SlideOutline.total_slides` and the
+  sum of `approx_slides` describe only those content slides; the author adds a final
+  `參考資料` slide outside the outline.
 - Additional guidance: {value.guidance}
 
 Organize the presentation into sections, not per-slide breakdowns: each node needs a
@@ -410,8 +412,9 @@ Organize the presentation into sections, not per-slide breakdowns: each node nee
 An id that does not exist in that store will be rejected before a human ever reviews this
 outline. Set `emphasis` (light/normal/deep) to reflect how much author attention each
 section deserves relative to the others, and `approx_slides` as a realistic hint whose sum
-lands near the requested {value.slides_count}-slide brief. Resolve conflicting evidence
-explicitly rather than presenting both sides unreconciled.
+lands near the requested {value.slides_count} content slides. Do not add a references node;
+the final references slide is deck furniture. Resolve conflicting evidence explicitly
+rather than presenting both sides unreconciled.
 """
 
     async def post_planning(self, value: SlidesTaskPayload, result: AgentExecutionResult, workspace: Path) -> None:
@@ -478,12 +481,14 @@ explicitly rather than presenting both sides unreconciled.
                 "This is a corrective revision, not a regeneration. The workspace already contains "
                 "the previous candidate presentation and its deterministic validation artifacts. Modify the "
                 "existing presentation and affected artifacts in place. Preserve the requested "
-                f"title exactly as `{value.title}` and the requested slide count of {value.slides_count}; "
+                f"title exactly as `{value.title}`, the requested {value.slides_count} content slides, "
+                "and the final `參考資料` slide; "
                 "do not redesign or rewrite unaffected slides.\n"
                 "Address every blocking finding below. After changes, regenerate affected preview renders, "
                 "then stop; the backend validator owns content_check.json and deck_snapshot.json. "
                 "The frozen evidence.json and work/extracted/ tree are read-only and authoritative. "
-                "Preserve or repair audience-facing source footers and citations using only knowledge-base display names "
+                "Preserve or repair audience-facing source footers and the numbered final references slide "
+                "using only knowledge-base display names "
                 "from the read-only work/sources.json mapping, and remove any speaker notes. Never add "
                 "staged filenames, collision suffixes, derived document titles, EvidenceStore names, "
                 "paths, hashes, or block IDs to the delivered presentation. "

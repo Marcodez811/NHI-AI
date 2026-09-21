@@ -11,6 +11,7 @@ sqlite file, matching the pattern already used by
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -180,6 +181,24 @@ def test_build_prompt_is_unchanged_without_an_outline():
     assert "Approved outline" not in with_outline_none
     assert "Do not create or write speaker notes" in without_kwarg
     assert "no `ppt/notesSlides/` parts" in without_kwarg
+    assert "Exactly 8 content slides" in without_kwarg
+    assert "`\u53c3\u8003\u8cc7\u6599` (9 slides total)" in without_kwarg
+    assert "List each source cited by the content slides exactly once" in without_kwarg
+    assert "never fabricate a bibliography entry" in without_kwarg
+    assert "name alone only when no reliable locator exists" in without_kwarg
+
+
+def test_planner_keeps_references_slide_outside_content_outline() -> None:
+    from app.models.slides import SlidesTaskPayload as Payload
+
+    request = Payload(job_id=uuid4(), title="Q3", document_ids=[uuid4()], slides_count=8, guidance="g", tone="formal")
+
+    prompt = asyncio.run(SlidesWorkflowAdapter().build_planning_prompt(request, Path("/tmp/unused")))
+
+    assert "Target length: 8 content slides" in prompt
+    assert "`SlideOutline.total_slides`" in prompt
+    assert "Do not add a references node" in prompt
+    assert "final references slide is deck furniture" in prompt
 
 
 def test_build_prompt_instructs_node_order_and_emphasis_when_outline_is_approved():

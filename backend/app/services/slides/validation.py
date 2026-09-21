@@ -1116,12 +1116,15 @@ def _normalize_visible_text(value: str) -> str:
 _CITATION_FOOTER_RE = re.compile(
     r"^(?:\[\s*\d+\s*\]\s*)?資料來源\s*[：:]\s*(?P<source>.+)$"
 )
-_REFERENCE_ENTRY_RE = re.compile(r"^\[\s*\d+\s*\]\s*(?P<source>.+)$")
-_REFERENCE_TITLES = frozenset({"參考資料", "參考文獻", "references"})
+_REFERENCE_ENTRY_RE = re.compile(
+    r"^\[\s*(?P<number>\d+)\s*\]\s*(?P<source>.+)$"
+)
+_REFERENCES_SLIDE_TITLE = "參考資料"
+_SHA256_TOKEN_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 
 
-def _source_name_allowed(value: str, sources: Sequence[SlideSource]) -> bool:
-    """Match one manifest name with an exact citation-detail boundary."""
+def _catalog_source_name(value: str, sources: Sequence[SlideSource]) -> str | None:
+    """Return the exact catalog name at a citation-detail boundary."""
 
     normalized = _normalize_visible_text(value)
     names = sorted(
@@ -1129,12 +1132,55 @@ def _source_name_allowed(value: str, sources: Sequence[SlideSource]) -> bool:
         key=len,
         reverse=True,
     )
-    return any(
-        normalized == name
-        or normalized.startswith(name + "，")
-        or normalized.startswith(name + ",")
-        for name in names
-    )
+    for name in names:
+        if (
+            normalized == name
+            or normalized.startswith(name + "，")
+            or normalized.startswith(name + ",")
+        ):
+            return name
+    return None
+
+
+def _citation_source_name(value: str, sources: Sequence[SlideSource]) -> str | None:
+    """Resolve one footer/reference payload to its allowlisted display name."""
+
+    source_text = value.strip()
+    nested_footer = _CITATION_FOOTER_RE.fullmatch(source_text)
+    if nested_footer is not None:
+        source_text = nested_footer.group("source").strip()
+    return _catalog_source_name(source_text, sources)
+
+
+def _source_name_allowed(value: str, sources: Sequence[SlideSource]) -> bool:
+    """Match one manifest name with an exact citation-detail boundary."""
+
+    return _citation_source_name(value, sources) is not None
+
+
+def _citation_abstraction_leaks(
+    value: str,
+    sources: Sequence[SlideSource],
+) -> list[str]:
+    """Name internal artifacts that appear in an explicit visible citation."""
+
+    normalized = _normalize_visible_text(value)
+    folded = normalized.casefold()
+    leaks: set[str] = set()
+    for token in ("EvidenceStore", "work/evidence.json"):
+        if token.casefold() in folded:
+            leaks.add(token)
+    if _SHA256_TOKEN_RE.search(normalized):
+        leaks.add("sha256")
+    for source in sources:
+        staged_filename = _normalize_visible_text(source.staged_filename)
+        display_name = _normalize_visible_text(source.display_name)
+        if (
+            staged_filename != display_name
+            and normalized.count(staged_filename) > display_name.count(staged_filename)
+        ):
+            leaks.add(staged_filename)
+    return sorted(leaks)
 
 
 def _citation_source_name_findings(
@@ -1147,8 +1193,9 @@ def _citation_source_name_findings(
     last_slide_index = len(package.slide_roots) - 1
     for slide_index, root in enumerate(package.slide_roots):
         paragraphs = [_normalize_visible_text(value) for value in _paragraph_texts(root)]
-        references_slide = slide_index == last_slide_index and any(
-            paragraph.casefold() in _REFERENCE_TITLES for paragraph in paragraphs
+        references_slide = (
+            slide_index == last_slide_index
+            and _REFERENCES_SLIDE_TITLE in paragraphs
         )
         for paragraph in paragraphs:
             footer_match = _CITATION_FOOTER_RE.fullmatch(paragraph)
@@ -1158,10 +1205,19 @@ def _citation_source_name_findings(
             matched = footer_match or reference_match
             if matched is None:
                 continue
+            leaks = _citation_abstraction_leaks(paragraph, sources)
+            if leaks:
+                findings.append(
+                    ValidationFinding(
+                        "citation_abstraction_leak",
+                        "citation exposes an internal workflow identifier or artifact",
+                        slide_number=slide_index + 1,
+                        details={"citation": paragraph, "leaks": leaks},
+                        origin="candidate",
+                    )
+                )
+                continue
             source_text = matched.group("source").strip()
-            nested_footer = _CITATION_FOOTER_RE.fullmatch(source_text)
-            if nested_footer is not None:
-                source_text = nested_footer.group("source").strip()
             if _source_name_allowed(source_text, sources):
                 continue
             findings.append(
@@ -1173,6 +1229,115 @@ def _citation_source_name_findings(
                     origin="candidate",
                 )
             )
+    return findings
+
+
+def _references_slide_findings(
+    package: _PptxPackage,
+    sources: Sequence[SlideSource],
+) -> list[ValidationFinding]:
+    """Validate the last-slide reference index against visible content citations."""
+
+    last_slide_number = len(package.slide_roots)
+    last_paragraphs = [
+        _normalize_visible_text(value)
+        for value in _paragraph_texts(package.slide_roots[-1])
+    ]
+    title_count = last_paragraphs.count(_REFERENCES_SLIDE_TITLE)
+    if title_count != 1:
+        return [
+            ValidationFinding(
+                "references_slide_missing",
+                "the last slide must be titled exactly `參考資料`",
+                slide_number=last_slide_number,
+                details={"title": _REFERENCES_SLIDE_TITLE, "matches": title_count},
+                origin="candidate",
+            )
+        ]
+
+    content_sources: set[str] = set()
+    for root in package.slide_roots[:-1]:
+        for paragraph in (
+            _normalize_visible_text(value) for value in _paragraph_texts(root)
+        ):
+            footer_match = _CITATION_FOOTER_RE.fullmatch(paragraph)
+            if footer_match is None:
+                continue
+            source_name = _citation_source_name(
+                footer_match.group("source"),
+                sources,
+            )
+            if source_name is not None:
+                content_sources.add(source_name)
+
+    numbers: list[int] = []
+    referenced_sources: list[str] = []
+    for paragraph in last_paragraphs:
+        entry_match = _REFERENCE_ENTRY_RE.fullmatch(paragraph)
+        if entry_match is None:
+            continue
+        numbers.append(int(entry_match.group("number")))
+        source_name = _citation_source_name(entry_match.group("source"), sources)
+        if source_name is not None:
+            referenced_sources.append(source_name)
+
+    findings: list[ValidationFinding] = []
+    duplicate_numbers = sorted(
+        number for number in set(numbers) if numbers.count(number) > 1
+    )
+    if duplicate_numbers:
+        findings.append(
+            ValidationFinding(
+                "references_number_duplicate",
+                "reference numbers must be unique",
+                slide_number=last_slide_number,
+                details={"numbers": duplicate_numbers},
+                origin="candidate",
+            )
+        )
+    elif sorted(numbers) != list(range(1, len(numbers) + 1)):
+        findings.append(
+            ValidationFinding(
+                "references_number_sequence",
+                "reference numbers must form a contiguous sequence starting at 1",
+                slide_number=last_slide_number,
+                details={"numbers": sorted(numbers)},
+                origin="candidate",
+            )
+        )
+
+    duplicate_sources = sorted(
+        source_name
+        for source_name in set(referenced_sources)
+        if referenced_sources.count(source_name) > 1
+    )
+    if duplicate_sources:
+        findings.append(
+            ValidationFinding(
+                "references_source_duplicate",
+                "each cited source must appear exactly once on the references slide",
+                slide_number=last_slide_number,
+                details={"sources": duplicate_sources},
+                origin="candidate",
+            )
+        )
+
+    reference_source_set = set(referenced_sources)
+    missing_sources = sorted(content_sources - reference_source_set)
+    unused_sources = sorted(reference_source_set - content_sources)
+    if missing_sources or unused_sources:
+        findings.append(
+            ValidationFinding(
+                "references_source_mismatch",
+                "references must list exactly the sources cited by content slides",
+                slide_number=last_slide_number,
+                details={
+                    "missing_sources": missing_sources,
+                    "unused_sources": unused_sources,
+                },
+                origin="candidate",
+            )
+        )
     return findings
 
 
@@ -1578,6 +1743,7 @@ def _validate_candidate_deck_in_render_root(
         slide_count = len(package.ordered_slides)
         if sources is not None:
             findings.extend(_citation_source_name_findings(package, sources))
+            findings.extend(_references_slide_findings(package, sources))
         if expected_slide_count is not None and slide_count != expected_slide_count:
             findings.append(ValidationFinding("slide_count", "PPTX slide count does not match the requested count", details={"expected": expected_slide_count, "actual": slide_count}, origin="candidate"))
     except PptxPackageError as exc:
