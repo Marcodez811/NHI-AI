@@ -1159,6 +1159,13 @@ _CITATION_FOOTER_RE = re.compile(
 _REFERENCE_ENTRY_RE = re.compile(
     r"^\[(?P<number>[1-9]\d*)\] (?P<source>(?!.*\[\d+\] ).+)$"
 )
+# A footer-shaped paragraph: any "[N]" numbers, then the citation marker. Used to
+# detect one paragraph citing several sources, which the footer regex above cannot
+# represent: it captures everything after the first marker as a single "source", so
+# the allowlist check validates only the first name and never sees the rest.
+_FOOTER_SHAPE_RE = re.compile(r"^(?:\[\s*\d+\s*\]\s*)*資料來源")
+_CITATION_NUMBER_RE = re.compile(r"\[\s*\d+\s*\]")
+_CITATION_MARKER = "資料來源"
 _REFERENCES_SLIDE_TITLE = "參考資料"
 _SHA256_TOKEN_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 _INTERNAL_ARTIFACT_RE = re.compile(
@@ -1209,6 +1216,25 @@ def _catalog_source_name(value: str, sources: Sequence[SlideSource]) -> str | No
         ):
             return name
     return None
+
+
+def _combines_citation_sources(paragraph: str) -> bool:
+    """Whether one footer paragraph cites more than one source.
+
+    Two forms are caught: a repeated marker
+    (``[1] 資料來源：A；[2] 資料來源：B``), and stacked numbers before a single
+    marker (``[1][2] 資料來源：A；B``). The second form does not match the footer
+    regex at all, so without this it would be skipped as body text and neither
+    name would be checked. Numbers are counted only in the leading prefix, so a
+    bracket inside a locator such as ``第[3]節`` is not mistaken for a second
+    source.
+    """
+
+    shape = _FOOTER_SHAPE_RE.match(paragraph)
+    if shape is None:
+        return False
+    leading_numbers = len(_CITATION_NUMBER_RE.findall(shape.group(0)))
+    return leading_numbers > 1 or paragraph.count(_CITATION_MARKER) > 1
 
 
 def _citation_source_name(value: str, sources: Sequence[SlideSource]) -> str | None:
@@ -1264,6 +1290,17 @@ def _citation_source_name_findings(
         title, _ = _references_title_paragraph(root)
         references_slide = slide_index == last_slide_index and title == _REFERENCES_SLIDE_TITLE
         for paragraph in paragraphs:
+            if _combines_citation_sources(paragraph):
+                findings.append(
+                    ValidationFinding(
+                        "citation_footer_combines_sources",
+                        "one footer paragraph cites more than one source; give each source its own footer paragraph",
+                        slide_number=slide_index + 1,
+                        details={"citation": paragraph},
+                        origin="candidate",
+                    )
+                )
+                continue
             footer_match = _CITATION_FOOTER_RE.fullmatch(paragraph)
             reference_match = (
                 _REFERENCE_ENTRY_RE.fullmatch(paragraph) if references_slide else None

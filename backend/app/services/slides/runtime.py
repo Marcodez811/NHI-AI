@@ -109,7 +109,9 @@ internal workflow details. Never show them in slide text, citations, or the cove
 that contain factual claims, figures, or charts. Each factual content-slide footer must use
 `[N] 資料來源：<allowlisted display_name>，<locator>`, retaining every available
 evidence-backed section, PDF-page, or text-line locator. Assign one number per source and
-reuse that same number everywhere the source appears. End the deck with the required
+reuse that same number everywhere the source appears. When a slide draws on more than one
+source, give each source its own footer paragraph; never combine sources on one line, whether
+by repeating the `資料來源` marker or by stacking `[N]` numbers before a single marker. End the deck with the required
 `參考資料` slide. List each source cited by the content slides exactly once, numbered `[1]`,
 `[2]`, and so on with numbers that agree with the content footers, using its allowlisted
 `display_name` from `work/sources.json` followed by every available evidence-backed section

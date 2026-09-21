@@ -838,6 +838,110 @@ def test_content_footer_markers_must_map_one_to_one_with_references(tmp_path: Pa
     ]
 
 
+def test_citation_footer_rejects_a_repeated_marker_combining_two_sources(tmp_path: Path) -> None:
+    combined = (
+        "[1] 資料來源：年度報告.pdf，PDF 第 3 頁；"
+        "[2] 資料來源：全民健保檢討報告（草案），PDF 第 7 頁"
+    )
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={1: ["Cover title", combined]},
+    )
+
+    result = _validate(tmp_path)
+
+    findings = [
+        finding
+        for finding in result.findings
+        if finding.code == "citation_footer_combines_sources"
+    ]
+    assert len(findings) == 1
+    assert findings[0].slide_number == 1
+    assert findings[0].details == {"citation": combined}
+    assert findings[0].origin == "candidate"
+
+
+def test_citation_footer_rejects_stacked_numbers_before_one_marker(tmp_path: Path) -> None:
+    combined = "[1][2] 資料來源：A；B"
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={1: ["Cover title", combined]},
+    )
+
+    result = _validate(tmp_path)
+
+    findings = [
+        finding
+        for finding in result.findings
+        if finding.code == "citation_footer_combines_sources"
+    ]
+    assert len(findings) == 1
+    assert findings[0].slide_number == 1
+    assert findings[0].details == {"citation": combined}
+
+
+def test_citation_footer_bracket_in_locator_is_not_a_combined_source(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={1: ["Cover title", "[1] 資料來源：年度報告.pdf，第[3]節"]},
+    )
+
+    result = _validate(tmp_path)
+
+    assert not any(
+        finding.code == "citation_footer_combines_sources" for finding in result.findings
+    )
+
+
+def test_body_text_mentioning_the_citation_marker_once_is_not_combined(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={1: ["Cover title", "本報告的資料來源包括多份文件"]},
+    )
+
+    result = _validate(tmp_path)
+
+    assert not any(
+        finding.code == "citation_footer_combines_sources" for finding in result.findings
+    )
+
+
+def test_two_sources_on_separate_footer_paragraphs_still_passes(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        slide_count=3,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "Policy result",
+                "[1] 資料來源：年度報告.pdf，PDF 第 12 頁",
+                "[2] 資料來源：政策說明.docx，〈給付範圍〉",
+            ],
+            3: [
+                "參考資料",
+                "[1] 年度報告.pdf，〈財務〉，PDF 第 12 頁",
+                "[2] 政策說明.docx，〈給付範圍〉",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf", "policy.docx"],
+        ["年度報告.pdf", "政策說明.docx"],
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    assert result.status is ValidationStatus.PASS
+    assert not any(
+        finding.code == "citation_footer_combines_sources" for finding in result.findings
+    )
+
+
 @pytest.mark.parametrize("manifest_contents", [None, "not JSON"])
 def test_source_manifest_missing_or_malformed_is_infrastructure_failure(
     tmp_path: Path,
