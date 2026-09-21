@@ -10,9 +10,19 @@ from fastapi import HTTPException
 from taskiq.depends.progress_tracker import TaskProgress
 from taskiq_redis.exceptions import ResultIsMissingError
 
-from app.api.routes.slides import create_slides_job, download_slides_job, get_slides_job
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.api.routes.slides import (
+    create_slides_job,
+    download_slides_job,
+    get_slide_job_repository,
+    get_slides_job,
+    list_slides_jobs,
+    router,
+)
 from app.config import settings
-from app.models.slides import GenerateSlidesRequest, JobStatus
+from app.models.slides import GenerateSlidesRequest, JobStatus, SlideJob
 from app.services.agentic import AgentPhase
 from app.services.slides.repository import InMemorySlideJobRepository
 
@@ -136,3 +146,41 @@ async def test_durable_unknown_job_remains_not_found_when_redis_has_progress():
         await get_slides_job(job_id, redis, InMemorySlideJobRepository())
 
     assert caught.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_recent_jobs_include_parked_jobs_with_only_list_row_fields():
+    repository = InMemorySlideJobRepository()
+    parked = SlideJob(
+        id=uuid4(), title="Needs approval", document_ids=[str(uuid4())],
+        slides_count=5, guidance="", tone="formal",
+        status=JobStatus.AWAITING_INPUT.value, phase=AgentPhase.AWAITING_OUTLINE.value,
+    )
+    await repository.create(parked)
+
+    summaries = await list_slides_jobs(repository)
+
+    assert len(summaries) == 1
+    assert summaries[0].job_id == parked.id
+    assert summaries[0].status is JobStatus.AWAITING_INPUT
+    assert summaries[0].phase is AgentPhase.AWAITING_OUTLINE
+    assert set(summaries[0].model_dump()) == {
+        "job_id", "title", "status", "phase", "created_at", "started_at", "finished_at",
+    }
+
+
+def test_recent_jobs_route_precedes_job_id_and_validates_limit():
+    repository = InMemorySlideJobRepository()
+    application = FastAPI()
+    application.include_router(router, prefix="/api/v1")
+    application.dependency_overrides[get_slide_job_repository] = lambda: repository
+
+    with TestClient(application) as client:
+        response = client.get("/api/v1/slides/jobs")
+        invalid_low = client.get("/api/v1/slides/jobs?limit=0")
+        invalid_high = client.get("/api/v1/slides/jobs?limit=101")
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert invalid_low.status_code == 422
+    assert invalid_high.status_code == 422

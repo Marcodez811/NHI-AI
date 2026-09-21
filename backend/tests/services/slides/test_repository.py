@@ -245,3 +245,27 @@ async def test_sql_repository_expire_awaiting_input_never_races_a_resume(tmp_pat
         assert job.status == JobStatus.RUNNING.value
         assert job.lease_token == "worker-2"
         assert job.status == JobStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sql_backed", [False, True])
+async def test_list_recent_orders_newest_first_and_bounds_limit(tmp_path: Path, sql_backed: bool):
+    """Both storage implementations expose the same bounded discovery order."""
+
+    engine = _migrated_engine(tmp_path) if sql_backed else None
+    session = Session(engine) if engine is not None else None
+    try:
+        repository = SQLModelSlideJobRepository(session) if session is not None else InMemorySlideJobRepository()
+        now = datetime.now(timezone.utc)
+        for offset in (2, 0, 1):
+            job = _job(uuid4())
+            job.title = f"Job {offset}"
+            job.created_at = now - timedelta(days=offset)
+            await repository.create(job)
+
+        assert [job.title for job in await repository.list_recent(limit=2)] == ["Job 0", "Job 1"]
+        assert len(await repository.list_recent(limit=1000)) == 3
+        assert len(await repository.list_recent(limit=0)) == 1
+    finally:
+        if session is not None:
+            session.close()

@@ -1,3 +1,7 @@
+"""Public and durable contracts for grounded presentation jobs."""
+
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -208,6 +212,18 @@ class SlidesJobStatusResponse(BaseModel):
     # Durable jobs return their original input so a refreshed browser can
     # accurately describe and restart a presentation without guessing.
     brief: SlideJobBrief | None = None
+
+
+class SlideJobSummary(BaseModel):
+    """Only the durable fields needed to rediscover a presentation job."""
+
+    job_id: UUID
+    title: str
+    status: JobStatus
+    phase: AgentPhase
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 # --------------------------------------------------------------------------

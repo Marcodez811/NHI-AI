@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, StreamingResponse
 from taskiq.depends.progress_tracker import TaskProgress
 from taskiq_redis.exceptions import ResultIsMissingError
@@ -24,6 +24,7 @@ from app.models.slides import (
     CreateSlidesJobResponse,
     GenerateSlidesRequest,
     JobStatus,
+    SlideJobSummary,
     OutlineMessageRequest,
     OutlineRevisionResponse,
     SlideJobBrief,
@@ -409,6 +410,34 @@ async def create_slides_job(
             detail="Slide jobs are temporarily unavailable.",
         ) from exc
     return CreateSlidesJobResponse(job_id=job_id, status=JobStatus.QUEUED, phase=AgentPhase.QUEUED)
+
+
+@router.get("/jobs", response_model=list[SlideJobSummary])
+async def list_slides_jobs(
+    slide_repository: Annotated[SlideJobRepository, Depends(get_slide_job_repository)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> list[SlideJobSummary]:
+    """List recent durable jobs, including those parked for outline approval."""
+
+    try:
+        jobs = await slide_repository.list_recent(limit=limit)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Slide jobs are temporarily unavailable.",
+        ) from exc
+    return [
+        SlideJobSummary(
+            job_id=job.id,
+            title=job.title,
+            status=JobStatus(job.status),
+            phase=_safe_phase(job.phase, status=JobStatus(job.status), stage=job.stage),
+            created_at=job.created_at,
+            started_at=job.started_at,
+            finished_at=job.finished_at,
+        )
+        for job in jobs
+    ]
 
 
 @router.get("/jobs/{job_id}", response_model=SlidesJobStatusResponse)

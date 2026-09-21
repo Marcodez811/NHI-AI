@@ -16,6 +16,8 @@ from sqlmodel import Session, select
 from app.models.slides import JobStatus, SlideJob
 from app.services.agentic.contracts import AgentPhase
 
+MAX_RECENT_SLIDE_JOBS = 100
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -39,6 +41,7 @@ def _as_utc(value: datetime | None) -> datetime | None:
 class SlideJobRepository(Protocol):
     async def create(self, job: SlideJob) -> SlideJob: ...
     async def get(self, job_id: UUID) -> SlideJob | None: ...
+    async def list_recent(self, *, limit: int = 20) -> list[SlideJob]: ...
     async def claim(self, job_id: UUID, *, lease_token: str, lease_seconds: int = 300, allow_resume_from_awaiting_input: bool = False) -> tuple[SlideJob | None, bool]: ...
     async def update(self, job: SlideJob) -> SlideJob: ...
     async def update_progress(self, job_id: UUID, *, phase: str, stage: str | None = None, message: str | None = None, lease_token: str | None = None) -> SlideJob | None: ...
@@ -57,6 +60,16 @@ class InMemorySlideJobRepository:
 
     async def get(self, job_id: UUID) -> SlideJob | None:
         return self.jobs.get(job_id)
+
+    async def list_recent(self, *, limit: int = 20) -> list[SlideJob]:
+        """Use the durable creation order so paused jobs remain discoverable."""
+
+        bounded_limit = max(1, min(limit, MAX_RECENT_SLIDE_JOBS))
+        return sorted(
+            self.jobs.values(),
+            key=lambda job: (_as_utc(job.created_at), str(job.id)),
+            reverse=True,
+        )[:bounded_limit]
 
     async def update(self, job: SlideJob) -> SlideJob:
         if job.id not in self.jobs:
@@ -188,6 +201,11 @@ class SQLModelSlideJobRepository(InMemorySlideJobRepository):
 
     async def get(self, job_id: UUID) -> SlideJob | None:
         return self.session.get(SlideJob, job_id)
+
+    async def list_recent(self, *, limit: int = 20) -> list[SlideJob]:
+        bounded_limit = max(1, min(limit, MAX_RECENT_SLIDE_JOBS))
+        statement = select(SlideJob).order_by(SlideJob.created_at.desc(), SlideJob.id.desc()).limit(bounded_limit)
+        return list(self.session.exec(statement).all())
 
     async def update(self, job: SlideJob) -> SlideJob:
         job.updated_at = _now()
