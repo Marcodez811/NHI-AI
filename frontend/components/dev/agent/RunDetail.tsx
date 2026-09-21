@@ -18,6 +18,26 @@ import { Timeline } from "./Timeline";
 import { deriveAgentAttempts } from "./attempts";
 import { useNow } from "../../../lib/hooks/useNow";
 
+function PhaseValue({ phase }: { phase: string | null }) {
+    if (phase !== "awaiting_outline") {
+        return <MetaValue label="Phase" value={phase || "—"} />;
+    }
+
+    return (
+        <div className="min-w-0">
+            <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                Phase
+            </dt>
+            <dd className="mt-1">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-secondary px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                    <StatusIcon status="waiting" />
+                    等待人工核准大綱
+                </span>
+            </dd>
+        </div>
+    );
+}
+
 export function RunDetail({
     snapshot,
     events,
@@ -34,7 +54,13 @@ export function RunDetail({
         [events, now, snapshot.nodes],
     );
     const nodes = useMemo(() => {
-        const lifecycleOrder = ["author", "validator", "reviewer"];
+        const lifecycleOrder = [
+            "extraction",
+            "planning",
+            "author",
+            "validator",
+            "reviewer",
+        ];
         return snapshot.nodes
             .map((node, index) => ({ node, index }))
             .sort((left, right) => {
@@ -127,7 +153,7 @@ export function RunDetail({
             )}
 
             <dl className="grid gap-x-6 gap-y-4 rounded-lg border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-4">
-                <MetaValue label="Phase" value={snapshot.phase || "—"} />
+                <PhaseValue phase={snapshot.phase} />
                 <MetaValue label="Runner" value={snapshot.runner || "—"} />
                 <MetaValue
                     label="Task ID"

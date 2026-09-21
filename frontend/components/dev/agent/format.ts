@@ -53,6 +53,8 @@ export function statusBadgeClass(status: string | null | undefined): string {
 
 export function nodeLabel(node: Pick<AgentNodeSnapshot, "node_id">): string {
     const key = node.node_id.toLowerCase();
+    if (key.includes("extract")) return "擷取 Agent";
+    if (key.includes("plan")) return "規劃 Agent";
     if (key.includes("author")) return "作者 Agent";
     if (key.includes("review")) return "審查 Agent";
     if (key.includes("valid")) return "驗證器";

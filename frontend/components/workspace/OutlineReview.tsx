@@ -3,14 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CircleAlert, LoaderCircle, Send } from "lucide-react";
 
+import { ApiError } from "../../lib/api/client";
 import {
-    ApiError,
     approveSlideJobOutline,
     getSlideJobOutline,
     streamSlideJobOutlineMessage,
     type OutlineEmphasis,
     type OutlineRevisionResponse,
-} from "../../lib/api";
+} from "../../lib/api/slides";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 

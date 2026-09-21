@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { RunDetail } from "../components/dev/agent/RunDetail";
 import type { AgentRunSnapshot } from "../lib/api";
@@ -90,5 +90,74 @@ describe("RunDetail", () => {
         expect(screen.getByText("gpt-5.6-luna")).toBeInTheDocument();
         expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
         expect(screen.getAllByText("high")).toHaveLength(2);
+    });
+
+    it("shows runner configuration on each node and placeholders for missing values", () => {
+        render(<RunDetail snapshot={snapshot} events={[]} detailLoading={false} />);
+
+        const authorCard = screen.getByRole("heading", { name: "作者 Agent" })
+            .closest("article") as HTMLElement;
+        const validatorCard = screen.getByRole("heading", { name: "驗證器" })
+            .closest("article") as HTMLElement;
+        const valueFor = (card: HTMLElement, label: string) =>
+            within(card).getByText(label).nextElementSibling;
+
+        expect(valueFor(authorCard, "Runner")).toHaveTextContent("codex");
+        expect(valueFor(authorCard, "Model")).toHaveTextContent("gpt-5.6-luna");
+        expect(valueFor(authorCard, "Reasoning")).toHaveTextContent("high");
+        expect(valueFor(validatorCard, "Runner")).toHaveTextContent("system");
+        expect(valueFor(validatorCard, "Model")).toHaveTextContent("—");
+        expect(valueFor(validatorCard, "Reasoning")).toHaveTextContent("—");
+    });
+
+    it("orders extraction and planning before execution nodes while preserving unknown nodes", () => {
+        const nodeById = Object.fromEntries(
+            snapshot.nodes.map((node) => [node.node_id, node]),
+        );
+        const expandedSnapshot: AgentRunSnapshot = {
+            ...snapshot,
+            nodes: [
+                { ...nodeById.reviewer, node_id: "future-node" },
+                nodeById.reviewer,
+                { ...nodeById.author, node_id: "planning" },
+                nodeById.validator,
+                { ...nodeById.author, node_id: "extraction" },
+                nodeById.author,
+            ],
+        };
+
+        render(
+            <RunDetail
+                snapshot={expandedSnapshot}
+                events={[]}
+                detailLoading={false}
+            />,
+        );
+
+        const nodeHeadings = Array.from(document.querySelectorAll("article h3"))
+            .map((heading) => heading.textContent);
+        expect(nodeHeadings).toEqual([
+            "擷取 Agent",
+            "規劃 Agent",
+            "作者 Agent",
+            "驗證器",
+            "審查 Agent",
+            "future-node",
+        ]);
+    });
+
+    it("presents awaiting outline as waiting for human approval", () => {
+        render(
+            <RunDetail
+                snapshot={{ ...snapshot, phase: "awaiting_outline" }}
+                events={[]}
+                detailLoading={false}
+            />,
+        );
+
+        expect(screen.getByText("等待人工核准大綱")).toHaveClass(
+            "bg-secondary",
+            "text-muted-foreground",
+        );
     });
 });
