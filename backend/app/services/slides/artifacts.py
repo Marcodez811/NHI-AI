@@ -254,8 +254,12 @@ def stage_uploads(job_dir: Path, uploaded_paths: Sequence[Path]) -> list[str]:
         if not source.is_file():
             raise JobError("stage_uploads", "a source file disappeared before staging")
         destination = job_dir / "input" / source.name
-        if destination.exists():
-            destination = destination.with_stem(f"{destination.stem}__{len(staged_names) + 1}")
+        collision_number = len(staged_names) + 1
+        while destination.exists():
+            destination = (job_dir / "input" / source.name).with_stem(
+                f"{source.stem}__{collision_number}"
+            )
+            collision_number += 1
         shutil.copy2(source, destination)
         staged_names.append(destination.name)
     return staged_names

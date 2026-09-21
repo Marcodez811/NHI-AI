@@ -14,6 +14,7 @@ from app.services.slides.validation import (
     _canonicalize_pdftoppm_output,
     validate_candidate_deck,
 )
+from app.services.slides.source_manifest import write_source_manifest
 
 
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -31,7 +32,12 @@ def _png_bytes(color: tuple[int, int, int]) -> bytes:
     return output.getvalue()
 
 
-def _write_deck(root: Path, slide_count: int = 2) -> Path:
+def _write_deck(
+    root: Path,
+    slide_count: int = 2,
+    *,
+    paragraphs_by_slide: dict[int, list[str]] | None = None,
+) -> Path:
     deck = root / "output" / "presentation.pptx"
     deck.parent.mkdir(parents=True)
     parts = {
@@ -50,10 +56,17 @@ def _write_deck(root: Path, slide_count: int = 2) -> Path:
         </Relationships>''',
     }
     for index in range(1, slide_count + 1):
-        text = "Cover title" if index == 1 else f"Slide {index}"
+        paragraphs = (paragraphs_by_slide or {}).get(
+            index,
+            ["Cover title" if index == 1 else f"Slide {index}"],
+        )
+        text_xml = "".join(
+            f"<a:p><a:r><a:rPr/><a:t>{text}</a:t></a:r></a:p>"
+            for text in paragraphs
+        )
         parts[f"ppt/slides/slide{index}.xml"] = f'''<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}">
           <p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/><p:sp><p:nvSpPr/><p:spPr/>
-            <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr/><a:t>{text}</a:t></a:r></a:p></p:txBody>
+            <p:txBody><a:bodyPr/><a:lstStyle/>{text_xml}</p:txBody>
           </p:sp></p:spTree></p:cSld>
         </p:sld>'''
         parts[f"ppt/slides/_rels/slide{index}.xml.rels"] = f'''<Relationships xmlns="{REL_NS}">
@@ -134,6 +147,9 @@ def _write_outline_mapping(root: Path, nodes: list[tuple[str, int, int]]) -> Pat
 
 
 def _validate(root: Path, **kwargs: object):
+    sources_path = root / "work" / "sources.json"
+    if "sources_path" not in kwargs and not sources_path.exists():
+        write_source_manifest(sources_path, ["source.pdf"], ["年度報告.pdf"])
     options: dict[str, object] = {
         "expected_slide_count": 2,
         "requested_title": "Cover title",
@@ -355,6 +371,82 @@ def test_no_outline_file_leaves_validation_unaffected(tmp_path: Path) -> None:
 
     assert result.status is ValidationStatus.PASS
     assert not any(finding.code.startswith("outline_") for finding in result.findings)
+
+
+def test_citation_source_names_accept_only_catalog_display_names(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: [
+                "Cover title",
+                "本文提到 report__2.pdf，但不是引用。",
+                "[2] 普通編號內容，不是來源清單。",
+            ],
+            2: [
+                "參考資料",
+                "[1] 2025，年度報告.pdf，〈財務〉，PDF 第 12 頁",
+                "[1] 資料來源：2025，年度報告.pdf，PDF 第 12 頁",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report__2.pdf"],
+        ["2025，年度報告.pdf"],
+    )
+
+    result = _validate(tmp_path)
+
+    source_findings = [
+        finding for finding in result.findings if finding.code == "citation_source_name_invalid"
+    ]
+    assert source_findings == []
+
+
+def test_citation_source_name_rejects_unknown_and_prefix_names(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "Slide 2",
+                "資料來源：年度報告.pdf.bak，PDF 第 3 頁",
+                "[2] 資料來源：內部摘要.pdf，PDF 第 8 頁",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf"],
+        ["年度報告.pdf"],
+    )
+
+    result = _validate(tmp_path)
+
+    findings = [
+        finding for finding in result.findings if finding.code == "citation_source_name_invalid"
+    ]
+    assert [finding.slide_number for finding in findings] == [2, 2]
+    assert all(finding.origin == "candidate" for finding in findings)
+
+
+@pytest.mark.parametrize("manifest_contents", [None, "not JSON"])
+def test_source_manifest_missing_or_malformed_is_infrastructure_failure(
+    tmp_path: Path,
+    manifest_contents: str | None,
+) -> None:
+    _write_deck(tmp_path)
+    sources_path = tmp_path / "work" / "sources-invalid.json"
+    if manifest_contents is not None:
+        sources_path.parent.mkdir(parents=True, exist_ok=True)
+        sources_path.write_text(manifest_contents, encoding="utf-8")
+
+    result = _validate(tmp_path, sources_path=sources_path)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "source_manifest_unavailable"
+    )
+    assert finding.origin == "infrastructure"
 
 
 def test_approved_outline_matching_the_deck_passes(tmp_path: Path) -> None:

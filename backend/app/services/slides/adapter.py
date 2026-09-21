@@ -13,6 +13,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from app.config import settings
 from app.models.slides import JobStatus, SlideOutline, SlidesTaskPayload, SlidesTaskResult
@@ -40,9 +41,29 @@ from .artifacts import (
 )
 from .contracts import JobError
 from .runtime import build_job_environment, build_prompt
+from .source_manifest import SourceManifestError, load_source_manifest, write_source_manifest
 
 
 _VALIDATION_ORIGINS = frozenset({"candidate", "infrastructure"})
+
+
+async def _document_display_names(document_ids: list[UUID]) -> list[str]:
+    """Resolve catalog names at execution time without putting IDs in artifacts."""
+
+    from sqlmodel import Session
+
+    from app.db import engine
+    from app.services.documents.repository import SQLModelDocumentRepository
+
+    display_names: list[str] = []
+    with Session(engine) as session:
+        repository = SQLModelDocumentRepository(session)
+        for document_id in document_ids:
+            document = await repository.get_document(document_id)
+            if document is None or not document.display_name.strip():
+                raise JobError("inputs", "source document metadata is unavailable")
+            display_names.append(document.display_name)
+    return display_names
 
 
 def _validation_finding_payload(finding: Any) -> dict[str, Any]:
@@ -191,19 +212,77 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
         )
 
     async def prepare_input(self, value: SlidesTaskPayload, workspace: Path) -> None:
-        source_paths = await SharedVolumeDocumentResolver(settings.documents_root).resolve_many(value.document_ids)
-        validated = await asyncio.to_thread(validate_source_paths, source_paths)
         context_path = workspace / "work" / "slide_context.json"
         context_exists = await asyncio.to_thread(context_path.exists)
         context_text = await asyncio.to_thread(context_path.read_text, encoding="utf-8") if context_exists else None
         context = json.loads(context_text) if context_text else {}
+        display_names = await _document_display_names(value.document_ids)
+        sources_path = workspace / "work" / "sources.json"
+        evidence_exists = await asyncio.to_thread((workspace / "work" / "evidence.json").is_file)
+        sources_exist = await asyncio.to_thread(sources_path.exists)
+
+        # Resuming after outline approval must use the already-frozen evidence.
+        # The originals may legitimately have been removed during a long human
+        # review, and reopening them would make the resumed author depend on a
+        # different input boundary from the planner it is following.
+        if evidence_exists:
+            if not sources_exist:
+                raise JobError("inputs", "source name manifest is unavailable")
+            try:
+                existing_sources = await asyncio.to_thread(load_source_manifest, sources_path)
+                staged_names = [source.staged_filename for source in existing_sources]
+                if len(staged_names) != len(display_names):
+                    raise SourceManifestError("source manifest does not match the job inputs")
+                await asyncio.to_thread(
+                    write_source_manifest,
+                    sources_path,
+                    staged_names,
+                    display_names,
+                )
+            except SourceManifestError as exc:
+                raise JobError("inputs", "source name manifest is unavailable") from exc
+            context["staged_names"] = staged_names
+            await asyncio.to_thread(
+                context_path.write_text,
+                json.dumps(context, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            return
+
+        source_paths = await SharedVolumeDocumentResolver(settings.documents_root).resolve_many(value.document_ids)
+        validated = await asyncio.to_thread(validate_source_paths, source_paths)
         fontconfig = Path(context["fontconfig"]) if context.get("fontconfig") else None
         font = await asyncio.to_thread(
             preflight,
             validated,
             environment=build_job_environment(fontconfig_file=fontconfig),
         )
-        staged_names = await asyncio.to_thread(stage_uploads, workspace, validated)
+        if sources_exist:
+            try:
+                existing_sources = await asyncio.to_thread(load_source_manifest, sources_path)
+            except SourceManifestError as exc:
+                raise JobError("inputs", "source name manifest is unavailable") from exc
+            staged_names = [source.staged_filename for source in existing_sources]
+            if len(staged_names) != len(validated):
+                raise JobError("inputs", "source name manifest does not match the job inputs")
+            staged_files_exist = all(
+                (workspace / "input" / name).is_file()
+                and not (workspace / "input" / name).is_symlink()
+                for name in staged_names
+            )
+            if not staged_files_exist:
+                raise JobError("inputs", "staged source files are unavailable")
+        else:
+            staged_names = await asyncio.to_thread(stage_uploads, workspace, validated)
+        try:
+            await asyncio.to_thread(
+                write_source_manifest,
+                sources_path,
+                staged_names,
+                display_names,
+            )
+        except SourceManifestError as exc:
+            raise JobError("inputs", "source name manifest could not be prepared") from exc
         context.update({
             "staged_names": staged_names,
             "source_paths": [str(path) for path in validated],
@@ -240,10 +319,14 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             # evidence through the sandbox filesystem grant, never inlined into
             # its prompt, so it and the author are grounded in byte-identical
             # evidence (docs/agents-sdk-migration-plan.md, Stage 5 decision).
-            return (workspace / "work" / "evidence.json",)
+            return (
+                workspace / "work" / "evidence.json",
+                workspace / "work" / "sources.json",
+            )
         if stage == "author":
             return (
                 workspace / "work" / "evidence.json",
+                workspace / "work" / "sources.json",
                 workspace / "work" / "extracted" / "assets",
                 workspace / "template",
                 # The human-approved outline (Stage 5); absent on a run whose
@@ -309,6 +392,11 @@ Propose a structured outline for a presentation grounded entirely in the frozen
 EvidenceStore at `work/evidence.json` (already mounted read-only; you cannot write to it
 or to any other workspace path from this stage). Do not draft slide content or write any
 file -- return only the structured outline.
+
+`work/sources.json` is the authoritative mapping from staged evidence filenames to the
+knowledge-base names users recognize. Whenever a `key_point` names a source, use only its
+`display_name` from that file; never expose a staged filename, collision suffix, hash, or
+derived document title.
 
 ## Brief
 - Title: {value.title}
@@ -395,8 +483,10 @@ explicitly rather than presenting both sides unreconciled.
                 "Address every blocking finding below. After changes, regenerate affected preview renders, "
                 "then stop; the backend validator owns content_check.json and deck_snapshot.json. "
                 "The frozen evidence.json and work/extracted/ tree are read-only and authoritative. "
-                "Preserve or repair audience-facing source footers and remove any speaker notes; never add "
-                "EvidenceStore names, paths, hashes, or block IDs to the delivered presentation. "
+                "Preserve or repair audience-facing source footers and citations using only knowledge-base display names "
+                "from the read-only work/sources.json mapping, and remove any speaker notes. Never add "
+                "staged filenames, collision suffixes, derived document titles, EvidenceStore names, "
+                "paths, hashes, or block IDs to the delivered presentation. "
                 "Before finishing, verify each blocking finding individually "
                 "and state which slide or artifact change resolves it.\n\n"
                 "## Blocking review findings to correct\n"
@@ -472,6 +562,7 @@ explicitly rather than presenting both sides unreconciled.
                 expected_slide_count=value.slides_count,
                 requested_title=value.title,
                 evidence_path=workspace / "work" / "evidence.json",
+                sources_path=workspace / "work" / "sources.json",
             )
         except ValidationInfrastructureError:
             raise

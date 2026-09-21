@@ -14,6 +14,7 @@ from app.services.agentic.runner import bwrap_available, build_bwrap_launch_args
 from app.services.slides.adapter import SlidesWorkflowAdapter
 from app.services.slides.artifacts import BACKEND_ROOT, create_job_workspace, stage_required_skills
 from app.services.slides.evidence import freeze_evidence, load_frozen_evidence
+from app.services.slides.source_manifest import write_source_manifest
 from app.services.slides.validation import ValidationStatus, build_deck_snapshot, validate_candidate_deck
 
 
@@ -170,6 +171,11 @@ def test_changed_chart_data_survives_author_correction_and_backend_validation(tm
     extraction.extract([str(source)], str(workspace / "work" / "extracted"))
     evidence_path = workspace / "work" / "evidence.json"
     freeze_evidence(workspace / "work" / "extracted", evidence_path)
+    write_source_manifest(
+        workspace / "work" / "sources.json",
+        ["annual.pdf", "policy.docx", "appendix.md"],
+        ["年度報告.pdf", "政策說明.docx", "政策附件.md"],
+    )
     evidence_bytes = evidence_path.read_bytes()
 
     skill = workspace / ".agents" / "skills" / "pptx-nhi-tw"

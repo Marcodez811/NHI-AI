@@ -231,6 +231,8 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertIn("2026 / Taiwan: NHI briefing", prompt)
         self.assertIn("audience-facing source footers", prompt)
         self.assertIn("remove any speaker notes", prompt)
+        self.assertIn("work/sources.json", prompt)
+        self.assertIn("collision suffixes", prompt)
 
     def test_review_context_lists_semantic_review_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:

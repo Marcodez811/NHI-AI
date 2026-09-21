@@ -35,6 +35,7 @@ from uuid import uuid4
 from xml.etree import ElementTree as ET
 
 from .contracts import JobError
+from .source_manifest import SlideSource, SourceManifestError, load_source_manifest
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance only
     from app.models.slides import SlideOutline
@@ -1106,6 +1107,75 @@ def _title_present(snapshot: Mapping[str, Any], requested_title: str) -> bool:
     return normalized in visible_shapes
 
 
+def _normalize_visible_text(value: str) -> str:
+    """Collapse whitespace so OOXML soft-wraps never defeat exact matching."""
+
+    return " ".join(value.split())
+
+
+_CITATION_FOOTER_RE = re.compile(
+    r"^(?:\[\s*\d+\s*\]\s*)?資料來源\s*[：:]\s*(?P<source>.+)$"
+)
+_REFERENCE_ENTRY_RE = re.compile(r"^\[\s*\d+\s*\]\s*(?P<source>.+)$")
+_REFERENCE_TITLES = frozenset({"參考資料", "參考文獻", "references"})
+
+
+def _source_name_allowed(value: str, sources: Sequence[SlideSource]) -> bool:
+    """Match one manifest name with an exact citation-detail boundary."""
+
+    normalized = _normalize_visible_text(value)
+    names = sorted(
+        (_normalize_visible_text(source.display_name) for source in sources),
+        key=len,
+        reverse=True,
+    )
+    return any(
+        normalized == name
+        or normalized.startswith(name + "，")
+        or normalized.startswith(name + ",")
+        for name in names
+    )
+
+
+def _citation_source_name_findings(
+    package: _PptxPackage,
+    sources: Sequence[SlideSource],
+) -> list[ValidationFinding]:
+    """Reject non-catalog names only in explicit citation-shaped paragraphs."""
+
+    findings: list[ValidationFinding] = []
+    last_slide_index = len(package.slide_roots) - 1
+    for slide_index, root in enumerate(package.slide_roots):
+        paragraphs = [_normalize_visible_text(value) for value in _paragraph_texts(root)]
+        references_slide = slide_index == last_slide_index and any(
+            paragraph.casefold() in _REFERENCE_TITLES for paragraph in paragraphs
+        )
+        for paragraph in paragraphs:
+            footer_match = _CITATION_FOOTER_RE.fullmatch(paragraph)
+            reference_match = (
+                _REFERENCE_ENTRY_RE.fullmatch(paragraph) if references_slide else None
+            )
+            matched = footer_match or reference_match
+            if matched is None:
+                continue
+            source_text = matched.group("source").strip()
+            nested_footer = _CITATION_FOOTER_RE.fullmatch(source_text)
+            if nested_footer is not None:
+                source_text = nested_footer.group("source").strip()
+            if _source_name_allowed(source_text, sources):
+                continue
+            findings.append(
+                ValidationFinding(
+                    "citation_source_name_invalid",
+                    "citation source name is not a knowledge-base display name",
+                    slide_number=slide_index + 1,
+                    details={"citation": paragraph},
+                    origin="candidate",
+                )
+            )
+    return findings
+
+
 @dataclass(frozen=True)
 class _OutlineMappingEntry:
     """One author-declared, inclusive content-slide range."""
@@ -1446,6 +1516,7 @@ def _validate_candidate_deck_in_render_root(
     requested_title: str | None = None,
     evidence_path: Path | None = None,
     outline_path: Path | None = None,
+    sources_path: Path | None = None,
     logo_dir: Path | None = DEFAULT_LOGO_ASSET_DIR,
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
@@ -1458,12 +1529,25 @@ def _validate_candidate_deck_in_render_root(
     deck = job_dir / "output" / "presentation.pptx"
     evidence = Path(evidence_path) if evidence_path is not None else job_dir / "work" / "evidence.json"
     outline_file = Path(outline_path) if outline_path is not None else job_dir / "work" / "outline.json"
+    sources_file = Path(sources_path) if sources_path is not None else job_dir / "work" / "sources.json"
     artifact_dir = job_dir / "work" / "intermediate"
     content_path = artifact_dir / "content_check.json"
     snapshot_path = artifact_dir / "deck_snapshot.json"
     _clear_final_renders(job_dir / "work" / "rendered" / "final")
     _clear_validator_artifacts(content_path, snapshot_path)
     findings: list[ValidationFinding] = []
+    sources: tuple[SlideSource, ...] | None = None
+    try:
+        sources = load_source_manifest(sources_file)
+    except SourceManifestError as exc:
+        findings.append(
+            ValidationFinding(
+                "source_manifest_unavailable",
+                "backend source-name manifest is missing or malformed",
+                details={"error": str(exc)},
+                origin="infrastructure",
+            )
+        )
     if runner is not None:
         # ``runner`` is the spelling used by the older artifacts helper.  It
         # is accepted here so the coordinator can migrate without an adapter
@@ -1492,6 +1576,8 @@ def _validate_candidate_deck_in_render_root(
     try:
         package = _load_pptx_package(deck)
         slide_count = len(package.ordered_slides)
+        if sources is not None:
+            findings.extend(_citation_source_name_findings(package, sources))
         if expected_slide_count is not None and slide_count != expected_slide_count:
             findings.append(ValidationFinding("slide_count", "PPTX slide count does not match the requested count", details={"expected": expected_slide_count, "actual": slide_count}, origin="candidate"))
     except PptxPackageError as exc:
@@ -1613,6 +1699,7 @@ def validate_candidate_deck(
     requested_title: str | None = None,
     evidence_path: Path | None = None,
     outline_path: Path | None = None,
+    sources_path: Path | None = None,
     logo_dir: Path | None = DEFAULT_LOGO_ASSET_DIR,
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
@@ -1646,6 +1733,7 @@ def validate_candidate_deck(
             requested_title=requested_title,
             evidence_path=evidence_path,
             outline_path=outline_path,
+            sources_path=sources_path,
             logo_dir=logo_dir,
             command_runner=command_runner,
             runner=runner,

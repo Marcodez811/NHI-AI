@@ -96,16 +96,18 @@ narrative, resolve conflicts explicitly using the evidence blocks, and never inv
 data. Do not open or reinterpret files under `input/`, and do not modify `work/evidence.json`
 or `work/extracted/`.
 
+`work/sources.json` is the authoritative mapping from each staged evidence filename to the
+knowledge-base `display_name` the user recognizes. Every visible source name must use that
+`display_name`, even when an evidence block's `citation.source_name`, `citation.display_text`,
+or a parsed document title disagrees. Keep available section, PDF-page, or text-line locator
+detail from the evidence block, but never show a staged filename or collision suffix.
 `EvidenceStore`, evidence IDs, hashes, JSON filenames, and extraction-process language are
-internal workflow details. Never show them in slide text, citations, speaker notes, or the
-cover. Cite audience-facing sources from each evidence block's `citation` object instead:
-use its `display_text` in a readable slide footer and its source name, section path, and
-locator. Cite slides that contain factual claims, figures, or charts; do not
-add a pipeline explanation to the cover or an unsupported bibliography slide.
-For a retained evidence block without `citation`, derive a conservative reference from
-`provenance.source`'s basename and its available PDF page or text line locator. Use the
-filename alone when no reliable locator exists; never expose an XML path or invent a page,
-section, publisher, date, or office.
+internal workflow details. Never show them in slide text, citations, or the cover. Cite slides
+that contain factual claims, figures, or charts; do not add a pipeline explanation to the
+cover or an unsupported bibliography slide. For a retained block without `citation`, use
+`provenance.source` only to select the matching staged filename in `work/sources.json`, then
+use that entry's `display_name` plus any reliable provenance locator. Never expose an XML
+path or invent a page, section, publisher, date, or office.
 
 Keep simple charts editable. For combination or dual-axis charts, dense labels, heatmaps,
 or a native chart that still renders incorrectly after one correction, create a data-rendered
