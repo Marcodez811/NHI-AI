@@ -21,6 +21,7 @@ from typing import Any
 from pydantic import BaseModel, SecretStr
 from loguru import logger
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox, SkillInput, TextInput
+from agents.strict_schema import ensure_strict_json_schema
 
 from .contracts import (
     AgentExecutionRequest,
@@ -165,6 +166,19 @@ _SECRET = re.compile(
     re.I,
 )
 _PATH = re.compile(r"(?:[A-Za-z]:[\\/]|/(?:tmp|app|home|workspace)(?:[\\/]|$)|(?:^|[\s(])\.\.?[\\/]|(?:^|[\s(])[^\s]+[\\/][^\s]+)")
+
+
+def _strict_output_schema(output_type: type[BaseModel]) -> dict[str, Any]:
+    """Return a structured-outputs-strict JSON schema for ``output_type``.
+
+    ``ensure_strict_json_schema`` ships with the Agents SDK and applies the two
+    rules Pydantic does not: every object gets ``additionalProperties: false``,
+    and every property is listed in ``required``. Both are enforced by the
+    provider, and a violation surfaces only as an ``invalid_json_schema`` error
+    mid-run, so normalize before the request is built.
+    """
+
+    return ensure_strict_json_schema(output_type.model_json_schema())
 
 
 def safe_error(value: object, fallback: str = "Workflow execution failed.") -> str:
@@ -657,7 +671,15 @@ class CodexAgentRunner:
             # ``output_type`` has no Codex primitive of its own; derive the
             # same raw schema Codex has always accepted from the declared
             # type so the provider wire format is unchanged.
-            output_schema=request.output_type.model_json_schema() if request.output_type is not None else request.output_schema,
+            #
+            # The derived schema must then be made strict. Pydantic emits
+            # ``additionalProperties`` only for models declaring
+            # ``extra="forbid"``, and omits defaulted fields from ``required``;
+            # structured outputs rejects both ("'additionalProperties' is
+            # required to be supplied and to be false"). Normalizing here rather
+            # than relying on every ``output_type`` to be declared strictly
+            # keeps a new typed node from failing at provider call time.
+            output_schema=_strict_output_schema(request.output_type) if request.output_type is not None else request.output_schema,
         )
 
         async def forward_progress(event: dict[str, Any]) -> None:

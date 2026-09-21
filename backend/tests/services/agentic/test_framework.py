@@ -310,7 +310,18 @@ async def test_codex_agent_runner_derives_schema_from_output_type_and_validates_
 
     result = await runner.run(request)
 
-    assert FakeThread.last_turn_kwargs["output_schema"] == ReviewOutcome.model_json_schema()
+    # The schema is derived from ``output_type`` and then normalized for
+    # structured outputs' strict mode: every object must declare
+    # ``additionalProperties: false`` and name every property in ``required``.
+    # Pydantic does neither for a model without ``extra="forbid"`` or for a
+    # defaulted field, and the provider rejects the whole request with
+    # ``invalid_json_schema`` when either is missing.
+    schema = FakeThread.last_turn_kwargs["output_schema"]
+    assert schema["additionalProperties"] is False
+    assert sorted(schema["required"]) == sorted(schema["properties"])
+    finding = schema["$defs"]["ReviewFinding"]
+    assert finding["additionalProperties"] is False
+    assert sorted(finding["required"]) == sorted(finding["properties"])
     assert result.output == outcome
 
 

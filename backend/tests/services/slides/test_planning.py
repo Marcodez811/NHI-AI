@@ -217,3 +217,29 @@ def test_build_prompt_instructs_node_order_and_emphasis_when_outline_is_approved
     assert '"node_id":"intro"' in prompt
     assert "inclusive" in prompt
     assert "Do not include any references slide" in prompt
+
+
+def test_planner_output_schema_satisfies_structured_outputs_strict_mode():
+    """The planner's ``SlideOutline`` must survive the provider's strict check.
+
+    A live planning run failed with ``invalid_json_schema`` because Pydantic
+    omits ``additionalProperties`` for a model without ``extra="forbid"`` and
+    leaves defaulted fields (``OutlineNode.evidence_refs``) out of ``required``
+    -- structured outputs rejects both. The runner normalizes the derived
+    schema, so assert the normalized result rather than trusting the model
+    declaration.
+    """
+
+    from app.models.slides import SlideOutline
+    from app.services.agentic.runner import _strict_output_schema
+
+    schema = _strict_output_schema(SlideOutline)
+
+    assert schema["additionalProperties"] is False
+    assert sorted(schema["required"]) == sorted(schema["properties"])
+
+    node = schema["$defs"]["OutlineNode"]
+    assert node["additionalProperties"] is False
+    assert sorted(node["required"]) == sorted(node["properties"])
+    # The field whose default caused the original failure.
+    assert "evidence_refs" in node["required"]
