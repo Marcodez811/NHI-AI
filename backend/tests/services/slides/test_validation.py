@@ -416,7 +416,7 @@ def test_citation_source_name_rejects_unknown_and_prefix_names(tmp_path: Path) -
             1: ["Cover title"],
             2: [
                 "Slide 2",
-                "資料來源：年度報告.pdf.bak，PDF 第 3 頁",
+                "[1] 資料來源：年度報告.pdf.bak，PDF 第 3 頁",
                 "[2] 資料來源：內部摘要.pdf，PDF 第 8 頁",
             ],
         },
@@ -473,7 +473,7 @@ def test_citation_does_not_treat_a_filename_inside_its_display_name_as_leakage(
     _write_deck(
         tmp_path,
         paragraphs_by_slide={
-            1: ["Cover title", "資料來源：Annual report.pdf"],
+            1: ["Cover title", "[1] 資料來源：Annual report.pdf"],
             2: ["參考資料", "[1] Annual report.pdf"],
         },
     )
@@ -496,8 +496,8 @@ def test_references_slide_matches_unique_numbered_content_sources(tmp_path: Path
             1: ["Cover title"],
             2: [
                 "Policy result",
-                "資料來源：年度報告.pdf，PDF 第 12 頁",
-                "資料來源：政策說明.docx，〈給付範圍〉",
+                "[1] 資料來源：年度報告.pdf，PDF 第 12 頁",
+                "[2] 資料來源：政策說明.docx，〈給付範圍〉",
             ],
             3: [
                 "參考資料",
@@ -525,7 +525,7 @@ def test_references_slide_requires_exact_last_title(tmp_path: Path) -> None:
     _write_deck(
         tmp_path,
         paragraphs_by_slide={
-            1: ["Cover title", "資料來源：年度報告.pdf"],
+            1: ["Cover title", "[1] 資料來源：年度報告.pdf"],
             2: ["參考文獻", "[1] 年度報告.pdf"],
         },
     )
@@ -547,8 +547,8 @@ def test_references_slide_rejects_duplicate_numbers_sources_and_mismatch(tmp_pat
             1: ["Cover title"],
             2: [
                 "Policy result",
-                "資料來源：年度報告.pdf，PDF 第 12 頁",
-                "資料來源：政策說明.docx，〈給付範圍〉",
+                "[1] 資料來源：年度報告.pdf，PDF 第 12 頁",
+                "[2] 資料來源：政策說明.docx，〈給付範圍〉",
             ],
             3: [
                 "參考資料",
@@ -579,6 +579,96 @@ def test_references_slide_rejects_duplicate_numbers_sources_and_mismatch(tmp_pat
         "missing_sources": ["政策說明.docx"],
         "unused_sources": [],
     }
+
+
+def test_content_footers_reuse_reference_number_for_a_repeated_source(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        slide_count=4,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: ["Finding A", "[1] 資料來源：年度報告.pdf，PDF 第 12 頁"],
+            3: ["Finding B", "[1] 資料來源：年度報告.pdf，〈財務〉"],
+            4: ["參考資料", "[1] 年度報告.pdf，〈財務〉，PDF 第 12 頁"],
+        },
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=4,
+        renderer=_renderer(
+            ((10, 20, 30), (20, 30, 40), (30, 40, 50), (40, 50, 60))
+        ),
+    )
+
+    assert result.status is ValidationStatus.PASS
+
+
+def test_content_footer_requires_a_numbered_marker(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "資料來源：年度報告.pdf，PDF 第 12 頁"],
+            2: ["參考資料", "[1] 年度報告.pdf，PDF 第 12 頁"],
+        },
+    )
+
+    result = _validate(tmp_path)
+
+    finding = next(
+        finding
+        for finding in result.findings
+        if finding.code == "citation_footer_number_missing"
+    )
+    assert finding.slide_number == 1
+    assert finding.origin == "candidate"
+
+
+def test_content_footer_markers_must_map_one_to_one_with_references(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        slide_count=4,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "Finding A",
+                "[1] 資料來源：年度報告.pdf，PDF 第 12 頁",
+                "[1] 資料來源：政策說明.docx，〈給付範圍〉",
+            ],
+            3: ["Finding B", "[2] 資料來源：年度報告.pdf，〈財務〉"],
+            4: [
+                "參考資料",
+                "[1] 年度報告.pdf，PDF 第 12 頁",
+                "[2] 政策說明.docx，〈給付範圍〉",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf", "policy.docx"],
+        ["年度報告.pdf", "政策說明.docx"],
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=4,
+        renderer=_renderer(
+            ((10, 20, 30), (20, 30, 40), (30, 40, 50), (40, 50, 60))
+        ),
+    )
+
+    finding_codes = {finding.code for finding in result.findings}
+    assert "citation_marker_source_conflict" in finding_codes
+    assert "citation_source_marker_inconsistent" in finding_codes
+    mismatch_findings = [
+        finding
+        for finding in result.findings
+        if finding.code == "citation_footer_reference_mismatch"
+    ]
+    assert [(finding.slide_number, finding.details["marker"]) for finding in mismatch_findings] == [
+        (2, 1),
+        (3, 2),
+    ]
 
 
 @pytest.mark.parametrize("manifest_contents", [None, "not JSON"])

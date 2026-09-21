@@ -181,3 +181,5 @@ async def test_source_manifest_grants_and_prompts_are_exact(tmp_path: Path) -> N
     assert "knowledge-base" in planning_prompt
     assert "work/sources.json" in author_prompt
     assert "collision suffix" in author_prompt
+    assert "[N] 資料來源：<allowlisted display_name>，<locator>" in author_prompt
+    assert "numbers that agree with the content footers" in author_prompt

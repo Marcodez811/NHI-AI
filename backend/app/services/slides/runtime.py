@@ -106,11 +106,14 @@ or a parsed document title disagrees. Keep available section, PDF-page, or text-
 detail from the evidence block, but never show a staged filename or collision suffix.
 `EvidenceStore`, evidence IDs, hashes, JSON filenames, and extraction-process language are
 internal workflow details. Never show them in slide text, citations, or the cover. Cite slides
-that contain factual claims, figures, or charts. End the deck with the required `參考資料`
-slide. List each source cited by the content slides exactly once, numbered `[1]`, `[2]`, and
-so on, using its allowlisted `display_name` from `work/sources.json` followed by every
-available evidence-backed section path and page or line locator. A source cited on several
-slides keeps one reference number. For a retained block without `citation`, use
+that contain factual claims, figures, or charts. Each factual content-slide footer must use
+`[N] 資料來源：<allowlisted display_name>，<locator>`, retaining every available
+evidence-backed section, PDF-page, or text-line locator. Assign one number per source and
+reuse that same number everywhere the source appears. End the deck with the required
+`參考資料` slide. List each source cited by the content slides exactly once, numbered `[1]`,
+`[2]`, and so on with numbers that agree with the content footers, using its allowlisted
+`display_name` from `work/sources.json` followed by every available evidence-backed section
+path and page or line locator. For a retained block without `citation`, use
 `provenance.source` only to select the matching staged filename in `work/sources.json`, then
 use that entry's `display_name` plus any reliable provenance locator; use the allowlisted
 name alone only when no reliable locator exists. The required references slide must be

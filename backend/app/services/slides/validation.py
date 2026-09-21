@@ -1114,7 +1114,7 @@ def _normalize_visible_text(value: str) -> str:
 
 
 _CITATION_FOOTER_RE = re.compile(
-    r"^(?:\[\s*\d+\s*\]\s*)?資料來源\s*[：:]\s*(?P<source>.+)$"
+    r"^(?:\[\s*(?P<number>\d+)\s*\]\s*)?資料來源\s*[：:]\s*(?P<source>.+)$"
 )
 _REFERENCE_ENTRY_RE = re.compile(
     r"^\[\s*(?P<number>\d+)\s*\]\s*(?P<source>.+)$"
@@ -1255,33 +1255,50 @@ def _references_slide_findings(
             )
         ]
 
+    findings: list[ValidationFinding] = []
     content_sources: set[str] = set()
-    for root in package.slide_roots[:-1]:
+    content_citations: list[tuple[int, int | None, str]] = []
+    for slide_number, root in enumerate(package.slide_roots[:-1], start=1):
         for paragraph in (
             _normalize_visible_text(value) for value in _paragraph_texts(root)
         ):
             footer_match = _CITATION_FOOTER_RE.fullmatch(paragraph)
             if footer_match is None:
                 continue
+            marker_text = footer_match.group("number")
+            marker = int(marker_text) if marker_text is not None else None
+            if marker is None:
+                findings.append(
+                    ValidationFinding(
+                        "citation_footer_number_missing",
+                        "content citation footer must start with a numbered source marker",
+                        slide_number=slide_number,
+                        details={"citation": paragraph},
+                        origin="candidate",
+                    )
+                )
             source_name = _citation_source_name(
                 footer_match.group("source"),
                 sources,
             )
             if source_name is not None:
                 content_sources.add(source_name)
+                content_citations.append((slide_number, marker, source_name))
 
     numbers: list[int] = []
     referenced_sources: list[str] = []
+    reference_citations: list[tuple[int, str]] = []
     for paragraph in last_paragraphs:
         entry_match = _REFERENCE_ENTRY_RE.fullmatch(paragraph)
         if entry_match is None:
             continue
-        numbers.append(int(entry_match.group("number")))
+        number = int(entry_match.group("number"))
+        numbers.append(number)
         source_name = _citation_source_name(entry_match.group("source"), sources)
         if source_name is not None:
             referenced_sources.append(source_name)
+            reference_citations.append((number, source_name))
 
-    findings: list[ValidationFinding] = []
     duplicate_numbers = sorted(
         number for number in set(numbers) if numbers.count(number) > 1
     )
@@ -1338,6 +1355,60 @@ def _references_slide_findings(
                 origin="candidate",
             )
         )
+
+    marker_sources: dict[int, set[str]] = {}
+    for _, marker, source_name in content_citations:
+        if marker is not None:
+            marker_sources.setdefault(marker, set()).add(source_name)
+    for marker, source_name in reference_citations:
+        marker_sources.setdefault(marker, set()).add(source_name)
+    for marker, mapped_sources in sorted(marker_sources.items()):
+        if len(mapped_sources) > 1:
+            findings.append(
+                ValidationFinding(
+                    "citation_marker_source_conflict",
+                    "one citation marker maps to multiple sources",
+                    details={"marker": marker, "sources": sorted(mapped_sources)},
+                    origin="candidate",
+                )
+            )
+
+    content_markers_by_source: dict[str, set[int]] = {}
+    for _, marker, source_name in content_citations:
+        if marker is not None:
+            content_markers_by_source.setdefault(source_name, set()).add(marker)
+    for source_name, source_markers in sorted(content_markers_by_source.items()):
+        if len(source_markers) > 1:
+            findings.append(
+                ValidationFinding(
+                    "citation_source_marker_inconsistent",
+                    "a source must reuse one citation marker across content slides",
+                    details={"source": source_name, "markers": sorted(source_markers)},
+                    origin="candidate",
+                )
+            )
+
+    reference_sources_by_marker: dict[int, set[str]] = {}
+    for marker, source_name in reference_citations:
+        reference_sources_by_marker.setdefault(marker, set()).add(source_name)
+    for slide_number, marker, source_name in content_citations:
+        if marker is None:
+            continue
+        reference_sources = reference_sources_by_marker.get(marker, set())
+        if reference_sources != {source_name}:
+            findings.append(
+                ValidationFinding(
+                    "citation_footer_reference_mismatch",
+                    "content citation marker does not resolve to the same source in references",
+                    slide_number=slide_number,
+                    details={
+                        "marker": marker,
+                        "footer_source": source_name,
+                        "reference_sources": sorted(reference_sources),
+                    },
+                    origin="candidate",
+                )
+            )
     return findings
 
 
