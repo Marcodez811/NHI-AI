@@ -543,7 +543,7 @@ export function SlidesView({
                     aria-labelledby="slides-tab-recent"
                     hidden={activeTab !== "recent"}
                 >
-                    <RecentSlideJobs onJobsChange={setRecentJobs} showHeading={false} />
+                    <RecentSlideJobs onJobsChange={setRecentJobs} />
                 </div>
             </div>
         </section>
