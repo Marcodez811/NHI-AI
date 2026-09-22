@@ -144,6 +144,69 @@ async def test_sql_repository_also_refuses_to_reclaim_an_awaiting_outline_job(tm
 
 
 @pytest.mark.asyncio
+async def test_sql_repository_claim_refuses_a_persisted_unexpired_lease_from_another_token(tmp_path):
+    """The crash-recovery comparison must not raise on a naive, SQLite-round-tripped lease.
+
+    ``lease_expires_at`` is stamped UTC-aware, but SQLite drops tzinfo on the round trip
+    through a fresh session; a lease only survives to be read back this way when the worker
+    that held it died mid-job, so this is exactly the recovery path the comparison must
+    handle instead of raising ``TypeError`` on a naive/aware mismatch.
+    """
+
+    engine = _migrated_engine(tmp_path)
+    job_id = uuid4()
+    with Session(engine) as session:
+        session.add(_job(job_id))
+        session.commit()
+
+    with Session(engine) as session:
+        repository = SQLModelSlideJobRepository(session)
+        claimed_job, claimed = await repository.claim(job_id, lease_token="worker-1", lease_seconds=300)
+        assert claimed is True
+        # SQLite drops tzinfo as soon as SQLModel reloads the row -- this is the
+        # naive datetime that previously raised ``TypeError`` when compared
+        # against an aware ``now`` on the next claim attempt.
+        assert claimed_job.lease_expires_at.tzinfo is None
+
+    with Session(engine) as session:
+        repository = SQLModelSlideJobRepository(session)
+        job, claimed = await repository.claim(job_id, lease_token="worker-2", lease_seconds=300)
+
+        assert claimed is False
+        assert job is not None
+        assert job.lease_token == "worker-1"
+
+
+@pytest.mark.asyncio
+async def test_sql_repository_claim_accepts_a_persisted_expired_lease(tmp_path):
+    """A stale lease -- the worker that held it is gone -- must still be reclaimable."""
+
+    engine = _migrated_engine(tmp_path)
+    job_id = uuid4()
+    with Session(engine) as session:
+        session.add(_job(job_id))
+        session.commit()
+
+    with Session(engine) as session:
+        repository = SQLModelSlideJobRepository(session)
+        await repository.claim(job_id, lease_token="worker-1", lease_seconds=300)
+
+    with Session(engine) as session:
+        job = session.get(SlideJob, job_id)
+        job.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        session.add(job)
+        session.commit()
+
+    with Session(engine) as session:
+        repository = SQLModelSlideJobRepository(session)
+        job, claimed = await repository.claim(job_id, lease_token="worker-2", lease_seconds=300)
+
+        assert claimed is True
+        assert job is not None
+        assert job.lease_token == "worker-2"
+
+
+@pytest.mark.asyncio
 async def test_expire_awaiting_input_leaves_a_fresh_pause_untouched():
     """A pause within its TTL is not abandoned; the sweep must not touch it."""
 

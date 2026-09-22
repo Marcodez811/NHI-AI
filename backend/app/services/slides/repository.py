@@ -92,7 +92,7 @@ class InMemorySlideJobRepository:
             # ``resume_from="author"`` -- enqueued once by the approve
             # endpoint -- may reclaim it.
             return job, False
-        if job.lease_expires_at and job.lease_expires_at > now and job.lease_token != lease_token:
+        if job.lease_expires_at and _as_utc(job.lease_expires_at) > now and job.lease_token != lease_token:
             return job, False
         job.lease_token = lease_token
         job.lease_expires_at = now + timedelta(seconds=lease_seconds)
@@ -224,7 +224,12 @@ class SQLModelSlideJobRepository(InMemorySlideJobRepository):
         if job.status == JobStatus.AWAITING_INPUT.value and not allow_resume_from_awaiting_input:
             self.session.rollback()
             return job, False
-        if job.lease_expires_at and job.lease_expires_at > now and job.lease_token != lease_token:
+        # ``_as_utc`` mirrors ``expire_awaiting_input``: SQLite round-trips a datetime
+        # column and drops tzinfo, so a persisted, still-unexpired lease comes back
+        # naive while ``now`` is UTC-aware. This is exactly the crash-recovery path --
+        # a lease only outlives its holder when a worker dies mid-job -- so comparing
+        # them directly would raise ``TypeError`` on the one path meant to recover it.
+        if job.lease_expires_at and _as_utc(job.lease_expires_at) > now and job.lease_token != lease_token:
             self.session.rollback()
             return job, False
         job.lease_token = lease_token
