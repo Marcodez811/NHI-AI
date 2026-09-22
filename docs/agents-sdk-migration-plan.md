@@ -402,6 +402,57 @@ some providers reject strict JSON schema or return malformed JSON, and the
 SDK documents no reliable fallback. Validate Gemini's response and usage
 before relying on cost estimates.
 
+### First live runs (2026-09-22) and the next step
+
+These were the first live runs of `AgentsSdkRunner` for any node. Both failed
+before Gemini was called, so they cost only the extraction.
+
+1. **Job `f18fdd82`: "hidden stage path escapes the workflow workspace".** The
+   slides adapter hides the original source documents on the shared documents
+   volume, outside the job workspace, so that no stage after extraction can
+   reread them. `_build_path_grants` required every hidden path to be inside the
+   workspace. Fixed: in this sandbox nothing is visible unless granted, so a hidden
+   path is invisible by construction and may lie anywhere. The grant check was also
+   strengthened from exact equality to containment in both directions.
+2. **Job `dca3530b`: "Sandbox execution requires `run_config.sandbox.client`".**
+   The runner builds a sandbox policy but never supplies a sandbox backend
+   (`sandbox_client` defaults to `None`). Unit tests used fakes, so this surfaced
+   only live. **Not yet fixed**; see the next step below.
+
+**Security finding before supplying a backend.** The installed SDK offers
+`UnixLocalSandboxClient` (runs in the worker container) and `DockerSandboxClient`
+(needs a Docker daemon the worker does not have). Reading `unix_local.py`:
+
+- it **inherits the worker's full environment by default**
+  (`inherit_host_environment=True`), including `OPENAI_API_KEY`, `GEMINI_API_KEY`
+  and the database URL;
+- **on Linux it does not confine shell commands**: its only isolation mechanism is
+  `sandbox-exec`, which exists only on macOS;
+- the SDK's default capabilities are `Filesystem`, `Shell` and `Compaction`.
+
+So wiring the local backend with defaults would give the planner an unconfined
+shell holding the API keys: a prompt injection in an uploaded document could read
+the keys or the original sources. The Codex runner prevented this with bwrap and
+by stripping credentials from the environment.
+
+**Decided next step for the planner:**
+- make `Filesystem` the only default capability, so `Shell` must be requested
+  explicitly by a node that has a confining backend;
+- supply `UnixLocalSandboxClient(inherit_host_environment=False)`;
+- add a real-sandbox test (no model call) proving the file tools refuse an
+  ungranted path such as an original source document.
+
+The planner needs only to read `work/evidence.json`, so this keeps the
+frozen-evidence design and closes both holes. Then rerun the planner-only trial.
+The next possible failure after that is still Gemini rejecting the `SlideOutline`
+schema.
+
+**Consequence for Stage 3 (the author).** The author needs a shell (python-pptx,
+chart rendering, LibreOffice). The local backend cannot confine one on Linux, so
+**the author must not run on `UnixLocalSandboxClient`**. Moving it to the SDK
+requires the Docker backend, with a Docker daemon available to the worker, or an
+equivalent confinement such as bwrap.
+
 ## Risks
 
 1. **Author-node parity is the long pole.** Mitigated by the runner seam: if the SDK
