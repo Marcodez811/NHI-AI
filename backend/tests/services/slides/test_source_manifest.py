@@ -187,6 +187,12 @@ async def test_source_manifest_grants_and_prompts_are_exact(tmp_path: Path) -> N
     assert "units on the relevant\naxis label" in author_prompt
     assert "Put exactly one entry in each paragraph" in author_prompt
     assert "[N] <allowlisted display_name>，<evidence-backed detail>" in author_prompt
+    references_entry_single_paragraph_rule = (
+        "However long an entry's locator detail runs, keep\n"
+        "that whole entry as a single paragraph that wraps within itself; never split one entry across\n"
+        "multiple paragraphs or continuation lines, and never start a paragraph without its own `[N]`."
+    )
+    assert references_entry_single_paragraph_rule in author_prompt
     references_slide_only_entries_rule = (
         "The references slide contains only its\n"
         "`參考資料` title and these numbered entries: add no captions, notes, summaries, or\n"
@@ -207,4 +213,20 @@ def test_pptx_nhi_tw_skill_matches_references_slide_only_entries_rule() -> None:
     assert (
         "The references slide contains only its `參考資料` title and these numbered "
         "entries: add no captions, notes, summaries, or explanatory sentences."
+    ) in skill_text
+
+
+def test_pptx_nhi_tw_skill_matches_references_entry_single_paragraph_rule() -> None:
+    """The skill's step-3 instructions must repeat the runtime prompt's one-paragraph-per-entry
+    rule verbatim, so a long entry with many locators is never split into continuation
+    paragraphs regardless of which text the author reads.
+    """
+    skill_path = (
+        Path(__file__).resolve().parents[3] / ".agents" / "skills" / "pptx-nhi-tw" / "SKILL.md"
+    )
+    skill_text = skill_path.read_text(encoding="utf-8")
+    assert (
+        "However long an entry's locator detail runs, keep that whole entry as a single "
+        "paragraph that wraps within itself; never split one entry across multiple "
+        "paragraphs or continuation lines, and never start a paragraph without its own `[N]`."
     ) in skill_text
