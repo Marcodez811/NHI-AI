@@ -306,3 +306,44 @@ def test_planner_output_schema_satisfies_structured_outputs_strict_mode():
     assert sorted(node["required"]) == sorted(node["properties"])
     # The field whose default caused the original failure.
     assert "evidence_refs" in node["required"]
+
+
+def _outline_with_sections(count: int) -> SlideOutline:
+    return SlideOutline(
+        title="Q3 policy briefing",
+        narrative="A grounded walkthrough of the quarter's policy shifts.",
+        nodes=[
+            OutlineNode(
+                id=f"section-{index}",
+                heading=f"Section {index}",
+                intent="Cover one part of the quarter.",
+                key_points=["Context", "Stakes"],
+                evidence_refs=[],
+                emphasis="normal",
+                approx_slides=1,
+            )
+            for index in range(count)
+        ],
+        total_slides=count,
+    )
+
+
+def test_outline_section_cap_is_enforced_in_validation_not_the_wire_schema():
+    """Gemini rejects the request when ``maxItems`` sits on ``nodes``.
+
+    Measured live (2026-09-22): the same schema without that one constraint is
+    accepted and yields a valid outline. The cap must still hold, so it moves from
+    the JSON schema into a validator: the model is not told the limit, but a reply
+    over it is still rejected when parsed.
+    """
+
+    from agents import AgentOutputSchema
+
+    from app.models.slides import MAX_OUTLINE_NODES
+
+    wire_schema = AgentOutputSchema(SlideOutline).json_schema()
+    assert "maxItems" not in wire_schema["properties"]["nodes"]
+
+    assert len(_outline_with_sections(MAX_OUTLINE_NODES).nodes) == MAX_OUTLINE_NODES
+    with pytest.raises(ValueError, match="at most"):
+        _outline_with_sections(MAX_OUTLINE_NODES + 1)

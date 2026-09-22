@@ -17,6 +17,7 @@ from app.services.agentic.contracts import AgentPhase
 DEFAULT_MAX_DOCUMENTS = 20
 HARD_UPLOAD_CEILING = 25
 DEFAULT_TIMEOUT_MINUTES = 45
+MAX_OUTLINE_NODES = 30
 # The worker, artifact preflight, and API boundary must agree on which
 # document sources can be turned into a presentation. Keep this contract in
 # the slides model so it crosses the HTTP and generic-agent task boundaries
@@ -148,8 +149,20 @@ class SlideOutline(BaseModel):
 
     title: str = Field(min_length=1, max_length=300)
     narrative: str = Field(min_length=1, max_length=600)
-    nodes: list[OutlineNode] = Field(min_length=1, max_length=30)
+    # The section cap is enforced in ``node_count_within_limit`` rather than as
+    # ``max_length`` here. A field constraint becomes ``maxItems`` in the JSON schema
+    # sent to the model, and Gemini rejects the whole request (400 INVALID_ARGUMENT)
+    # when ``maxItems`` sits on this array of objects -- measured 2026-09-22, where
+    # the same limit on the string arrays inside OutlineNode is accepted. A validator
+    # keeps the rule without putting it on the wire.
+    nodes: list[OutlineNode] = Field(min_length=1)
     total_slides: int = Field(gt=0, le=100)
+
+    @model_validator(mode="after")
+    def node_count_within_limit(self) -> "SlideOutline":
+        if len(self.nodes) > MAX_OUTLINE_NODES:
+            raise ValueError(f"an outline may have at most {MAX_OUTLINE_NODES} sections")
+        return self
 
     @model_validator(mode="after")
     def node_ids_unique(self) -> "SlideOutline":
