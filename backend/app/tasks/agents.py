@@ -85,6 +85,11 @@ def _build_runner_registry() -> tuple[RunnerRegistry, float | None]:
         reasoning_effort=settings.agent_default_reasoning_effort,
         timeout_seconds=timeout_seconds,
         heartbeat_seconds=settings.agent_heartbeat_seconds,
+        litellm_api_keys={
+            "gemini": settings.gemini_api_key,
+            "anthropic": settings.anthropic_api_key,
+            "openai": settings.openai_api_key,
+        },
     )
     return RunnerRegistry({"codex": codex_runner, "agents": agents_sdk_runner}), codex_runner.timeout_seconds
 

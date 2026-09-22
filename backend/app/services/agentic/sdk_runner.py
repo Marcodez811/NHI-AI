@@ -52,11 +52,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from openai.types.shared import Reasoning
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from agents import (
     AgentsException,
@@ -65,6 +66,8 @@ from agents import (
     MaxTurnsExceeded,
     ModelBehaviorError,
     ModelSettings,
+    ModelProvider,
+    MultiProvider,
     OutputGuardrailTripwireTriggered,
     RunConfig,
     RunResultStreaming,
@@ -80,6 +83,8 @@ from agents.sandbox import (
     SandboxRunConfig,
     SandboxWorkspaceScope,
 )
+from agents.extensions.models.litellm_model import LitellmModel
+from agents.models.multi_provider import MultiProviderMap
 from agents.sandbox.capabilities import Filesystem, Shell, Skills
 from agents.sandbox.entries import LocalDir
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, RunItemStreamEvent
@@ -179,6 +184,38 @@ def _reasoning_model_settings(effort: AgentReasoningEffort | None) -> ModelSetti
     if effort is None:
         return ModelSettings()
     return ModelSettings(reasoning=Reasoning(effort=effort.value))
+
+
+class _KeyedLitellmProvider(ModelProvider):
+    """Pass a server-owned key to LiteLLM without relying on process environment."""
+
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+
+    def get_model(self, model_name: str | None) -> LitellmModel:
+        if not model_name:
+            raise WorkflowExecutionError("LiteLLM model name is missing")
+        return LitellmModel(model_name, api_key=self.api_key)
+
+
+def _litellm_run_config(model: str | None, api_keys: Mapping[str, SecretStr | None]) -> RunConfig | None:
+    """Use the SDK's prefix routing while supplying a key to its LiteLLM adapter."""
+
+    if model is None or not model.startswith("litellm/"):
+        return None
+    provider_name = model.removeprefix("litellm/").partition("/")[0]
+    if not provider_name or provider_name not in api_keys:
+        raise WorkflowExecutionError("No configured API key for this LiteLLM provider")
+    secret = api_keys[provider_name]
+    if secret is None or not secret.get_secret_value():
+        raise WorkflowExecutionError(f"No configured API key for LiteLLM provider '{provider_name}'")
+    provider_map = MultiProviderMap()
+    provider_map.add_provider("litellm", _KeyedLitellmProvider(secret.get_secret_value()))
+    return RunConfig(
+        model_provider=MultiProvider(provider_map=provider_map),
+        model_settings=ModelSettings(include_usage=True),
+        tracing_disabled=True,
+    )
 
 
 def _build_agent(
@@ -305,6 +342,7 @@ class AgentsSdkRunner:
         heartbeat_seconds: float = 10.0,
         runner_factory: Any = Runner,
         sandbox_client: Any = None,
+        litellm_api_keys: Mapping[str, SecretStr | None] | None = None,
     ) -> None:
         self.model = model
         self.reasoning_effort = reasoning_effort
@@ -312,6 +350,7 @@ class AgentsSdkRunner:
         self.heartbeat_seconds = heartbeat_seconds
         self.runner_factory = runner_factory
         self.sandbox_client = sandbox_client
+        self.litellm_api_keys = litellm_api_keys or {}
 
     async def run(
         self,
@@ -367,7 +406,8 @@ class AgentsSdkRunner:
                 default_reasoning_effort=self.reasoning_effort,
                 manifest=manifest,
             )
-            run_config = RunConfig(sandbox=SandboxRunConfig(client=self.sandbox_client, manifest=manifest))
+            run_config = _litellm_run_config(effective_model, self.litellm_api_keys) or RunConfig()
+            run_config.sandbox = SandboxRunConfig(client=self.sandbox_client, manifest=manifest)
             await reporter.emit(turn_phase.value, f"Agent {request.node_id} step is running.", phase=turn_phase)
             streamed = self.runner_factory.run_streamed(agent, request.prompt, run_config=run_config)
             try:

@@ -1,3 +1,7 @@
+"""Server-owned configuration for provider and workflow policy."""
+
+from __future__ import annotations
+
 from pathlib import Path
 
 from pydantic import AliasChoices, SecretStr, Field, model_validator
@@ -6,8 +10,12 @@ from app.services.agentic.contracts import AgentReasoningEffort
 
 
 class Settings(BaseSettings):
+    """Keep optional provider credentials separate from model selection."""
+
     redis_url: str
     openai_api_key: SecretStr
+    gemini_api_key: SecretStr | None = None
+    anthropic_api_key: SecretStr | None = None
     # Agent model policy is separate from the chat/vector-store settings. The
     # old OPENAI_MODEL variable remains an input alias for the generic default
     # during migration.

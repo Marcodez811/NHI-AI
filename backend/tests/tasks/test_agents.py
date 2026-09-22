@@ -44,6 +44,20 @@ def test_worker_builds_allowlisted_codex_runner_with_default_model(monkeypatch):
     assert timeout == runner.timeout_seconds
 
 
+def test_worker_passes_optional_provider_keys_to_agents_sdk_runner(monkeypatch):
+    from app.config import settings
+    from app.tasks.agents import _build_runner_registry
+
+    monkeypatch.setattr(settings, "gemini_api_key", SecretStr("gemini-key"))
+    monkeypatch.setattr(settings, "anthropic_api_key", SecretStr("anthropic-key"))
+
+    registry, _ = _build_runner_registry()
+
+    runner = registry.resolve("agents")
+    assert runner.litellm_api_keys["gemini"].get_secret_value() == "gemini-key"
+    assert runner.litellm_api_keys["anthropic"].get_secret_value() == "anthropic-key"
+
+
 @pytest.mark.asyncio
 async def test_node_progress_enrichment_keeps_heartbeats_attributed_to_the_active_attempt():
     from app.services.agentic.service import _node_progress_callback
