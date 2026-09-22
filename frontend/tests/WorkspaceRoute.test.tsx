@@ -47,6 +47,15 @@ afterEach(() => {
     vi.clearAllMocks();
 });
 
+it("resolves the slides index to the slides view when a tab query string is present", () => {
+    // usePathname() never carries the query string, so ?tab=recent must not perturb the route-to-view mapping.
+    window.history.replaceState({}, "", "/slides?tab=recent");
+    routePath.current = "/slides";
+    render(<WorkspaceRoute />);
+    expect(renderedView).toHaveBeenLastCalledWith("slides");
+    expect(renderedContent.mock.lastCall?.[0].slideJobId).toBeNull();
+});
+
 it("resolves a job URL to the slides view without accepting unrelated nested routes", () => {
     expect(resolveWorkspaceView("/slides/job-123")).toBe("slides");
     expect(resolveWorkspaceView("/slides/job-123/")).toBe("slides");

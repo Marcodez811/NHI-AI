@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
     FilePlus2,
     FileText,
@@ -18,6 +19,7 @@ import type {
     AgentJobPhase,
     DocumentRead,
     SlideJob,
+    SlideJobSummary,
 } from "../../lib/api/slides";
 import {
     MAX_DOCUMENTS,
@@ -97,6 +99,30 @@ export function SlidesView({
     } = analyzeSlideReadiness({ docs, selected, title, phase, jobStatus: job?.status });
     const [sourcePickerOpen, setSourcePickerOpen] = useState(false);
     const [sourceQuery, setSourceQuery] = useState("");
+    const router = useRouter();
+    const pathname = usePathname();
+    const searchParams = useSearchParams();
+    // Unknown or missing ?tab means the new-presentation form, per the "no state-dependent default" rule.
+    const activeTab: "new" | "recent" = searchParams.get("tab") === "recent" ? "recent" : "new";
+    const [recentJobs, setRecentJobs] = useState<SlideJobSummary[] | null>(null);
+    const awaitingReviewCount = useMemo(
+        () =>
+            (recentJobs ?? []).filter(
+                (recentJob) => recentJob.status === "awaiting_input" && recentJob.phase === "awaiting_outline",
+            ).length,
+        [recentJobs],
+    );
+    const selectTab = useCallback(
+        (next: "new" | "recent") => {
+            const params = new URLSearchParams(searchParams.toString());
+            if (next === "recent") params.set("tab", "recent");
+            else params.delete("tab");
+            const query = params.toString();
+            // A pushed entry (not replace) is what lets the back button step between tabs.
+            router.push(query ? `${pathname}?${query}` : pathname);
+        },
+        [pathname, router, searchParams],
+    );
     const sourceOptions = availableSources.filter((doc) => {
         const query = sourceQuery.trim().toLowerCase();
         return (
@@ -139,7 +165,51 @@ export function SlidesView({
                     </p>
                 </div>
 
-                <div className="space-y-0">
+                <div role="tablist" aria-label="簡報作業" className="mb-7 flex gap-6 border-b border-border">
+                    <button
+                        type="button"
+                        role="tab"
+                        id="slides-tab-new"
+                        aria-selected={activeTab === "new"}
+                        aria-controls="slides-panel-new"
+                        tabIndex={activeTab === "new" ? 0 : -1}
+                        onClick={() => selectTab("new")}
+                        className={`-mb-px border-b-2 px-1 pb-3 text-sm font-medium transition-colors ${
+                            activeTab === "new"
+                                ? "border-primary text-foreground"
+                                : "border-transparent text-muted-foreground hover:text-foreground"
+                        }`}
+                    >
+                        新簡報
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        id="slides-tab-recent"
+                        aria-selected={activeTab === "recent"}
+                        aria-controls="slides-panel-recent"
+                        tabIndex={activeTab === "recent" ? 0 : -1}
+                        onClick={() => selectTab("recent")}
+                        className={`-mb-px border-b-2 px-1 pb-3 text-sm font-medium transition-colors ${
+                            activeTab === "recent"
+                                ? "border-primary text-foreground"
+                                : "border-transparent text-muted-foreground hover:text-foreground"
+                        }`}
+                    >
+                        最近工作
+                        {awaitingReviewCount > 0 && (
+                            <span className="text-amber-700 dark:text-amber-300"> · {awaitingReviewCount} 待審核</span>
+                        )}
+                    </button>
+                </div>
+
+                <div
+                    id="slides-panel-new"
+                    role="tabpanel"
+                    aria-labelledby="slides-tab-new"
+                    hidden={activeTab !== "new"}
+                    className="space-y-0"
+                >
                     <div className="h-fit border-b border-border pb-7">
                         <div className="flex items-start justify-between gap-4">
                             <div>
@@ -456,7 +526,15 @@ export function SlidesView({
                         />
                     </div>
                 </div>
-                <RecentSlideJobs />
+
+                <div
+                    id="slides-panel-recent"
+                    role="tabpanel"
+                    aria-labelledby="slides-tab-recent"
+                    hidden={activeTab !== "recent"}
+                >
+                    <RecentSlideJobs onJobsChange={setRecentJobs} />
+                </div>
             </div>
         </section>
     );

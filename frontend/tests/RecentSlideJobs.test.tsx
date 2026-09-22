@@ -52,6 +52,18 @@ describe("RecentSlideJobs", () => {
         expect(await screen.findByText(/尚無簡報工作/)).toBeInTheDocument();
     });
 
+    it("reports loaded jobs to a caller instead of fetching twice", async () => {
+        const jobs = [summary(), summary({ job_id: "job-2", title: "健康政策", status: "completed", phase: "completed" })];
+        vi.mocked(listSlideJobs).mockResolvedValue(jobs);
+        const onJobsChange = vi.fn();
+
+        render(<RecentSlideJobs onJobsChange={onJobsChange} />);
+
+        expect(await screen.findByText("年度政策簡報")).toBeInTheDocument();
+        expect(onJobsChange).toHaveBeenCalledWith(jobs);
+        expect(listSlideJobs).toHaveBeenCalledOnce();
+    });
+
     it("lets the user retry a failed list request", async () => {
         vi.mocked(listSlideJobs)
             .mockRejectedValueOnce(new Error("服務暫時無法使用"))

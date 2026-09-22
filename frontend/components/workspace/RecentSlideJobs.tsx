@@ -58,7 +58,12 @@ function jobState(job: SlideJobSummary) {
 }
 
 /** The index reads fresh server state; a browser tab is not a job registry. */
-export function RecentSlideJobs() {
+export function RecentSlideJobs({
+    onJobsChange,
+}: {
+    /** Lets the index tab badge reuse this fetch instead of loading the list twice. */
+    onJobsChange?: (jobs: SlideJobSummary[] | null) => void;
+} = {}) {
     const [jobs, setJobs] = useState<SlideJobSummary[] | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [reload, setReload] = useState(0);
@@ -75,6 +80,10 @@ export function RecentSlideJobs() {
             });
         return () => controller.abort();
     }, [reload]);
+
+    useEffect(() => {
+        onJobsChange?.(jobs);
+    }, [jobs, onJobsChange]);
 
     return (
         <section aria-labelledby="recent-slide-jobs-title" className="mt-12 border-t border-border pt-8">

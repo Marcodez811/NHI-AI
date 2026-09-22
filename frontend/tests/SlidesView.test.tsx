@@ -1,9 +1,37 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentRead } from "../lib/api";
+import type { SlideJobSummary } from "../lib/api/slides";
+import { listSlideJobs } from "../lib/api/slides";
 import { SlidesView } from "../components/workspace/SlidesView";
+
+const navigation = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }));
+const routeSearch = vi.hoisted(() => ({ current: "" }));
+
+vi.mock("next/navigation", () => ({
+    usePathname: () => "/slides",
+    useRouter: () => navigation,
+    useSearchParams: () => new URLSearchParams(routeSearch.current),
+}));
+
+// RecentSlideJobs is always mounted (its fetch feeds the tab badge), so its data source needs a double here too.
+vi.mock("../lib/api/slides", async (importOriginal) => ({
+    ...await importOriginal<typeof import("../lib/api/slides")>(),
+    listSlideJobs: vi.fn(),
+}));
+
+const jobSummary = (overrides: Partial<SlideJobSummary> = {}): SlideJobSummary => ({
+    job_id: "job-1",
+    title: "年度政策簡報",
+    status: "awaiting_input",
+    phase: "awaiting_outline",
+    created_at: "2026-09-21T08:00:00Z",
+    started_at: "2026-09-21T08:01:00Z",
+    finished_at: null,
+    ...overrides,
+});
 
 const document = (overrides: Partial<DocumentRead> = {}): DocumentRead => ({
     id: "doc-1",
@@ -59,6 +87,10 @@ function renderView({ docs = [], selected = [] }: { docs?: DocumentRead[]; selec
 }
 
 describe("SlidesView", () => {
+    beforeEach(() => {
+        routeSearch.current = "";
+        vi.mocked(listSlideJobs).mockResolvedValue([]);
+    });
     afterEach(() => cleanup());
 
     it("guides users through the empty source state", async () => {
@@ -229,5 +261,49 @@ describe("SlidesView", () => {
         expect(screen.getByText("1 份選取文件正在索引，完成後才能生成。"))
             .toBeInTheDocument();
         expect(screen.getByRole("button", { name: "生成簡報" })).toBeDisabled();
+    });
+
+    it("defaults to the new-presentation tab with no URL query", () => {
+        renderView({ docs: [document()], selected: ["doc-1"] });
+
+        expect(screen.getByRole("tab", { name: "新簡報" })).toHaveAttribute("aria-selected", "true");
+        expect(screen.getByRole("tab", { name: "最近工作" })).toHaveAttribute("aria-selected", "false");
+        expect(screen.getByRole("tabpanel", { name: "新簡報" })).toBeVisible();
+    });
+
+    it("opens the recent-jobs tab when the URL already asks for it", async () => {
+        routeSearch.current = "tab=recent";
+        renderView({ docs: [document()], selected: ["doc-1"] });
+
+        expect(screen.getByRole("tab", { name: "最近工作" })).toHaveAttribute("aria-selected", "true");
+        expect(await screen.findByText(/尚無簡報工作/)).toBeInTheDocument();
+    });
+
+    it("pushes the tab into the URL when the user switches tabs", async () => {
+        const user = userEvent.setup();
+        renderView({ docs: [document()], selected: ["doc-1"] });
+
+        await user.click(screen.getByRole("tab", { name: "最近工作" }));
+        expect(navigation.push).toHaveBeenCalledWith("/slides?tab=recent");
+    });
+
+    it("badges the recent tab with the count of jobs awaiting outline review", async () => {
+        vi.mocked(listSlideJobs).mockResolvedValue([
+            jobSummary(),
+            jobSummary({ job_id: "job-2", status: "completed", phase: "completed" }),
+        ]);
+        renderView({ docs: [document()], selected: ["doc-1"] });
+
+        expect(await screen.findByRole("tab", { name: "最近工作 · 1 待審核" })).toBeInTheDocument();
+    });
+
+    it("shows no badge when nothing is awaiting outline review", async () => {
+        vi.mocked(listSlideJobs).mockResolvedValue([
+            jobSummary({ status: "completed", phase: "completed" }),
+        ]);
+        renderView({ docs: [document()], selected: ["doc-1"] });
+
+        const recentTab = await screen.findByRole("tab", { name: "最近工作" });
+        expect(recentTab.textContent).toBe("最近工作");
     });
 });
