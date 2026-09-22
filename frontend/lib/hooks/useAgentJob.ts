@@ -255,8 +255,11 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
 
     pollForRef.current = pollFor;
 
-    // Route-owned jobs fetch immediately; persistent workflows may still resume
-    // from storage when no route id was supplied.
+    // A route-owned job id always wins over storage; storage never selects
+    // which job is shown, only which one it resumes. When the caller scopes
+    // storageKey to that specific job id (rather than a single shared "active
+    // job" slot), restoring its phase history here is safe: it can only ever
+    // rehydrate the one job the URL already asked for.
     useEffect(() => {
         const jobId = initialJobId ?? (storageKey ? readActiveJobId(storageKey) : null);
         if (!jobId) return;
@@ -268,7 +271,7 @@ export function useAgentJob<Payload, Job extends AgentJobRecord, Created extends
         setError(null);
         setWarning(null);
         setConsecutivePollFailures(0);
-        setPhaseHistory(storageKey && !initialJobId ? readPhaseHistory(storageKey) : []);
+        setPhaseHistory(storageKey ? readPhaseHistory(storageKey) : []);
         setPhase("polling");
         void pollForRef.current(jobId, generation.current);
     }, [cancelPending, initialJobId, storageKey]);

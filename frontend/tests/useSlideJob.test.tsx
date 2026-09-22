@@ -144,6 +144,33 @@ describe("useSlideJob", () => {
         expect(window.sessionStorage.getItem("nhi-ai:active-slide-job-id")).toBe("job-stale");
     });
 
+    it("persists phase history per job id so a revision count survives a refresh", async () => {
+        vi.mocked(api.getSlideJob).mockResolvedValueOnce(
+            job({ job_id: "job-route", phase: "revising", stage: "revising" }),
+        );
+        const first = renderHook(() =>
+            useSlideJob({ jobId: "job-route", pollIntervalMs: 250, maxPollIntervalMs: 500 }),
+        );
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(first.result.current.phaseHistory).toContain("revising");
+        first.unmount();
+
+        // A fresh hook instance for the same URL-owned job id, as a refresh
+        // would create, must recover that history before its own first poll
+        // resolves — not a separate "active job" slot, only this job's own.
+        vi.mocked(api.getSlideJob).mockImplementationOnce(() => new Promise(() => {}));
+        const second = renderHook(() =>
+            useSlideJob({ jobId: "job-route", pollIntervalMs: 250, maxPollIntervalMs: 500 }),
+        );
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(second.result.current.phaseHistory).toContain("revising");
+    });
+
     it("does not persist a newly created slide job as a competing job selector", async () => {
         const { result } = renderHook(() => useSlideJob());
 

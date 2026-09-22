@@ -31,7 +31,12 @@ export function useSlideJob(options: UseSlideJobOptions = {}): UseSlideJobResult
         getJob: getSlideJob,
         pollIntervalMs: options.pollIntervalMs,
         maxPollIntervalMs: options.maxPollIntervalMs,
-        storageKey: null,
+        // Scoped to this one job id, never a shared "active job" slot: the URL
+        // still decides which job is shown, this only lets that job's own
+        // phase history (and so its revision count) survive a refresh. No id
+        // (the create form) means nothing to key by, so persistence is
+        // skipped there.
+        storageKey: options.jobId ? `nhi-ai:slides-job:${options.jobId}` : null,
         initialJobId: options.jobId,
     });
 }
