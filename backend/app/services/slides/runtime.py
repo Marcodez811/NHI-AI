@@ -117,7 +117,9 @@ by repeating the `資料來源` marker or by stacking `[N]` numbers before a sin
 `display_name` from `work/sources.json` followed by every available evidence-backed section
 path and page or line locator. Put exactly one entry in each paragraph, in the form
 `[N] <allowlisted display_name>，<evidence-backed detail>`; omit the comma and detail only
-when no reliable locator or section exists. For a retained block without `citation`, use
+when no reliable locator or section exists. The references slide contains only its
+`參考資料` title and these numbered entries: add no captions, notes, summaries, or
+explanatory sentences. For a retained block without `citation`, use
 `provenance.source` only to select the matching staged filename in `work/sources.json`, then
 use that entry's `display_name` plus any reliable provenance locator; use the allowlisted
 name alone only when no reliable locator exists. The required references slide must be

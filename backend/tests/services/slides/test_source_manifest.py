@@ -187,3 +187,24 @@ async def test_source_manifest_grants_and_prompts_are_exact(tmp_path: Path) -> N
     assert "units on the relevant\naxis label" in author_prompt
     assert "Put exactly one entry in each paragraph" in author_prompt
     assert "[N] <allowlisted display_name>，<evidence-backed detail>" in author_prompt
+    references_slide_only_entries_rule = (
+        "The references slide contains only its\n"
+        "`參考資料` title and these numbered entries: add no captions, notes, summaries, or\n"
+        "explanatory sentences."
+    )
+    assert references_slide_only_entries_rule in author_prompt
+
+
+def test_pptx_nhi_tw_skill_matches_references_slide_only_entries_rule() -> None:
+    """The skill's step-3 instructions must repeat the runtime prompt's rule (allowing for the
+    step's own line wrapping), so the author gets the same no-extra-text constraint regardless
+    of which text it reads.
+    """
+    skill_path = (
+        Path(__file__).resolve().parents[3] / ".agents" / "skills" / "pptx-nhi-tw" / "SKILL.md"
+    )
+    skill_text = skill_path.read_text(encoding="utf-8")
+    assert (
+        "The references slide contains only its `參考資料` title and these numbered "
+        "entries: add no captions, notes, summaries, or explanatory sentences."
+    ) in skill_text

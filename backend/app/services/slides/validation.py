@@ -1485,7 +1485,9 @@ def _references_slide_findings(
             findings.append(
                 ValidationFinding(
                     "references_entry_invalid",
-                    "each non-title references paragraph must be one numbered source entry",
+                    "each references-slide paragraph must be one numbered entry "
+                    "`[N] <display_name>，<detail>`; any other text, such as a caption or "
+                    "note, must be removed",
                     slide_number=last_slide_number,
                     details={"paragraph": paragraph},
                     origin="candidate",

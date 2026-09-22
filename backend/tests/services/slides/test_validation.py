@@ -783,6 +783,31 @@ def test_references_slide_rejects_each_unnumbered_or_malformed_paragraph(
     ]
 
 
+def test_references_slide_rejects_closing_caption_sentence(tmp_path: Path) -> None:
+    """Reproduces a live defect: the author appended a closing summary sentence after the
+    numbered entries. The references slide must contain only the title and entries, so the
+    sentence is still a blocking `references_entry_invalid` finding, and its message must
+    tell the author to remove it rather than to number it.
+    """
+    caption = "本簡報各項事實、數字與圖表均依上述來源及題號定位。"
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "[1] 資料來源：年度報告.pdf"],
+            2: ["參考資料", "[1] 年度報告.pdf", caption],
+        },
+    )
+
+    result = _validate(tmp_path)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "references_entry_invalid"
+    )
+    assert finding.details["paragraph"] == caption
+    assert "must be removed" in finding.message
+    assert "caption" in finding.message
+
+
 def test_references_slide_ignores_template_chrome_but_still_flags_malformed_entries(
     tmp_path: Path,
 ) -> None:
