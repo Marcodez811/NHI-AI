@@ -16,6 +16,7 @@ outline is ever persisted or shown to a human.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -27,7 +28,7 @@ from app.services.agentic.contracts import AgentExecutionRequest, AgentRunner
 from app.services.agentic.runner import CodexAgentRunner, CodexRunner, WorkflowExecutionError, safe_error
 from app.services.agentic.sdk_runner import AgentsSdkRunner
 from app.services.slides.adapter import slides_adapter
-from app.services.slides.evidence import EvidenceError, validate_outline_evidence_references
+from app.services.slides.evidence import EvidenceError, build_planner_evidence_block, validate_outline_evidence_references
 from app.services.slides.outline_repository import SlideOutlineRepository, SlideOutlineRevision
 
 
@@ -35,16 +36,35 @@ def _sse(event_type: str, payload: dict[str, object]) -> str:
     return f"data: {json.dumps({'type': event_type, **payload}, ensure_ascii=False)}\n\n"
 
 
-def _conversation_prompt(latest: SlideOutlineRevision, message: str) -> str:
+def _conversation_prompt(latest: SlideOutlineRevision, message: str, *, runner_name: str) -> str:
+    """Return the human-turn instructions, worded for how evidence reaches the model.
+
+    Mirrors ``SlidesWorkflowAdapter.build_planning_prompt``'s ``runner_name`` split
+    (app/services/slides/adapter.py): the "codex" text is unchanged and still describes
+    a mounted, read-only ``work/evidence.json``; the "agents" text instead points at the
+    inlined ``<evidence>`` block this turn's request carries, since that stage has no
+    file or shell access at all.
+    """
+
+    if runner_name == "agents":
+        evidence_access = (
+            "The frozen evidence is provided in the `<evidence>` block of this message, not "
+            "through a workspace file -- this stage has no file or shell access. Return one "
+            "revised, complete outline that addresses the human's message."
+        )
+    else:
+        evidence_access = (
+            "Read the frozen evidence store at "
+            "`work/evidence.json` (mounted read-only; you cannot write to it or to any "
+            "other workspace path) and return one revised, complete outline that "
+            "addresses the human's message."
+        )
     return (
         "Continue the outline-planning conversation for this presentation. The "
         "previously proposed outline is given below as JSON; a human has replied "
-        "with a follow-up instruction. Read the frozen evidence store at "
-        "`work/evidence.json` (mounted read-only; you cannot write to it or to any "
-        "other workspace path) and return one revised, complete outline that "
-        "addresses the human's message. Ground every node in `evidence_refs` ids "
-        "copied verbatim from that store -- an id it does not contain will be "
-        "rejected before this reaches the human again.\n\n"
+        f"with a follow-up instruction. {evidence_access} Ground every node in "
+        "`evidence_refs` ids copied verbatim from that store -- an id it does not "
+        "contain will be rejected before this reaches the human again.\n\n"
         f"## Previous outline (revision {latest.revision})\n"
         f"{json.dumps(latest.outline, ensure_ascii=False)}\n\n"
         f"## Human message\n{message}\n"
@@ -119,18 +139,48 @@ class PlannerConversationService:
         yield _sse("status", {"phase": "planning"})
         workspace = (self.jobs_root / str(job_id)).resolve()
         evidence_path = workspace / "work" / "evidence.json"
-        request = AgentExecutionRequest(
-            run_id=f"{job_id}-outline-{latest.revision + 1}",
-            node_id="planning",
-            role=slides_adapter.planner_role or "presentation_planner",
-            model=slides_adapter.planner_model,
-            reasoning_effort=slides_adapter.planner_reasoning_effort,
-            workspace=workspace,
-            prompt=_conversation_prompt(latest, message),
-            output_type=SlideOutline,
-            read_only_paths=(evidence_path,),
-            restrict_workspace=True,
-        )
+        runner_name = slides_adapter.planner_runner
+        instructions = _conversation_prompt(latest, message, runner_name=runner_name)
+        if runner_name == "agents":
+            # Same "no grants -> no sandbox" shape as the worker's first-revision
+            # activation (_execute_planning, app/services/agentic/service.py): the
+            # compact evidence goes into the prompt instead of a filesystem grant.
+            try:
+                evidence_block = await asyncio.to_thread(
+                    build_planner_evidence_block,
+                    workspace,
+                    max_chars=settings.agent_planner_max_evidence_chars,
+                )
+            except EvidenceError as exc:
+                yield _sse(
+                    "error",
+                    {"code": "planner_evidence_unavailable", "message": safe_error(str(exc), "無法讀取佐證資料，請稍後再試。")},
+                )
+                return
+            request = AgentExecutionRequest(
+                run_id=f"{job_id}-outline-{latest.revision + 1}",
+                node_id="planning",
+                role=slides_adapter.planner_role or "presentation_planner",
+                model=slides_adapter.planner_model,
+                reasoning_effort=slides_adapter.planner_reasoning_effort,
+                workspace=workspace,
+                prompt=evidence_block,
+                instructions=instructions,
+                output_type=SlideOutline,
+            )
+        else:
+            request = AgentExecutionRequest(
+                run_id=f"{job_id}-outline-{latest.revision + 1}",
+                node_id="planning",
+                role=slides_adapter.planner_role or "presentation_planner",
+                model=slides_adapter.planner_model,
+                reasoning_effort=slides_adapter.planner_reasoning_effort,
+                workspace=workspace,
+                prompt=instructions,
+                output_type=SlideOutline,
+                read_only_paths=(evidence_path,),
+                restrict_workspace=True,
+            )
         try:
             result = await self.runner.run(request)
         except Exception as exc:
