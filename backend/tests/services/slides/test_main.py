@@ -242,6 +242,33 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertIn("work/sources.json", prompt)
         self.assertIn("collision suffixes", prompt)
 
+    def test_correction_prompt_preserves_prior_validator_and_reviewer_findings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / "work").mkdir()
+            (workspace / "work/slide_context.json").write_text(
+                json.dumps({"staged_names": [], "font": "Noto Sans TC"}),
+                encoding="utf-8",
+            )
+            prompt = asyncio.run(
+                slides_adapter.build_prompt(
+                    _payload(uuid4()),
+                    workspace,
+                    revision_feedback='[{"code": "reviewer_policy_attribution"}]',
+                    prior_revision_feedback=(
+                        'After author attempt 1 (validator):\n[{"code": "pptx_missing"}]',
+                        'After author attempt 2 (validator):\n[{"code": "render_missing"}]',
+                    ),
+                )
+            )
+
+        self.assertTrue(slides_adapter.preserve_revision_feedback_history)
+        self.assertIn("pptx_missing", prompt)
+        self.assertIn("render_missing", prompt)
+        self.assertIn("reviewer_policy_attribution", prompt)
+        self.assertLess(prompt.index("pptx_missing"), prompt.index("render_missing"))
+        self.assertLess(prompt.index("render_missing"), prompt.index("reviewer_policy_attribution"))
+
     def test_review_context_lists_semantic_review_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             context = asyncio.run(slides_adapter.semantic_review_context(_payload(uuid4()), Path(temporary)))

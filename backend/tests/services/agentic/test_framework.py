@@ -733,6 +733,81 @@ async def test_modern_coordinator_uses_independent_author_and_reviewer_sessions(
 
 
 @pytest.mark.asyncio
+async def test_opt_in_revision_history_spans_validator_and_reviewer_retries(tmp_path):
+    class HistoryAdapter(ModernReviewAdapter):
+        name = "revision-history"
+        max_review_rounds = 4
+        preserve_revision_feedback_history = True
+
+        def __init__(self):
+            self.validations = 0
+            self.prompt_inputs = []
+
+        def build_prompt(
+            self, value, workspace, *, semantic_review_context=None,
+            revision_feedback=None, prior_revision_feedback=(),
+        ):
+            self.prompt_inputs.append((revision_feedback, prior_revision_feedback))
+            return "\n".join((*prior_revision_feedback, revision_feedback or "initial"))
+
+        async def validate_generated(self, value, workspace):
+            self.validations += 1
+            if self.validations <= 2:
+                raise DeterministicValidationError(f"validator-finding-{self.validations}")
+
+        def revision_feedback(self, value, review, result):
+            return "reviewer-blocker"
+
+    adapter = HistoryAdapter()
+    runner = ModernRunner()
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="history-job", workflow=adapter.name, input={}),
+        registry=WorkflowRegistry({adapter.name: adapter}),
+        runner=runner,
+        workspace_root=tmp_path,
+    )
+
+    assert result.status is WorkflowStatus.COMPLETED
+    author_prompts = [request.prompt for request in runner.requests if request.node_id == "author"]
+    assert len(author_prompts) == 4
+    assert "validator-finding-1" in author_prompts[1]
+    assert "validator-finding-1" in author_prompts[2]
+    assert "validator-finding-2" in author_prompts[2]
+    assert "validator-finding-1" in author_prompts[3]
+    assert "validator-finding-2" in author_prompts[3]
+    assert "reviewer-blocker" in author_prompts[3]
+    assert adapter.prompt_inputs[1] == ("validator-finding-1", ())
+    assert adapter.prompt_inputs[2][0] == "validator-finding-2"
+    assert len(adapter.prompt_inputs[2][1]) == 1
+    assert adapter.prompt_inputs[3][0] == "reviewer-blocker"
+    assert len(adapter.prompt_inputs[3][1]) == 2
+
+
+@pytest.mark.asyncio
+async def test_non_opt_in_adapter_receives_only_latest_revision_feedback(tmp_path):
+    class LatestOnlyAdapter(ModernReviewAdapter):
+        name = "latest-only"
+
+        def build_prompt(self, value, workspace, *, semantic_review_context=None, revision_feedback=None):
+            return f"author-{revision_feedback or 'initial'}"
+
+    adapter = LatestOnlyAdapter()
+    runner = ModernRunner()
+    result = await execute_workflow(
+        AgentTaskPayload(job_id="latest-only-job", workflow=adapter.name, input={}),
+        registry=WorkflowRegistry({adapter.name: adapter}),
+        runner=runner,
+        workspace_root=tmp_path,
+    )
+
+    assert result.status is WorkflowStatus.COMPLETED
+    assert [request.prompt for request in runner.requests if request.node_id == "author"] == [
+        "author-initial",
+        "author-correct the blocking finding",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stage_workflow_extracts_once_and_uses_stage_specific_skills(tmp_path):
     class StagedAdapter(ModernReviewAdapter):
         name = "staged-review"

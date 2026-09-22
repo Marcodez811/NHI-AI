@@ -110,6 +110,7 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
     author_skills = ("pptx-nhi-tw",)
     reviewer_skills = ("semantic-slide-review",)
     independent_semantic_review = True
+    preserve_revision_feedback_history = True
     stage_isolation = True
     input_type = SlidesTaskPayload
     output_type = SlidesTaskResult
@@ -467,7 +468,15 @@ rather than presenting both sides unreconciled.
             ],
         }
 
-    async def build_prompt(self, value: SlidesTaskPayload, workspace: Path, *, semantic_review_context: Any = None, revision_feedback: str | None = None) -> str:
+    async def build_prompt(
+        self,
+        value: SlidesTaskPayload,
+        workspace: Path,
+        *,
+        semantic_review_context: Any = None,
+        revision_feedback: str | None = None,
+        prior_revision_feedback: tuple[str, ...] = (),
+    ) -> str:
         context_path = workspace / "work" / "slide_context.json"
         context = json.loads(await asyncio.to_thread(context_path.read_text, encoding="utf-8"))
         outline_path = workspace / "work" / "outline.json"
@@ -494,10 +503,18 @@ rather than presenting both sides unreconciled.
                 "staged filenames, collision suffixes, derived document titles, EvidenceStore names, "
                 "paths, hashes, or block IDs to the delivered presentation. "
                 "Before finishing, verify each blocking finding individually "
-                "and state which slide or artifact change resolves it.\n\n"
-                "## Blocking review findings to correct\n"
-                + revision_feedback
+                "and state which slide or artifact change resolves it.\n"
             )
+            if prior_revision_feedback:
+                prompt += (
+                    "\n## Earlier blocking findings whose fixes must be preserved\n"
+                    "These findings came from earlier author attempts. They may already be fixed; "
+                    "do not undo those fixes while addressing the latest feedback. Check the current "
+                    "deck against each one before finishing, and repair any that has recurred.\n\n"
+                    + "\n\n".join(prior_revision_feedback)
+                    + "\n"
+                )
+            prompt += "\n## Latest blocking findings to correct\n" + revision_feedback
         # Preserve the job-local brief used by the original slide runtime;
         # this is also useful when diagnosing a retained failed workspace.
         await asyncio.to_thread((workspace / "work" / "prompt.md").write_text, prompt, encoding="utf-8")

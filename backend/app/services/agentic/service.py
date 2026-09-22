@@ -650,8 +650,32 @@ async def _execute_bounded_agents(
     prompt = str(initial_prompt)
     author_result: AgentExecutionResult | None = None
     feedback: str | None = None
+    prior_revision_feedback: list[str] = []
     previous_review: ReviewOutcome | None = None
     stagnant_transitions = 0
+
+    async def build_revision_prompt(latest_feedback: str, *, source: str, completed_attempt: int) -> str:
+        """Retain prior blockers only for adapters that opt into cross-attempt context."""
+
+        preserve_history = bool(getattr(adapter, "preserve_revision_feedback_history", False))
+        history_kwargs = (
+            {"prior_revision_feedback": tuple(prior_revision_feedback)} if preserve_history else {}
+        )
+        revised_prompt = str(
+            await _call(
+                adapter.build_prompt,
+                value,
+                workspace,
+                semantic_review_context=review_context,
+                revision_feedback=latest_feedback,
+                **history_kwargs,
+            )
+        )
+        if preserve_history:
+            prior_revision_feedback.append(
+                f"After author attempt {completed_attempt} ({source}):\n{latest_feedback}"
+            )
+        return revised_prompt
 
     while author_attempt <= max_rounds:
         await _emit_phase(progress_callback, AgentPhase.DRAFTING if author_attempt == 1 else AgentPhase.REVISING)
@@ -783,16 +807,10 @@ async def _execute_bounded_agents(
                     message="Deterministic validation returned correctable findings.",
                     duration_ms=round((asyncio.get_running_loop().time() - validator_started) * 1000),
                 )
-                author_attempt += 1
-                prompt = str(
-                    await _call(
-                        adapter.build_prompt,
-                        value,
-                        workspace,
-                        semantic_review_context=review_context,
-                        revision_feedback=feedback,
-                    )
+                prompt = await build_revision_prompt(
+                    feedback, source="validator", completed_attempt=author_attempt
                 )
+                author_attempt += 1
                 continue
             except ValidationInfrastructureError as exc:
                 await _emit_event(
@@ -980,17 +998,11 @@ async def _execute_bounded_agents(
         # structured response. The adapter may provide a JSON file path or a
         # compact string; the full value is passed through unchanged.
         feedback = str(feedback)
-        author_attempt += 1
         await _emit_phase(progress_callback, AgentPhase.REVISING)
-        prompt = str(
-            await _call(
-                adapter.build_prompt,
-                value,
-                workspace,
-                semantic_review_context=review_context,
-                revision_feedback=feedback,
-            )
+        prompt = await build_revision_prompt(
+            feedback, source="reviewer", completed_attempt=author_attempt
         )
+        author_attempt += 1
 
     raise WorkflowExecutionError("maximum author attempts exceeded")
 
