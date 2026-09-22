@@ -5,8 +5,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from agents import MultiProvider, Usage
+from agents import Agent, MultiProvider, Usage
 from agents.extensions.models.litellm_model import LitellmModel
+from agents.sandbox import SandboxAgent
 from agents.stream_events import AgentUpdatedStreamEvent, RunItemStreamEvent
 from pydantic import SecretStr
 
@@ -175,6 +176,60 @@ class FakeSdkRunner:
 def test_agents_sdk_runner_satisfies_the_agent_runner_protocol():
     assert isinstance(AgentsSdkRunner(), AgentRunner)
     assert AgentsSdkRunner.name == "agents"
+
+
+# ---------------------------------------------------------------------------
+# "No grants -> no sandbox" (Stage 5, docs/agents-sdk-migration-plan.md)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_no_path_grants_runs_as_a_plain_tool_less_agent(tmp_path):
+    fake_runner = FakeSdkRunner()
+    runner = AgentsSdkRunner(runner_factory=fake_runner, timeout_seconds=2, heartbeat_seconds=0)
+    request = _request(tmp_path, instructions="stay grounded in the evidence below")
+
+    await runner.run(request)
+
+    call = fake_runner.last_call
+    agent = call["agent"]
+    # A plain ``agents.Agent`` was built, not a ``SandboxAgent`` -- it has no
+    # capabilities/manifest attributes to even check for emptiness.
+    assert type(agent) is Agent
+    assert not isinstance(agent, SandboxAgent)
+    assert agent.tools == []
+    assert agent.instructions == "stay grounded in the evidence below"
+    assert call["run_config"].sandbox is None
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_a_read_only_grant_still_builds_the_sandbox_agent(tmp_path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    fake_runner = FakeSdkRunner()
+    runner = AgentsSdkRunner(runner_factory=fake_runner, timeout_seconds=2, heartbeat_seconds=0)
+    request = _request(tmp_path, read_only_paths=(input_dir,))
+
+    await runner.run(request)
+
+    call = fake_runner.last_call
+    agent = call["agent"]
+    assert isinstance(agent, SandboxAgent)
+    assert agent.default_manifest is not None
+    assert call["run_config"].sandbox is not None
+    assert call["run_config"].sandbox.manifest is agent.default_manifest
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_only_a_writable_grant_also_builds_the_sandbox_agent(tmp_path):
+    output_dir = tmp_path / "output"
+    fake_runner = FakeSdkRunner()
+    runner = AgentsSdkRunner(runner_factory=fake_runner, timeout_seconds=2, heartbeat_seconds=0)
+    request = _request(tmp_path, writable_paths=(output_dir,))
+
+    await runner.run(request)
+
+    assert isinstance(fake_runner.last_call["agent"], SandboxAgent)
 
 
 @pytest.mark.asyncio

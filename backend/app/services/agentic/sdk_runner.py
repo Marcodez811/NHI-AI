@@ -45,6 +45,22 @@ by choosing *where the manifest root points*, not by post-hoc masking:
   gives us no primitive to downgrade or mask a subtree of an already-visible root. Closing
   that gap needs either a narrower per-node root (the Stage 1 "narrowest grants" plan) or
   session/manifest-level work beyond ``SandboxPathGrant`` and ``SandboxWorkspaceScope``.
+
+No grants -> no sandbox (Stage 5, docs/agents-sdk-migration-plan.md): a request that asks
+for neither ``read_only_paths`` nor ``writable_paths`` never touches the workspace, so it
+runs as a plain ``agents.Agent`` -- no ``SandboxAgent``, no ``Manifest``, no
+``Filesystem``/``Shell`` capabilities, and no ``SandboxRunConfig`` on the ``RunConfig`` at
+all. This was forced by two facts about the installed SDK, not a style preference: the
+runner never supplies ``run_config.sandbox.client`` (a concrete sandbox backend is out of
+scope here, per the class docstring below), so any sandboxed run refuses to start outright;
+and even a supplied local backend (``UnixLocalSandboxClient``) inherits the worker's
+environment and does not confine shell commands on Linux, while the ``Filesystem``
+capability exposes only ``view_image``/``apply_patch`` -- no text-read tool, so reading a
+file at all would additionally require ``Shell``. A stage with nothing to read (the slides
+planner works from evidence already folded into its prompt -- see
+``app/services/slides/evidence.py``'s ``render_compact_evidence``) needs none of that
+machinery, so it gets the plain path instead. A request WITH grants is unaffected and keeps
+building the ``SandboxAgent``/``Manifest``/``SandboxRunConfig`` exactly as before.
 """
 
 from __future__ import annotations
@@ -60,6 +76,7 @@ from openai.types.shared import Reasoning
 from pydantic import BaseModel, SecretStr
 
 from agents import (
+    Agent,
     AgentsException,
     InputGuardrailTripwireTriggered,
     ItemHelpers,
@@ -248,6 +265,7 @@ def _build_agent(
         capabilities.append(Skills(from_=LocalDir(src=skills_source), skills_path=".agents/skills"))
     return SandboxAgent(
         name=request.role,
+        instructions=request.instructions,
         model=effective_model,
         model_settings=_reasoning_model_settings(effective_effort),
         capabilities=capabilities,
@@ -255,6 +273,31 @@ def _build_agent(
         # ``output_type=None`` keeps the agent's ordinary free-form text
         # output; a declared type is this runner's native structured-output
         # path (Stage 2), unlike ``output_schema`` above which it rejects.
+        output_type=request.output_type,
+    )
+
+
+def _build_plain_agent(
+    request: AgentExecutionRequest,
+    *,
+    default_model: str | None,
+    default_reasoning_effort: AgentReasoningEffort | None,
+) -> Agent:
+    """Build a tool-less ``agents.Agent`` for a request with no path grants.
+
+    See the "no grants -> no sandbox" rule in the module docstring: a stage with nothing to
+    read needs none of ``SandboxAgent``'s manifest or ``Filesystem``/``Shell``
+    capabilities. Model, reasoning effort, and structured-output policy are resolved
+    exactly as ``_build_agent`` resolves them for a sandboxed request.
+    """
+
+    effective_model = request.model if request.model is not None else default_model
+    effective_effort = request.reasoning_effort if request.reasoning_effort is not None else default_reasoning_effort
+    return Agent(
+        name=request.role,
+        instructions=request.instructions,
+        model=effective_model,
+        model_settings=_reasoning_model_settings(effective_effort),
         output_type=request.output_type,
     )
 
@@ -332,14 +375,16 @@ _SDK_TURN_FAILURES = (
 
 
 class AgentsSdkRunner:
-    """Provider-neutral runner backed by the OpenAI Agents SDK sandbox runtime.
+    """Provider-neutral runner backed by the OpenAI Agents SDK, sandboxed or plain.
 
     ``runner_factory`` defaults to the real ``agents.Runner`` class and is overridable so
     tests can supply a fake with a ``run_streamed`` method that never reaches the
     network. ``sandbox_client`` is left unset by Stage 0: selecting a concrete sandbox
     backend (``unix_local`` vs. ``docker``, per the migration plan's Stage 3 discussion)
     is deliberately out of scope here and is threaded through so a later stage can supply
-    one without changing this class's shape.
+    one without changing this class's shape. A request without path grants never reaches
+    ``sandbox_client`` at all -- see ``run``'s "no grants -> no sandbox" branch and the
+    module docstring.
     """
 
     name = "agents"
@@ -410,15 +455,26 @@ class AgentsSdkRunner:
         started = asyncio.get_running_loop().time()
 
         async def execute() -> AgentExecutionResult:
-            manifest, _workspace_scope = _build_sandbox_manifest(request)
-            agent = _build_agent(
-                request,
-                default_model=self.model,
-                default_reasoning_effort=self.reasoning_effort,
-                manifest=manifest,
-            )
             run_config = _litellm_run_config(effective_model, self.litellm_api_keys) or RunConfig()
-            run_config.sandbox = SandboxRunConfig(client=self.sandbox_client, manifest=manifest)
+            # "No grants -> no sandbox" (module docstring): a request that asks for
+            # neither read-only nor writable paths never touches the workspace, so it
+            # runs as a plain agent with no capabilities and no SandboxRunConfig at
+            # all, instead of the grant-bearing SandboxAgent path below.
+            if request.read_only_paths or request.writable_paths:
+                manifest, _workspace_scope = _build_sandbox_manifest(request)
+                agent = _build_agent(
+                    request,
+                    default_model=self.model,
+                    default_reasoning_effort=self.reasoning_effort,
+                    manifest=manifest,
+                )
+                run_config.sandbox = SandboxRunConfig(client=self.sandbox_client, manifest=manifest)
+            else:
+                agent = _build_plain_agent(
+                    request,
+                    default_model=self.model,
+                    default_reasoning_effort=self.reasoning_effort,
+                )
             await reporter.emit(turn_phase.value, f"Agent {request.node_id} step is running.", phase=turn_phase)
             streamed = self.runner_factory.run_streamed(agent, request.prompt, run_config=run_config)
             try:

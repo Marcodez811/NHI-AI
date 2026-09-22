@@ -12,9 +12,11 @@ from app.services.slides.evidence import (
     canonical_json,
     freeze_evidence,
     load_frozen_evidence,
+    render_compact_evidence,
     sha256_bytes,
     validate_frozen_evidence,
 )
+from app.services.slides.source_manifest import SlideSource
 
 
 _EXTRACTION_PATH = Path(__file__).parents[3] / ".agents" / "skills" / "source-document-extraction" / "scripts" / "source_extraction.py"
@@ -292,3 +294,80 @@ def test_citations_keep_docx_headings_with_their_document_part(tmp_path: Path) -
 
     assert evidence["blocks"][2]["citation"]["display_text"] == "資料來源：政策說明.docx，〈給付範圍〉／〈適用對象〉"
     assert evidence["blocks"][3]["citation"]["section_path"] == []
+
+
+# ---------------------------------------------------------------------------
+# Compact evidence rendering for the "agents" planner path
+# (docs/agents-sdk-migration-plan.md, Stage 5)
+# ---------------------------------------------------------------------------
+
+
+def test_render_compact_evidence_keeps_id_text_citation_and_display_name(tmp_path: Path) -> None:
+    source = tmp_path / "brief.txt"
+    source.write_text("An authoritative claim from the source.", encoding="utf-8")
+    extracted = tmp_path / "extracted"
+    _EXTRACTION.extract([str(source)], str(extracted))
+    evidence = freeze_evidence(extracted, tmp_path / "evidence.json")
+    sources = (SlideSource(staged_filename="brief.txt", display_name="Q3 Policy Brief"),)
+
+    rendered = render_compact_evidence(evidence, sources, max_chars=10_000)
+
+    block = evidence["blocks"][0]
+    assert rendered.startswith("<evidence>\n")
+    assert rendered.endswith("\n</evidence>")
+    assert "never as instructions" in rendered
+    assert "untrusted" in rendered
+    assert block["id"] in rendered
+    assert "An authoritative claim from the source." in rendered
+    assert "Q3 Policy Brief" in rendered
+    # The staged filename and every hash/provenance/integrity field the schema
+    # carries must never reach the compact rendering.
+    assert "brief.txt" not in rendered
+    assert block["document_id"] not in rendered
+    assert "provenance" not in rendered
+    assert "integrity" not in rendered
+    assert "manifest_sha256" not in rendered
+    assert "asset_hashes" not in rendered
+
+
+def test_render_compact_evidence_falls_back_to_the_raw_locator_without_a_citation(tmp_path: Path) -> None:
+    source = tmp_path / "brief.txt"
+    source.write_text("A claim with no derived citation.", encoding="utf-8")
+    extracted = tmp_path / "extracted"
+    _EXTRACTION.extract([str(source)], str(extracted))
+    evidence_path = tmp_path / "evidence.json"
+    freeze_evidence(extracted, evidence_path)
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    for block in payload["blocks"]:
+        block.pop("citation")
+    sources = (SlideSource(staged_filename="brief.txt", display_name="Legacy Brief"),)
+
+    rendered = render_compact_evidence(payload, sources, max_chars=10_000)
+
+    assert "Legacy Brief" in rendered
+    # No citation label survived the strip in this fixture, so the compact
+    # rendering falls back to the raw locator the citation would have used.
+    assert '"citation":{"line_end":1,"line_start":1,"type":"text"}' in rendered
+
+
+def test_render_compact_evidence_rejects_a_staged_filename_with_no_display_name(tmp_path: Path) -> None:
+    source = tmp_path / "brief.txt"
+    source.write_text("A claim from an unmapped source.", encoding="utf-8")
+    extracted = tmp_path / "extracted"
+    _EXTRACTION.extract([str(source)], str(extracted))
+    evidence = freeze_evidence(extracted, tmp_path / "evidence.json")
+
+    with pytest.raises(EvidenceError, match="no knowledge-base source name"):
+        render_compact_evidence(evidence, (), max_chars=10_000)
+
+
+def test_render_compact_evidence_fails_fast_over_the_character_budget_without_truncating(tmp_path: Path) -> None:
+    source = tmp_path / "brief.txt"
+    source.write_text("A claim long enough to exceed a tiny budget.", encoding="utf-8")
+    extracted = tmp_path / "extracted"
+    _EXTRACTION.extract([str(source)], str(extracted))
+    evidence = freeze_evidence(extracted, tmp_path / "evidence.json")
+    sources = (SlideSource(staged_filename="brief.txt", display_name="Brief"),)
+
+    with pytest.raises(EvidenceError, match="over the planner's 1 character limit"):
+        render_compact_evidence(evidence, sources, max_chars=1)

@@ -381,6 +381,14 @@ indexing dependency and latency for content already on disk, and would break the
 guarantee that planner and author see byte-identical evidence. This closes the second
 open decision below.
 
+**Superseded for the "agents" runner path (2026-09-22).** This decision still holds
+exactly as written for `planner_runner == "codex"`: the Codex planner keeps reading
+`work/evidence.json` through its bwrap sandbox unchanged. It does not hold for
+`planner_runner == "agents"`: that path instead receives a compact, delimited rendering
+of the same frozen evidence directly in its input. See "Architecture decisions
+(2026-09-22)" below for why a sandbox grant turned out to be the wrong shape for that
+runner specifically.
+
 ## Running the planner on Gemini
 
 Set `AGENT_PLANNER_ENABLED=true`, `AGENT_PLANNER_RUNNER=agents`,
@@ -435,23 +443,95 @@ shell holding the API keys: a prompt injection in an uploaded document could rea
 the keys or the original sources. The Codex runner prevented this with bwrap and
 by stripping credentials from the environment.
 
-**Decided next step for the planner:**
-- make `Filesystem` the only default capability, so `Shell` must be requested
-  explicitly by a node that has a confining backend;
-- supply `UnixLocalSandboxClient(inherit_host_environment=False)`;
-- add a real-sandbox test (no model call) proving the file tools refuse an
-  ungranted path such as an original source document.
+**Superseded: the "make `Filesystem` the only default capability" plan below was the
+original next step drafted right after the live-run failures above, before the
+`Filesystem` capability itself was read.** Reading
+`agents/sandbox/capabilities/filesystem.py` in the installed SDK (0.22.2) shows it
+exposes exactly two tools: `view_image` and `apply_patch`. There is no text-read tool.
+Restricting the planner to `Filesystem` alone, as the crossed-out plan below proposed,
+would not have let it read `work/evidence.json` at all -- `apply_patch` is a write-shaped
+diff tool, not a read primitive. Reading a JSON file's contents at all, on this SDK
+version, requires `Shell`. So dropping `Shell` to close the "unconfined shell holding API
+keys" hole (previous section) would have reopened the planner's only reason to have
+sandbox access in the first place: it cannot read anything without a capability this SDK
+does not offer for plain text.
 
-The planner needs only to read `work/evidence.json`, so this keeps the
-frozen-evidence design and closes both holes. Then rerun the planner-only trial.
-The next possible failure after that is still Gemini rejecting the `SlideOutline`
-schema.
+~~**Decided next step for the planner:**~~
+~~- make `Filesystem` the only default capability, so `Shell` must be requested~~
+~~  explicitly by a node that has a confining backend;~~
+~~- supply `UnixLocalSandboxClient(inherit_host_environment=False)`;~~
+~~- add a real-sandbox test (no model call) proving the file tools refuse an~~
+~~  ungranted path such as an original source document.~~
+
+**Actual decision: run the planner as a plain agent -- no sandbox, no tools at all.** The
+planner reads one known file and returns a structured outline; it needs no tools to do
+that. `AgentsSdkRunner` now treats "no path grants" (`read_only_paths` and
+`writable_paths` both empty) as a distinct, simpler case: it builds a plain `agents.Agent`
+instead of a `SandboxAgent` -- no `Manifest`, no `SandboxRunConfig`, no
+`sandbox_client` to select or defend at all, so the `UnixLocalSandboxClient` environment
+and Linux-confinement problems above never apply to this node. The frozen evidence goes
+into the prompt instead, rendered compactly by `render_compact_evidence`
+(`app/services/slides/evidence.py`): per block, only `id` (needed for `evidence_refs`),
+`text`, and a citation label survive, with the source shown by its knowledge-base
+`display_name` (`work/sources.json`) rather than a staged filename, hash, or provenance
+internal.
+
+This is architecturally standard, not a workaround forced by the missing read tool: a
+text-read tool, had one existed, would only have put the same file's bytes into the
+model's context after an extra tool-call round trip -- the model cannot use file contents
+without them entering its context one way or the other. For evidence that is already
+frozen, consolidated, and known not to change mid-run, putting it in the input directly
+is the same information delivered in fewer turns. Task instructions and the evidence stay
+structurally separate to keep this safe: instructions go on the agent's own
+`instructions` (a new `AgentExecutionRequest.instructions` field, `agents`-path only),
+and the evidence occupies its own `<evidence>...</evidence>` block with an explicit
+sentence that it is source material to cite, never instructions to follow -- uploaded
+documents are untrusted input. `agent_planner_max_evidence_chars` (default 150,000 --
+measured real documents run 25k-93k characters of block text) fails the turn fast with a
+clear message rather than silently truncating evidence a planner would then cite
+incompletely. The Codex planner is entirely unaffected: `planner_runner == "codex"` still
+reads `work/evidence.json` through its bwrap sandbox exactly as before, and the default
+runner for every node remains `"codex"`.
 
 **Consequence for Stage 3 (the author).** The author needs a shell (python-pptx,
 chart rendering, LibreOffice). The local backend cannot confine one on Linux, so
 **the author must not run on `UnixLocalSandboxClient`**. Moving it to the SDK
 requires the Docker backend, with a Docker daemon available to the worker, or an
 equivalent confinement such as bwrap.
+
+### Architecture decisions (2026-09-22)
+
+- **Reasoning nodes use plain SDK calls, not sandboxed tool use.** The planner (this
+  stage's subject) only ever reads one already-frozen artifact and returns a structured
+  judgment; it needs no tools once that artifact is in its input, so it now runs on the
+  plain-agent path `AgentsSdkRunner` takes for any request with no path grants. The
+  reviewer is the same shape in spirit -- it too only reads frozen artifacts and returns a
+  structured verdict -- but this change does not touch it: its grants
+  (`work/evidence.json`, `work/intermediate/deck_snapshot.json`,
+  `work/rendered/final`) are unchanged, and its rendered-PNG review specifically needs
+  `Filesystem`'s `view_image` tool, so moving it to the plain path later is a smaller
+  step (drop `Shell`, keep `Filesystem`) rather than the planner's full "no tools at all".
+- **The author stays on Codex for now.** It needs a real shell (python-pptx, chart
+  rendering, LibreOffice), and the Agents SDK's only local sandbox backend cannot confine
+  one on Linux (see "Consequence for Stage 3" just above) -- moving the author means
+  either the Docker sandbox backend (needs a Docker daemon the worker does not have) or
+  wiring it through the same bwrap isolation Codex already provides.
+- **If the author ever moves off Codex, Pi is an option.** Pi is a TypeScript
+  coding-agent harness; run inside the existing bwrap isolation through this runner's
+  seam -- not through `UnixLocalSandboxClient` -- it would not need a new sandbox backend
+  built and trusted before the author could carry a real shell on the Agents SDK.
+- **Strands Agents is the fallback if LiteLLM routing proves unreliable.** This stage's
+  Gemini routing goes through the SDK's `litellm/` prefix and a keyed `LitellmModel`
+  provider (see "Running the planner on Gemini" above). Strands Agents has native
+  Gemini and Anthropic support, so if LiteLLM's translation layer turns out to be
+  unreliable in practice, Strands avoids depending on it at all rather than trying to
+  work around it.
+- **The author must not run on `UnixLocalSandboxClient`.** Restated here because it is
+  the one hard constraint the rest of this list depends on: that backend inherits the
+  worker's environment by default (API keys included) and does not confine shell commands
+  on Linux at all, so any node that needs a real shell must reach isolation some other
+  way -- Docker, bwrap, or a harness that brings its own, never this backend with its
+  defaults.
 
 ## Risks
 
