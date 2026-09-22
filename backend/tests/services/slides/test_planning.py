@@ -227,6 +227,9 @@ def test_build_planning_prompt_default_is_unchanged_and_the_agents_path_differs(
     assert "neither is available to you here" in agents_prompt
     assert "`<evidence>` block" in agents_prompt
     assert "no file or shell access" in agents_prompt
+    # Ids are handed to the planner for evidence_refs; the user-visible outline
+    # fields must never carry them (no abstraction leakage into what users read).
+    assert "They belong only in `evidence_refs`" in agents_prompt
 
 
 @pytest.mark.asyncio

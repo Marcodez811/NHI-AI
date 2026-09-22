@@ -411,7 +411,11 @@ the frozen `work/evidence.json` store after this activation.
                 "Each evidence entry already carries its `source` as the knowledge-base name to "
                 "use verbatim in a `key_point`; never invent, translate, or alter a source name, "
                 "and never reference `work/sources.json` or `work/evidence.json` -- neither is "
-                "available to you here."
+                "available to you here.\n\n"
+                "Evidence `id` values are internal identifiers. They belong only in "
+                "`evidence_refs`: never write an id, or any hash-like string, in `title`, "
+                "`narrative`, `heading`, `intent`, or `key_points` -- those fields are shown to the "
+                "user, who knows the source documents only by their knowledge-base names."
             )
             evidence_refs_note = "ids copied verbatim from the `<evidence>` block above"
         else:
