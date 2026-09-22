@@ -1,5 +1,4 @@
 import { cleanup, render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SlideJobSummary } from "../lib/api/slides";
@@ -64,29 +63,12 @@ describe("RecentSlideJobs", () => {
         expect(listSlideJobs).toHaveBeenCalledOnce();
     });
 
-    it("hides its own heading when the caller renders one instead", async () => {
-        vi.mocked(listSlideJobs).mockResolvedValue([summary()]);
-
-        render(<RecentSlideJobs showHeading={false} />);
-
-        expect(await screen.findByText("年度政策簡報")).toBeInTheDocument();
-        expect(screen.queryByText("最近的簡報工作")).not.toBeInTheDocument();
-        expect(screen.queryByText("從這裡返回待審核的大綱，或開啟已完成的簡報。")).not.toBeInTheDocument();
-        expect(screen.getByRole("button", { name: "重新整理簡報工作" })).toBeInTheDocument();
-    });
-
-    it("lets the user retry a failed list request", async () => {
-        vi.mocked(listSlideJobs)
-            .mockRejectedValueOnce(new Error("服務暫時無法使用"))
-            .mockResolvedValueOnce([summary({ status: "running", phase: "extracting" })]);
-        const user = userEvent.setup();
+    it("shows the failure when the list request fails", async () => {
+        // Recovery is a page reload, which remounts the list and refetches it.
+        vi.mocked(listSlideJobs).mockRejectedValueOnce(new Error("服務暫時無法使用"));
 
         render(<RecentSlideJobs />);
 
         expect(await screen.findByRole("alert")).toHaveTextContent("服務暫時無法使用");
-        await user.click(screen.getByRole("button", { name: "重新整理簡報工作" }));
-        expect(await screen.findByText("年度政策簡報")).toBeInTheDocument();
-        expect(screen.getByText("執行中")).toBeInTheDocument();
-        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     });
 });

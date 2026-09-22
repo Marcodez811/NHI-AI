@@ -24,7 +24,8 @@ from uuid import UUID
 from app.config import settings
 from app.models.slides import SlideOutline
 from app.services.agentic.contracts import AgentExecutionRequest, AgentRunner
-from app.services.agentic.runner import CodexAgentRunner, CodexRunner, safe_error
+from app.services.agentic.runner import CodexAgentRunner, CodexRunner, WorkflowExecutionError, safe_error
+from app.services.agentic.sdk_runner import AgentsSdkRunner
 from app.services.slides.adapter import slides_adapter
 from app.services.slides.evidence import EvidenceError, validate_outline_evidence_references
 from app.services.slides.outline_repository import SlideOutlineRepository, SlideOutlineRevision
@@ -71,18 +72,33 @@ class PlannerConversationService:
     @property
     def runner(self) -> AgentRunner:
         if self._runner is None:
-            self._runner = CodexAgentRunner(
-                CodexRunner(
-                    model=settings.agent_planner_model or settings.agent_default_model,
-                    reasoning_effort=(
-                        settings.agent_planner_reasoning_effort or settings.agent_default_reasoning_effort
-                    ),
-                    api_key=settings.openai_api_key,
+            if slides_adapter.planner_runner == "agents":
+                self._runner = AgentsSdkRunner(
+                    model=slides_adapter.planner_model,
+                    reasoning_effort=slides_adapter.planner_reasoning_effort,
                     timeout_seconds=float(settings.agent_timeout_minutes) * 60,
                     heartbeat_seconds=settings.agent_heartbeat_seconds,
-                    require_process_isolation=settings.agent_require_process_isolation,
+                    litellm_api_keys={
+                        "gemini": settings.gemini_api_key,
+                        "anthropic": settings.anthropic_api_key,
+                        "openai": settings.openai_api_key,
+                    },
                 )
-            )
+            elif slides_adapter.planner_runner == "codex":
+                self._runner = CodexAgentRunner(
+                    CodexRunner(
+                        model=settings.agent_planner_model or settings.agent_default_model,
+                        reasoning_effort=(
+                            settings.agent_planner_reasoning_effort or settings.agent_default_reasoning_effort
+                        ),
+                        api_key=settings.openai_api_key,
+                        timeout_seconds=float(settings.agent_timeout_minutes) * 60,
+                        heartbeat_seconds=settings.agent_heartbeat_seconds,
+                        require_process_isolation=settings.agent_require_process_isolation,
+                    )
+                )
+            else:
+                raise WorkflowExecutionError("Unknown planner runner")
         return self._runner
 
     async def continue_conversation(

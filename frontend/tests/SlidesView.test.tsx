@@ -296,19 +296,6 @@ describe("SlidesView", () => {
         expect(screen.getAllByText("最近的簡報工作")).toHaveLength(1);
     });
 
-    it("refetches recent jobs when 重新整理 is clicked on the recent tab", async () => {
-        routeSearch.current = "tab=recent";
-        const user = userEvent.setup();
-        vi.mocked(listSlideJobs).mockResolvedValue([jobSummary()]);
-        renderView({ docs: [document()], selected: ["doc-1"] });
-
-        await screen.findByText("年度政策簡報");
-        expect(listSlideJobs).toHaveBeenCalledOnce();
-
-        await user.click(screen.getByRole("button", { name: "重新整理簡報工作" }));
-        expect(listSlideJobs).toHaveBeenCalledTimes(2);
-    });
-
     it("pushes the tab into the URL when the user switches tabs", async () => {
         const user = userEvent.setup();
         renderView({ docs: [document()], selected: ["doc-1"] });

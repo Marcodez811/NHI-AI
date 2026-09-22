@@ -5,8 +5,10 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from agents import Usage
+from agents import MultiProvider, Usage
+from agents.extensions.models.litellm_model import LitellmModel
 from agents.stream_events import AgentUpdatedStreamEvent, RunItemStreamEvent
+from pydantic import SecretStr
 
 from app.services.agentic.contracts import (
     AgentExecutionRequest,
@@ -284,3 +286,52 @@ async def test_run_leaves_output_unset_when_no_output_type_was_requested(tmp_pat
 
     assert result.output is None
     assert fake_runner.last_call["agent"].output_type is None
+
+
+@pytest.mark.asyncio
+async def test_litellm_run_uses_explicit_key_usage_and_private_tracing(tmp_path):
+    fake_runner = FakeSdkRunner()
+    runner = AgentsSdkRunner(
+        runner_factory=fake_runner,
+        timeout_seconds=2,
+        heartbeat_seconds=0,
+        litellm_api_keys={"gemini": SecretStr("configured-gemini-key")},
+    )
+
+    await runner.run(_request(tmp_path, model="litellm/gemini/example-model"))
+
+    call = fake_runner.last_call
+    assert call["agent"].model == "litellm/gemini/example-model"
+    config = call["run_config"]
+    assert isinstance(config.model_provider, MultiProvider)
+    routed_model = config.model_provider.get_model(call["agent"].model)
+    assert isinstance(routed_model, LitellmModel)
+    assert routed_model.model == "gemini/example-model"
+    assert routed_model.api_key == "configured-gemini-key"
+    assert config.model_settings.include_usage is True
+    assert config.tracing_disabled is True
+
+
+@pytest.mark.asyncio
+async def test_litellm_run_fails_before_model_call_when_key_is_missing(tmp_path):
+    fake_runner = FakeSdkRunner()
+    runner = AgentsSdkRunner(runner_factory=fake_runner, timeout_seconds=2, heartbeat_seconds=0)
+
+    with pytest.raises(WorkflowExecutionError, match="No configured API key") as caught:
+        await runner.run(_request(tmp_path, model="litellm/anthropic/example-model"))
+
+    assert fake_runner.last_call is None
+    assert "example-model" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_bare_model_keeps_default_openai_run_configuration(tmp_path):
+    fake_runner = FakeSdkRunner()
+    runner = AgentsSdkRunner(runner_factory=fake_runner, timeout_seconds=2, heartbeat_seconds=0)
+
+    await runner.run(_request(tmp_path, model="gpt-example"))
+
+    config = fake_runner.last_call["run_config"]
+    assert config.model_settings is None
+    assert config.tracing_disabled is False
+    assert config.model_provider.get_model("gpt-example").model == "gpt-example"

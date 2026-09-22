@@ -2,11 +2,10 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowUpRight, CircleAlert, RefreshCw } from "lucide-react";
+import { ArrowUpRight, CircleAlert } from "lucide-react";
 
 import { listSlideJobs } from "../../lib/api/slides";
 import type { AgentJobPhase, SlideJobSummary } from "../../lib/api/slides";
-import { Button } from "../ui/button";
 import { formatDateTime } from "./WorkspaceViewUtils";
 
 const PHASE_LABELS: Record<AgentJobPhase, string> = {
@@ -57,19 +56,20 @@ function jobState(job: SlideJobSummary) {
     };
 }
 
-/** The index reads fresh server state; a browser tab is not a job registry. */
+/**
+ * The index reads fresh server state; a browser tab is not a job registry.
+ *
+ * The list loads once per mount. There is deliberately no refresh button:
+ * reloading the page refetches it, including after a failed request.
+ */
 export function RecentSlideJobs({
     onJobsChange,
-    showHeading = true,
 }: {
     /** Lets the index tab badge reuse this fetch instead of loading the list twice. */
     onJobsChange?: (jobs: SlideJobSummary[] | null) => void;
-    /** Off when a caller (e.g. a tab panel) already renders this heading itself. */
-    showHeading?: boolean;
 } = {}) {
     const [jobs, setJobs] = useState<SlideJobSummary[] | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [reload, setReload] = useState(0);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -82,29 +82,14 @@ export function RecentSlideJobs({
                 }
             });
         return () => controller.abort();
-    }, [reload]);
+    }, []);
 
     useEffect(() => {
         onJobsChange?.(jobs);
     }, [jobs, onJobsChange]);
 
     return (
-        <section
-            aria-labelledby={showHeading ? "recent-slide-jobs-title" : undefined}
-            className={showHeading ? "mt-12 border-t border-border pt-8" : undefined}
-        >
-            <div className={showHeading ? "flex items-start justify-between gap-4" : "flex justify-end"}>
-                {showHeading && (
-                    <div>
-                        <h2 id="recent-slide-jobs-title" className="text-lg font-semibold tracking-tight">最近的簡報工作</h2>
-                        <p className="mt-1 text-sm text-muted-foreground">從這裡返回待審核的大綱，或開啟已完成的簡報。</p>
-                    </div>
-                )}
-                <Button type="button" variant="ghost" size="sm" onClick={() => setReload((value) => value + 1)} aria-label="重新整理簡報工作" className="shrink-0 gap-1.5">
-                    <RefreshCw size={14} aria-hidden="true" />
-                    重新整理
-                </Button>
-            </div>
+        <section aria-label="最近的簡報工作">
 
             {error ? (
                 <div role="alert" className="mt-5 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
