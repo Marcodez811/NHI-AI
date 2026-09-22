@@ -15,7 +15,7 @@ from typing import Any
 from loguru import logger
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox, SkillInput, TextInput, TurnResult
 
-from app.models.slides import DEFAULT_TIMEOUT_MINUTES, SlidesTaskPayload
+from app.models.slides import DEFAULT_TIMEOUT_MINUTES, SlideOutline, SlidesTaskPayload
 
 from .artifacts import BACKEND_ROOT, PPTX_SKILL, SOURCE_SKILL
 from .contracts import JobError, ProgressCallback
@@ -23,15 +23,64 @@ from .contracts import JobError, ProgressCallback
 DEFAULT_PROGRESS_HEARTBEAT_SECONDS = 60.0
 
 
-def build_prompt(request: SlidesTaskPayload, staged_names: list[str], font_family: str | None = None) -> str:
+def _outline_instructions(outline: SlideOutline, requested_slide_count: int) -> str:
+    """Render the approved outline as a node-order/emphasis instruction block.
+
+    Stage 5 (docs/agents-sdk-migration-plan.md): a human already negotiated
+    this structure with the planner. The author must honor node order and use
+    ``emphasis`` as a relative attention budget rather than silently
+    redesigning the deck's shape.
+    """
+
+    nodes = "\n".join(
+        f"{index}. `{node.id}` -- {node.heading} (emphasis: {node.emphasis}, "
+        f"~{node.approx_slides} slides): {node.intent}\n"
+        f"   Key points: {'; '.join(node.key_points)}"
+        for index, node in enumerate(outline.nodes, start=1)
+    )
+    return f"""
+
+## Approved outline (must be honored)
+A human has already reviewed and approved the following outline for this presentation.
+Follow the node order below exactly: do not reorder, merge, split, drop, or introduce a
+section the outline does not name. Treat `emphasis` as a relative attention budget across
+sections -- a "deep" node earns more slides, more supporting detail, and more of the
+evidence than a "light" one; `approx_slides` is a hint, not a hard per-node page count, but
+the content-slide total should land near the requested {requested_slide_count}-slide brief.
+The final references slide is deck furniture and is not part of this approved outline or
+its `total_slides` value.
+
+{nodes}
+
+Narrative through-line: {outline.narrative}
+
+For machine validation, write `work/outline_mapping.json` after the deck is complete.
+Use exactly this shape, with one entry per approved node in the same order and inclusive,
+one-based content-slide ranges:
+`{{"nodes":[{{"node_id":"intro","slide_start":1,"slide_end":2}}]}}`.
+Every content slide must belong to exactly one range. Do not include any references slide
+in the mapping.
+"""
+
+
+def build_prompt(
+    request: SlidesTaskPayload,
+    staged_names: list[str],
+    font_family: str | None = None,
+    *,
+    outline: SlideOutline | None = None,
+) -> str:
     """Build the author brief from the frozen EvidenceStore contract.
 
     ``staged_names`` remains an argument for callers on the old runtime API,
     but source paths are intentionally absent from the author prompt.
+    ``outline`` is the human-approved planning proposal (Stage 5); it is
+    ``None`` for every workflow run that never declares a planner, so the
+    prompt this function returns is completely unchanged for those runs.
     """
 
     del staged_names
-    return f"""# Presentation job
+    prompt = f"""# Presentation job
 
 Create a polished, editable, source-grounded presentation from the frozen
 EvidenceStore at `work/evidence.json`. This JSON file and assets under
@@ -40,7 +89,8 @@ EvidenceStore at `work/evidence.json`. This JSON file and assets under
 ## Brief
 - Title: {request.title}
 - Tone: {request.tone}
-- Length: Exactly {request.slides_count} slides.
+- Length: Exactly {request.slides_count} content slides, followed by one final references
+  slide titled exactly `參考資料` ({request.slides_count + 1} slides total).
 - Font: Use {font_family or "a detected Traditional-Chinese/CJK-safe font"} consistently for slide text and charts.
 - Additional guidance: {request.guidance}
 
@@ -49,22 +99,49 @@ narrative, resolve conflicts explicitly using the evidence blocks, and never inv
 data. Do not open or reinterpret files under `input/`, and do not modify `work/evidence.json`
 or `work/extracted/`.
 
+`work/sources.json` is the authoritative mapping from each staged evidence filename to the
+knowledge-base `display_name` the user recognizes. Every visible source name must use that
+`display_name`, even when an evidence block's `citation.source_name`, `citation.display_text`,
+or a parsed document title disagrees. Keep available section, PDF-page, or text-line locator
+detail from the evidence block, but never show a staged filename or collision suffix.
 `EvidenceStore`, evidence IDs, hashes, JSON filenames, and extraction-process language are
-internal workflow details. Never show them in slide text, citations, speaker notes, or the
-cover. Cite audience-facing sources from each evidence block's `citation` object instead:
-use its `display_text` in a readable slide footer and its source name, section path, and
-locator in speaker notes. Cite slides that contain factual claims, figures, or charts; do not
-add a pipeline explanation to the cover or an unsupported bibliography slide.
-For a retained evidence block without `citation`, derive a conservative reference from
-`provenance.source`'s basename and its available PDF page or text line locator. Use the
-filename alone when no reliable locator exists; never expose an XML path or invent a page,
-section, publisher, date, or office.
+internal workflow details. Never show them in slide text, citations, or the cover. Cite slides
+that contain factual claims, figures, or charts. Each factual content-slide footer must use
+`[N] 資料來源：<allowlisted display_name>，<locator>`, retaining every available
+evidence-backed section, PDF-page, or text-line locator. Assign one number per source and
+reuse that same number everywhere the source appears. When a slide draws on more than one
+source, give each source its own footer paragraph; never combine sources on one line, whether
+by repeating the `資料來源` marker or by stacking `[N]` numbers before a single marker. End the deck with the required
+`參考資料` slide. List each source cited by the content slides exactly once, numbered `[1]`,
+`[2]`, and so on with numbers that agree with the content footers, using its allowlisted
+`display_name` from `work/sources.json` followed by every available evidence-backed section
+path and page or line locator. Put exactly one entry in each paragraph, in the form
+`[N] <allowlisted display_name>，<evidence-backed detail>`; omit the comma and detail only
+when no reliable locator or section exists. However long an entry's locator detail runs, keep
+that whole entry as a single paragraph that wraps within itself; never split one entry across
+multiple paragraphs or continuation lines, and never start a paragraph without its own `[N]`.
+The references slide contains only its
+`參考資料` title and these numbered entries: add no captions, notes, summaries, or
+explanatory sentences. For a retained block without `citation`, use
+`provenance.source` only to select the matching staged filename in `work/sources.json`, then
+use that entry's `display_name` plus any reliable provenance locator; use the allowlisted
+name alone only when no reliable locator exists. The required references slide must be
+derived from the frozen evidence: never fabricate a bibliography entry or add a pipeline
+explanation to the cover. Never expose an XML path or invent a page, section, publisher,
+date, or office.
 
-Keep simple charts editable. For combination or dual-axis charts, dense labels, heatmaps,
+Every chart must carry a descriptive title naming what it shows, with units on the relevant
+axis label. The title belongs on the chart object itself, not on a slide heading placed above
+it: for PptxGenJS, pass `showTitle: true` and `title` in the chart's own options so the title
+is part of the chart, not just nearby text. Keep simple charts editable. For combination or dual-axis charts, dense labels, heatmaps,
 or a native chart that still renders incorrectly after one correction, create a data-rendered
 PNG from exact evidence values with the bundled chart-image script and add that image alone.
-Keep all surrounding text and citations editable, and put chart values, units, and calculation
-notes in speaker notes.
+Keep all surrounding text and citations editable. Do not create or write speaker notes; the
+delivered PPTX must contain no `ppt/notesSlides/` parts. Never re-serialize PPTX package XML
+with `ElementTree` or any tool that invents its own namespace prefixes, and never hand-edit
+`[Content_Types].xml`, `ppt/presentation.xml`, or any other package part directly -- the
+backend runs deterministic package cleanup after every attempt, so you never need to touch
+package internals yourself.
 
 If template/ contains a PPTX, use it as the visual basis.
 Assume network access and package installation are unavailable.
@@ -77,6 +154,9 @@ author artifacts:
 
 The backend independently generates work/rendered/final/*.png for validation and semantic review.
 """
+    if outline is not None:
+        prompt += _outline_instructions(outline, request.slides_count)
+    return prompt
 
 
 def build_job_environment(backend_root: Path = BACKEND_ROOT, *, fontconfig_file: Path | None = None, cjk_font: str | None = None) -> dict[str, str]:

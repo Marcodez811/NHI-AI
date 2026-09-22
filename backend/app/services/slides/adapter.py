@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from app.config import settings
-from app.models.slides import JobStatus, SlidesTaskPayload, SlidesTaskResult
+from app.models.slides import JobStatus, SlideOutline, SlidesTaskPayload, SlidesTaskResult
 from app.services.agentic.contracts import (
+    AgentExecutionResult,
     AgentReasoningEffort,
     BaseWorkflowAdapter,
     DeterministicValidationError,
@@ -29,6 +30,7 @@ from app.services.agentic.contracts import (
 from app.services.virtual_fs import SharedVolumeDocumentResolver
 
 from .artifacts import (
+    clean_candidate_deck,
     cleanup_job,
     create_job_fontconfig,
     create_job_workspace,
@@ -40,9 +42,29 @@ from .artifacts import (
 )
 from .contracts import JobError
 from .runtime import build_job_environment, build_prompt
+from .source_manifest import SourceManifestError, load_source_manifest, write_source_manifest
 
 
 _VALIDATION_ORIGINS = frozenset({"candidate", "infrastructure"})
+
+
+async def _document_display_names(document_ids: list[UUID]) -> list[str]:
+    """Resolve catalog names at execution time without putting IDs in artifacts."""
+
+    from sqlmodel import Session
+
+    from app.db import engine
+    from app.services.documents.repository import SQLModelDocumentRepository
+
+    display_names: list[str] = []
+    with Session(engine) as session:
+        repository = SQLModelDocumentRepository(session)
+        for document_id in document_ids:
+            document = await repository.get_document(document_id)
+            if document is None or not document.display_name.strip():
+                raise JobError("inputs", "source document metadata is unavailable")
+            display_names.append(document.display_name)
+    return display_names
 
 
 def _validation_finding_payload(finding: Any) -> dict[str, Any]:
@@ -88,6 +110,7 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
     author_skills = ("pptx-nhi-tw",)
     reviewer_skills = ("semantic-slide-review",)
     independent_semantic_review = True
+    preserve_revision_feedback_history = True
     stage_isolation = True
     input_type = SlidesTaskPayload
     output_type = SlidesTaskResult
@@ -116,47 +139,49 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
     def extraction_reasoning_effort(self) -> AgentReasoningEffort:
         return settings.agent_extraction_reasoning_effort or settings.agent_default_reasoning_effort
 
-    # The parser below remains authoritative so malformed provider responses
-    # fail closed even when an older SDK ignores output_schema.
-    review_output_schema = {
-        "type": "object",
-        "required": ["findings", "summary"],
-        "properties": {
-            "summary": {"type": "string"},
-            "findings": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": ["severity", "category", "slide_number", "claim", "judgement", "evidence_refs", "reason", "correction"],
-                    "properties": {
-                        "severity": {"type": "string", "enum": ["blocking", "advisory"]},
-                        "category": {
-                            "type": "string",
-                            "enum": [
-                                "unsupported_claim",
-                                "contradicted_claim",
-                                "misleading_synthesis",
-                                "material_omission",
-                                "unreadable_claim",
-                                "other",
-                            ],
-                        },
-                        "slide_number": {"type": ["integer", "null"], "minimum": 1},
-                        "claim": {"type": "string"},
-                        "judgement": {
-                            "type": "string",
-                            "enum": ["supported", "unsupported", "contradicted", "misleading", "unclear"],
-                        },
-                        "evidence_refs": {"type": "array", "items": {"type": "string"}},
-                        "reason": {"type": "string"},
-                        "correction": {"type": "string"},
-                    },
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "additionalProperties": False,
-    }
+    @property
+    def extraction_runner(self) -> str:
+        # docs/agents-sdk-migration-plan.md Stage 1: the extraction node's
+        # runner is a per-node configuration choice, not a deploy. Defaults to
+        # "codex" through the setting itself.
+        return settings.agent_extraction_runner
+
+    @property
+    def reviewer_runner(self) -> str:
+        # Stage 2: same seam as ``extraction_runner``, for the reviewer node.
+        # The reviewer requests ``output_type=ReviewOutcome`` regardless of
+        # which runner this resolves to (app/services/agentic/service.py);
+        # both runners hand the coordinator an already-validated outcome.
+        return settings.agent_reviewer_runner
+
+    # Stage 5 (docs/agents-sdk-migration-plan.md): declaring a non-empty
+    # ``planner_role`` is what opts this workflow into the planning phase --
+    # ``_execute_workflow`` gates on it exactly the way it gates extraction on
+    # ``extraction_skills``. Unlike extraction/reviewer runner selection, this
+    # gate guards a whole new pause in the pipeline, not just which provider
+    # runs an existing one, so it defaults *off*: ``settings.agent_planner_enabled``
+    # keeps every existing slides job completing exactly as it does today until an
+    # operator opts in by configuration, matching this migration's "flip by
+    # config, not by deploy" pattern (Stage 0).
+    planner_output_type = SlideOutline
+
+    @property
+    def planner_role(self) -> str | None:
+        return "presentation_planner" if settings.agent_planner_enabled else None
+
+    @property
+    def planner_model(self) -> str:
+        return settings.agent_planner_model or settings.agent_default_model
+
+    @property
+    def planner_reasoning_effort(self) -> AgentReasoningEffort:
+        return settings.agent_planner_reasoning_effort or settings.agent_default_reasoning_effort
+
+    @property
+    def planner_runner(self) -> str:
+        # Same per-node runner seam as extraction/reviewer; defaults to
+        # "codex" through the setting itself.
+        return settings.agent_planner_runner
 
     @property
     def max_author_attempts(self) -> int:
@@ -189,19 +214,77 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
         )
 
     async def prepare_input(self, value: SlidesTaskPayload, workspace: Path) -> None:
-        source_paths = await SharedVolumeDocumentResolver(settings.documents_root).resolve_many(value.document_ids)
-        validated = await asyncio.to_thread(validate_source_paths, source_paths)
         context_path = workspace / "work" / "slide_context.json"
         context_exists = await asyncio.to_thread(context_path.exists)
         context_text = await asyncio.to_thread(context_path.read_text, encoding="utf-8") if context_exists else None
         context = json.loads(context_text) if context_text else {}
+        display_names = await _document_display_names(value.document_ids)
+        sources_path = workspace / "work" / "sources.json"
+        evidence_exists = await asyncio.to_thread((workspace / "work" / "evidence.json").is_file)
+        sources_exist = await asyncio.to_thread(sources_path.exists)
+
+        # Resuming after outline approval must use the already-frozen evidence.
+        # The originals may legitimately have been removed during a long human
+        # review, and reopening them would make the resumed author depend on a
+        # different input boundary from the planner it is following.
+        if evidence_exists:
+            if not sources_exist:
+                raise JobError("inputs", "source name manifest is unavailable")
+            try:
+                existing_sources = await asyncio.to_thread(load_source_manifest, sources_path)
+                staged_names = [source.staged_filename for source in existing_sources]
+                if len(staged_names) != len(display_names):
+                    raise SourceManifestError("source manifest does not match the job inputs")
+                await asyncio.to_thread(
+                    write_source_manifest,
+                    sources_path,
+                    staged_names,
+                    display_names,
+                )
+            except SourceManifestError as exc:
+                raise JobError("inputs", "source name manifest is unavailable") from exc
+            context["staged_names"] = staged_names
+            await asyncio.to_thread(
+                context_path.write_text,
+                json.dumps(context, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            return
+
+        source_paths = await SharedVolumeDocumentResolver(settings.documents_root).resolve_many(value.document_ids)
+        validated = await asyncio.to_thread(validate_source_paths, source_paths)
         fontconfig = Path(context["fontconfig"]) if context.get("fontconfig") else None
         font = await asyncio.to_thread(
             preflight,
             validated,
             environment=build_job_environment(fontconfig_file=fontconfig),
         )
-        staged_names = await asyncio.to_thread(stage_uploads, workspace, validated)
+        if sources_exist:
+            try:
+                existing_sources = await asyncio.to_thread(load_source_manifest, sources_path)
+            except SourceManifestError as exc:
+                raise JobError("inputs", "source name manifest is unavailable") from exc
+            staged_names = [source.staged_filename for source in existing_sources]
+            if len(staged_names) != len(validated):
+                raise JobError("inputs", "source name manifest does not match the job inputs")
+            staged_files_exist = all(
+                (workspace / "input" / name).is_file()
+                and not (workspace / "input" / name).is_symlink()
+                for name in staged_names
+            )
+            if not staged_files_exist:
+                raise JobError("inputs", "staged source files are unavailable")
+        else:
+            staged_names = await asyncio.to_thread(stage_uploads, workspace, validated)
+        try:
+            await asyncio.to_thread(
+                write_source_manifest,
+                sources_path,
+                staged_names,
+                display_names,
+            )
+        except SourceManifestError as exc:
+            raise JobError("inputs", "source name manifest could not be prepared") from exc
         context.update({
             "staged_names": staged_names,
             "source_paths": [str(path) for path in validated],
@@ -233,11 +316,25 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
 
         if stage == "extraction":
             return (workspace / "input",)
+        if stage == "planner":
+            # Read-only, exactly like the author: the planner sees the frozen
+            # evidence through the sandbox filesystem grant, never inlined into
+            # its prompt, so it and the author are grounded in byte-identical
+            # evidence (docs/agents-sdk-migration-plan.md, Stage 5 decision).
+            return (
+                workspace / "work" / "evidence.json",
+                workspace / "work" / "sources.json",
+            )
         if stage == "author":
             return (
                 workspace / "work" / "evidence.json",
+                workspace / "work" / "sources.json",
                 workspace / "work" / "extracted" / "assets",
                 workspace / "template",
+                # The human-approved outline (Stage 5); absent on a run whose
+                # workflow never declares a planner, so this grant is a no-op
+                # for those workflows.
+                workspace / "work" / "outline.json",
             )
         if stage == "reviewer":
             return (
@@ -258,6 +355,7 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
                 workspace / "work" / "rendered" / "preview",
                 workspace / "work" / "rendered" / "preview-pdf",
                 workspace / "work" / "images",
+                workspace / "work" / "outline_mapping.json",
             )
         return ()
 
@@ -288,6 +386,72 @@ the frozen `work/evidence.json` store after this activation.
         except EvidenceError as exc:
             raise JobError("extraction", "extraction artifacts could not be consolidated") from exc
 
+    async def build_planning_prompt(self, value: SlidesTaskPayload, workspace: Path) -> str:
+        del workspace
+        return f"""# Planning stage
+
+Propose a structured outline for a presentation grounded entirely in the frozen
+EvidenceStore at `work/evidence.json` (already mounted read-only; you cannot write to it
+or to any other workspace path from this stage). Do not draft slide content or write any
+file -- return only the structured outline.
+
+`work/sources.json` is the authoritative mapping from staged evidence filenames to the
+knowledge-base names users recognize. Whenever a `key_point` names a source, use only its
+`display_name` from that file; never expose a staged filename, collision suffix, hash, or
+derived document title.
+
+## Brief
+- Title: {value.title}
+- Tone: {value.tone}
+- Target length: {value.slides_count} content slides. `SlideOutline.total_slides` and the
+  sum of `approx_slides` describe only those content slides; the author adds a final
+  `參考資料` slide outside the outline.
+- Additional guidance: {value.guidance}
+
+Organize the presentation into sections, not per-slide breakdowns: each node needs a
+`heading`, an `intent` describing what it must accomplish, 2-5 evidence-grounded
+`key_points`, and `evidence_refs` -- ids copied verbatim from `work/evidence.json` blocks.
+An id that does not exist in that store will be rejected before a human ever reviews this
+outline. Set `emphasis` (light/normal/deep) to reflect how much author attention each
+section deserves relative to the others, and `approx_slides` as a realistic hint whose sum
+lands near the requested {value.slides_count} content slides. Do not add a references node;
+the final references slide is deck furniture. Resolve conflicting evidence explicitly
+rather than presenting both sides unreconciled.
+"""
+
+    async def post_planning(self, value: SlidesTaskPayload, result: AgentExecutionResult, workspace: Path) -> None:
+        """Validate and persist the planner's proposal as durable revision 1.
+
+        The generic coordinator only knows a planning activation finished with
+        some result; turning its typed ``SlideOutline`` into a `slide_outlines`
+        row -- and rejecting one that cites evidence the extractor never
+        produced -- is slides-specific policy, so it lives here rather than in
+        ``app/services/agentic/service.py``.
+        """
+
+        from sqlmodel import Session
+
+        from app.db import engine
+
+        from .evidence import EvidenceError, validate_outline_evidence_references
+        from .outline_repository import SQLModelSlideOutlineRepository
+
+        outline = result.output
+        if not isinstance(outline, SlideOutline):
+            raise JobError("planning", "planner did not return a structured outline")
+        try:
+            validate_outline_evidence_references(outline, workspace / "work" / "evidence.json")
+        except EvidenceError as exc:
+            raise JobError("planning", "outline referenced evidence the extractor never produced") from exc
+
+        # ``create_next_revision`` is an ``async def`` that does synchronous
+        # SQLModel work internally, awaited directly rather than offloaded to a
+        # thread -- the same pattern ``app/tasks/agents.py`` already uses for
+        # every other durable-row write on this workflow's boundary.
+        with Session(engine) as session:
+            repository = SQLModelSlideOutlineRepository(session)
+            await repository.create_next_revision(value.job_id, outline, session_id=str(value.job_id))
+
     async def semantic_review_context(self, value: SlidesTaskPayload, workspace: Path) -> Any:
         return {
             "requested_title": value.title,
@@ -304,28 +468,53 @@ the frozen `work/evidence.json` store after this activation.
             ],
         }
 
-    async def build_prompt(self, value: SlidesTaskPayload, workspace: Path, *, semantic_review_context: Any = None, revision_feedback: str | None = None) -> str:
+    async def build_prompt(
+        self,
+        value: SlidesTaskPayload,
+        workspace: Path,
+        *,
+        semantic_review_context: Any = None,
+        revision_feedback: str | None = None,
+        prior_revision_feedback: tuple[str, ...] = (),
+    ) -> str:
         context_path = workspace / "work" / "slide_context.json"
         context = json.loads(await asyncio.to_thread(context_path.read_text, encoding="utf-8"))
-        prompt = build_prompt(value, context.get("staged_names", []), font_family=context.get("font"))
+        outline_path = workspace / "work" / "outline.json"
+        outline: SlideOutline | None = None
+        if await asyncio.to_thread(outline_path.is_file):
+            outline_text = await asyncio.to_thread(outline_path.read_text, encoding="utf-8")
+            outline = SlideOutline.model_validate(json.loads(outline_text))
+        prompt = build_prompt(value, context.get("staged_names", []), font_family=context.get("font"), outline=outline)
         if revision_feedback:
             prompt += (
                 "\n\n## Corrective revision instructions\n"
                 "This is a corrective revision, not a regeneration. The workspace already contains "
                 "the previous candidate presentation and its deterministic validation artifacts. Modify the "
                 "existing presentation and affected artifacts in place. Preserve the requested "
-                f"title exactly as `{value.title}` and the requested slide count of {value.slides_count}; "
+                f"title exactly as `{value.title}`, the requested {value.slides_count} content slides, "
+                "and the final `參考資料` slide; "
                 "do not redesign or rewrite unaffected slides.\n"
                 "Address every blocking finding below. After changes, regenerate affected preview renders, "
                 "then stop; the backend validator owns content_check.json and deck_snapshot.json. "
                 "The frozen evidence.json and work/extracted/ tree are read-only and authoritative. "
-                "Preserve or repair audience-facing source footers and speaker-note references; never add "
-                "EvidenceStore names, paths, hashes, or block IDs to the delivered presentation. "
+                "Preserve or repair audience-facing source footers and the numbered final references slide "
+                "using only knowledge-base display names "
+                "from the read-only work/sources.json mapping, and remove any speaker notes. Never add "
+                "staged filenames, collision suffixes, derived document titles, EvidenceStore names, "
+                "paths, hashes, or block IDs to the delivered presentation. "
                 "Before finishing, verify each blocking finding individually "
-                "and state which slide or artifact change resolves it.\n\n"
-                "## Blocking review findings to correct\n"
-                + revision_feedback
+                "and state which slide or artifact change resolves it.\n"
             )
+            if prior_revision_feedback:
+                prompt += (
+                    "\n## Earlier blocking findings whose fixes must be preserved\n"
+                    "These findings came from earlier author attempts. They may already be fixed; "
+                    "do not undo those fixes while addressing the latest feedback. Check the current "
+                    "deck against each one before finishing, and repair any that has recurred.\n\n"
+                    + "\n\n".join(prior_revision_feedback)
+                    + "\n"
+                )
+            prompt += "\n## Latest blocking findings to correct\n" + revision_feedback
         # Preserve the job-local brief used by the original slide runtime;
         # this is also useful when diagnosing a retained failed workspace.
         await asyncio.to_thread((workspace / "work" / "prompt.md").write_text, prompt, encoding="utf-8")
@@ -348,6 +537,11 @@ the frozen `work/evidence.json` store after this activation.
             "responses, review history, author prompts, or hidden workspace files. "
             f"The authoritative requested presentation title is `{requested_title}`; do not classify "
             "that exact requested title as template/test residue solely because it looks unusual.\n"
+            "The `requested_slide_count` in Review inputs counts content slides only; the deck correctly "
+            "ends with one additional final `參考資料` references slide, so the correct total is "
+            "`requested_slide_count + 1` slides. Never raise a finding about the number of slides or the "
+            "deck's overall length -- slide count and deck structure are the deterministic validator's job, "
+            "not yours.\n"
             "Return ONLY valid JSON with exactly these top-level fields: summary (string), "
             "findings (array). Every finding must include severity (blocking or advisory), category, "
             "slide_number (integer or null), claim, judgement, evidence_refs (array of evidence IDs), "
@@ -358,16 +552,46 @@ the frozen `work/evidence.json` store after this activation.
             "Every factual claim must be supported by one or more evidence_refs. For a contradiction, "
             "identify the correct value in reason and provide a concrete correction. "
             "Review citations as part of factual quality: factual slides, figures, and charts need a "
-            "recognizable source filename and available section, page, or line locator in the visible "
-            "footer, with expanded references in slide notes. Treat missing or misleading attribution, "
+            "recognizable source filename and available section, page, or line locator in the "
+            "numbered footer, with expanded references on the final references slide. Treat every footer "
+            "and reference entry as an author claim that must match frozen evidence. Treat an unsupported "
+            "or fabricated reference entry as blocking, just like an unsupported slide claim. Treat missing "
+            "or misleading attribution, "
             "internal EvidenceStore/block-ID/path/hash leakage, incorrect image-chart values, or unreadable "
             "image-chart labels as blocking. A retained block may lack derived citation metadata; in that "
             "case accept a conservative filename and available provenance locator. Treat workflow terms as "
             "leakage only when they describe generation or serve as citations, not when the source material "
             "legitimately discusses software, JSON, paths, or hashes. Treat harmless citation-style "
-            "differences as advisory. Speaker notes are author claims that must still match frozen evidence. "
+            "differences as advisory. "
+            "Citation structure -- footer presence, the `[N] 資料來源：` format, knowledge-base source "
+            "names, and numbering agreement between content footers and the references slide -- is "
+            "verified deterministically before your review. Read footer and reference text from "
+            "`work/intermediate/deck_snapshot.json`, which you can already read, not from the final PNG "
+            "renders, since small footer text can blur once an image is downscaled. Never raise a finding "
+            "that a footer is missing, unreadable, or not visible in a rendered image. "
+            "Your job is whether the cited evidence actually supports each claim, and whether a synthesis "
+            "is misleading or omits something material -- for example, a slide that states a figure "
+            "without the year the evidence ties it to. Structural and layout requirements belong to the "
+            "deterministic validator: never request a structural change such as adding or removing "
+            "slides or restructuring how citations are laid out. "
+            "The delivered deck must not use speaker notes. "
             f"Review inputs: {json.dumps(review_context or {}, ensure_ascii=False)}"
         )
+
+    def post_author_completion_check(self, value: SlidesTaskPayload, result: Any, workspace: Path) -> None:
+        """Deterministically clean the candidate package after every author attempt.
+
+        This runs for every attempt (initial and correction), before ``validate_generated``.
+        Package cleanup -- stripping the notes graph, orphaned parts, and stale
+        Content-Type overrides -- was previously left to the author's own ad hoc script,
+        which once re-serialized ``[Content_Types].xml``/``presentation.xml`` with
+        ``xml.etree.ElementTree`` and produced a deck LibreOffice could not open at all.
+        Doing it here, deterministically, with the repository-owned ``clean.py``, removes
+        package surgery from the author's job entirely.
+        """
+
+        del value, result
+        clean_candidate_deck(workspace)
 
     async def validate_generated(self, value: SlidesTaskPayload, workspace: Path) -> None:
         """Run the trusted deterministic validator and expose all findings."""
@@ -396,6 +620,7 @@ the frozen `work/evidence.json` store after this activation.
                 expected_slide_count=value.slides_count,
                 requested_title=value.title,
                 evidence_path=workspace / "work" / "evidence.json",
+                sources_path=workspace / "work" / "sources.json",
             )
         except ValidationInfrastructureError:
             raise
@@ -429,92 +654,6 @@ the frozen `work/evidence.json` store after this activation.
                 findings=rendered,
                 diagnostic_codes=diagnostic_codes,
             )
-
-    def parse_review(
-        self,
-        response: str | None,
-        workspace: Path,
-        previous_review: ReviewOutcome | None = None,
-    ) -> ReviewOutcome:
-        semantic_review_path = workspace / "work" / "intermediate" / "semantic_review.json"
-        semantic_review_path.unlink(missing_ok=True)
-        if not response or not isinstance(response, str):
-            raise ValueError("semantic review response was empty")
-        text = response.strip()
-        fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.IGNORECASE | re.DOTALL)
-        if fence:
-            text = fence.group(1).strip()
-        try:
-            review = json.loads(text)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("semantic review response was malformed") from exc
-        if not isinstance(review, dict) or set(review) != {"summary", "findings"}:
-            raise ValueError("semantic review response was malformed")
-        required_finding_fields = {
-            "severity",
-            "category",
-            "slide_number",
-            "claim",
-            "judgement",
-            "evidence_refs",
-            "reason",
-            "correction",
-        }
-        findings = review.get("findings")
-        if not isinstance(findings, list):
-            raise ValueError("semantic review response was malformed")
-        allowed_categories = {
-            "unsupported_claim",
-            "contradicted_claim",
-            "misleading_synthesis",
-            "material_omission",
-            "unreadable_claim",
-            "other",
-        }
-        for finding in findings:
-            if not isinstance(finding, dict) or set(finding) != required_finding_fields:
-                raise ValueError("semantic review response was malformed")
-            if finding["category"] not in allowed_categories:
-                raise ValueError("semantic review response was malformed")
-            if finding["judgement"] not in {"supported", "unsupported", "contradicted", "misleading", "unclear"}:
-                raise ValueError("semantic review response was malformed")
-            if finding["judgement"] == "contradicted" and not finding["evidence_refs"]:
-                raise ValueError("contradicted findings must cite evidence")
-        try:
-            # Parse types before applying cross-artifact checks. This turns a
-            # wrong provider type into a controlled schema failure instead of
-            # leaking a comparison TypeError from the coordinator.
-            outcome = ReviewOutcome.model_validate(review)
-        except Exception as exc:
-            raise ValueError("semantic review response was malformed") from exc
-        evidence_path = workspace / "work" / "evidence.json"
-        snapshot_path = workspace / "work" / "intermediate" / "deck_snapshot.json"
-        try:
-            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            slide_count = snapshot.get("slide_count")
-            if not isinstance(slide_count, int) or slide_count < 1:
-                raise ValueError
-            evidence_ids = {
-                str(item.get("id"))
-                for key in ("blocks", "assets")
-                for item in evidence.get(key, [])
-                if isinstance(item, dict) and item.get("id")
-            }
-        except (OSError, TypeError, ValueError):
-            raise ValueError("semantic review inputs were missing or malformed")
-        if any(
-            item.slide_number is not None and item.slide_number > slide_count
-            for item in outcome.findings
-        ):
-            raise ValueError("semantic review referenced an unknown slide")
-        if any(ref not in evidence_ids for item in outcome.findings for ref in item.evidence_refs):
-            raise ValueError("semantic review referenced unknown evidence")
-        semantic_review_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = semantic_review_path.with_suffix(".json.tmp")
-        temporary_path.write_text(outcome.model_dump_json(indent=2) + "\n", encoding="utf-8")
-        temporary_path.replace(semantic_review_path)
-        return outcome
 
     def revision_feedback(self, value: SlidesTaskPayload, review: ReviewOutcome, result: Any) -> str:
         del value, result

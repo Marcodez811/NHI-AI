@@ -121,26 +121,110 @@ describe("useSlideJob", () => {
         expect(result.current.phaseHistory).toEqual(["queued", "reviewing", "revising"]);
     });
 
-    it("resumes an active job from session storage after mount", async () => {
-        window.sessionStorage.setItem("nhi-ai:active-slide-job-id", "job-resume");
+    it("loads the URL-owned job id and ignores the former single-slot storage key", async () => {
+        window.sessionStorage.setItem("nhi-ai:active-slide-job-id", "job-stale");
         vi.mocked(api.getSlideJob).mockResolvedValueOnce(
-            job({ job_id: "job-resume", phase: "reviewing", stage: "reviewing" }),
+            job({ job_id: "job-route", phase: "reviewing", stage: "reviewing" }),
         );
 
         const { result } = renderHook(() =>
-            useSlideJob({ pollIntervalMs: 250, maxPollIntervalMs: 500 }),
+            useSlideJob({ jobId: "job-route", pollIntervalMs: 250, maxPollIntervalMs: 500 }),
         );
 
         await act(async () => {
             await Promise.resolve();
             await Promise.resolve();
         });
-        expect(result.current.job?.job_id).toBe("job-resume");
+        expect(result.current.job?.job_id).toBe("job-route");
         expect(api.getSlideJob).toHaveBeenCalledWith(
-            "job-resume",
+            "job-route",
             expect.objectContaining({ signal: expect.any(AbortSignal) }),
         );
         expect(result.current.phaseHistory).toContain("reviewing");
+        expect(window.sessionStorage.getItem("nhi-ai:active-slide-job-id")).toBe("job-stale");
+    });
+
+    it("persists phase history per job id so a revision count survives a refresh", async () => {
+        vi.mocked(api.getSlideJob).mockResolvedValueOnce(
+            job({ job_id: "job-route", phase: "revising", stage: "revising" }),
+        );
+        const first = renderHook(() =>
+            useSlideJob({ jobId: "job-route", pollIntervalMs: 250, maxPollIntervalMs: 500 }),
+        );
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(first.result.current.phaseHistory).toContain("revising");
+        first.unmount();
+
+        // A fresh hook instance for the same URL-owned job id, as a refresh
+        // would create, must recover that history before its own first poll
+        // resolves — not a separate "active job" slot, only this job's own.
+        vi.mocked(api.getSlideJob).mockImplementationOnce(() => new Promise(() => {}));
+        const second = renderHook(() =>
+            useSlideJob({ jobId: "job-route", pollIntervalMs: 250, maxPollIntervalMs: 500 }),
+        );
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(second.result.current.phaseHistory).toContain("revising");
+    });
+
+    it("does not persist a newly created slide job as a competing job selector", async () => {
+        const { result } = renderHook(() => useSlideJob());
+
+        await act(async () => {
+            await result.current.startJob(payload);
+        });
+
+        expect(result.current.job?.job_id).toBe("job-1");
+        expect(window.sessionStorage.getItem("nhi-ai:active-slide-job-id")).toBeNull();
+    });
+
+    it("parks polling while an outline awaits human review", async () => {
+        vi.mocked(api.getSlideJob).mockResolvedValue(
+            job({ status: "awaiting_input", phase: "awaiting_outline", stage: "awaiting_outline" }),
+        );
+        const { result } = renderHook(() => useSlideJob({ pollIntervalMs: 250 }));
+
+        await act(async () => {
+            await result.current.startJob(payload);
+            await vi.advanceTimersByTimeAsync(250);
+        });
+        expect(result.current.phase).toBe("awaiting_outline");
+        expect(result.current.polling).toBe(false);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(api.getSlideJob).toHaveBeenCalledTimes(1);
+    });
+
+    it("resumes polling after outline approval and leaves the parked phase", async () => {
+        vi.mocked(api.getSlideJob)
+            .mockResolvedValueOnce(
+                job({ status: "awaiting_input", phase: "awaiting_outline", stage: "awaiting_outline" }),
+            )
+            .mockResolvedValueOnce(
+                job({ status: "awaiting_input", phase: "awaiting_outline", stage: "awaiting_outline" }),
+            )
+            .mockResolvedValueOnce(job({ phase: "drafting", stage: "drafting" }));
+        const { result } = renderHook(() => useSlideJob({ pollIntervalMs: 250 }));
+
+        await act(async () => {
+            await result.current.startJob(payload);
+            await vi.advanceTimersByTimeAsync(250);
+        });
+        expect(result.current.phase).toBe("awaiting_outline");
+
+        act(() => result.current.resumePolling());
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(500);
+        });
+
+        expect(result.current.phase).toBe("polling");
+        expect(result.current.job?.phase).toBe("drafting");
+        expect(api.getSlideJob).toHaveBeenCalledTimes(3);
     });
 
     it("stops as expired for a missing job and surfaces terminal backend errors", async () => {

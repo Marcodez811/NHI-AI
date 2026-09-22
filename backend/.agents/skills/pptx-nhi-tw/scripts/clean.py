@@ -1,9 +1,9 @@
-"""Remove unreferenced files from an unpacked PPTX directory.
+"""Remove unreferenced files and speaker notes from a PPTX package.
 
-Usage: python clean.py <unpacked_dir>
+Usage: python clean.py <presentation.pptx|unpacked_dir>
 
 Example:
-    python clean.py unpacked/
+    python clean.py output/presentation.pptx
 
 This script removes:
 - Orphaned slides (not in sldIdLst) and their relationships
@@ -11,18 +11,27 @@ This script removes:
 - Orphaned .rels files for deleted resources
 - Unreferenced media, embeddings, charts, diagrams, drawings, ink files
 - Unreferenced theme files
-- Unreferenced notes slides
+- All speaker-note slides and masters
 - Content-Type overrides for deleted files
 """
 
+from __future__ import annotations
+
+import os
 import posixpath
 import re
+import stat
 import sys
-from pathlib import Path
+import tempfile
+import zipfile
+from pathlib import Path, PurePosixPath
 
 import defusedxml.minidom
 
 from office.helpers import SLIDE_REL_TYPE, opc_target, rels_source_part
+
+
+NOTES_RELATIONSHIP_SUFFIXES = ("/notesSlide", "/notesMaster")
 
 
 def _slide_rids(pres_rels_path: Path, unpacked_dir: Path) -> dict[str, str]:
@@ -176,6 +185,52 @@ def remove_orphaned_rels_files(unpacked_dir: Path) -> list[str]:
     return removed
 
 
+def _remove_notes_relationships(rels_path: Path) -> None:
+    """Remove only notes relationships while preserving every other edge."""
+
+    dom = defusedxml.minidom.parse(str(rels_path))
+    changed = False
+    for relationship in list(dom.getElementsByTagName("Relationship")):
+        if relationship.getAttribute("Type").endswith(NOTES_RELATIONSHIP_SUFFIXES):
+            if relationship.parentNode:
+                relationship.parentNode.removeChild(relationship)
+                changed = True
+    if changed:
+        rels_path.write_bytes(dom.toxml(encoding="utf-8"))
+
+
+def remove_speaker_notes(unpacked_dir: Path) -> list[str]:
+    """Remove the complete notes graph emitted by PowerPoint generators."""
+
+    for rels_path in sorted((unpacked_dir / "ppt").rglob("*.rels")):
+        _remove_notes_relationships(rels_path)
+
+    presentation_path = unpacked_dir / "ppt" / "presentation.xml"
+    if presentation_path.is_file():
+        dom = defusedxml.minidom.parse(str(presentation_path))
+        changed = False
+        for node in list(dom.getElementsByTagName("p:notesMasterIdLst")):
+            if node.parentNode:
+                node.parentNode.removeChild(node)
+                changed = True
+        if changed:
+            presentation_path.write_bytes(dom.toxml(encoding="utf-8"))
+
+    removed: list[str] = []
+    for directory_name in ("notesSlides", "notesMasters"):
+        directory = unpacked_dir / "ppt" / directory_name
+        if not directory.exists():
+            continue
+        for path in sorted(directory.rglob("*"), reverse=True):
+            if path.is_file():
+                removed.append(path.relative_to(unpacked_dir).as_posix())
+                path.unlink()
+            elif path.is_dir():
+                path.rmdir()
+        directory.rmdir()
+    return removed
+
+
 def get_referenced_files(unpacked_dir: Path) -> set:
     return _referenced_by(sorted(unpacked_dir.rglob("*.rels")), unpacked_dir)
 
@@ -262,6 +317,9 @@ def clean_unused_files(unpacked_dir: Path) -> list[str]:
     slides_removed = remove_orphaned_slides(unpacked_dir)
     all_removed.extend(slides_removed)
 
+    notes_removed = remove_speaker_notes(unpacked_dir)
+    all_removed.extend(notes_removed)
+
     trash_removed = remove_trash_directory(unpacked_dir)
     all_removed.extend(trash_removed)
 
@@ -282,28 +340,79 @@ def clean_unused_files(unpacked_dir: Path) -> list[str]:
     return all_removed
 
 
+def _validate_archive_members(archive: zipfile.ZipFile) -> None:
+    names = archive.namelist()
+    if len(names) != len(set(names)):
+        raise RefusedToClean("PPTX contains duplicate ZIP member names")
+    for name in names:
+        member = PurePosixPath(name)
+        if name.startswith(("/", "\\")) or "\\" in name or ".." in member.parts:
+            raise RefusedToClean(f"unsafe PPTX member path: {name}")
+
+
+def clean_presentation(presentation_path: Path) -> list[str]:
+    """Clean an archive in a temporary tree and replace it atomically."""
+
+    original_mode = stat.S_IMODE(presentation_path.stat().st_mode)
+    with tempfile.TemporaryDirectory(prefix="pptx_clean_") as temporary:
+        unpacked_dir = Path(temporary) / "unpacked"
+        unpacked_dir.mkdir()
+        try:
+            with zipfile.ZipFile(presentation_path) as archive:
+                _validate_archive_members(archive)
+                archive.extractall(unpacked_dir)
+        except zipfile.BadZipFile as exc:
+            raise RefusedToClean("presentation is not a valid PPTX/ZIP") from exc
+
+        removed = clean_unused_files(unpacked_dir)
+        if not removed:
+            return []
+
+        descriptor, replacement_name = tempfile.mkstemp(
+            prefix=f".{presentation_path.name}.",
+            suffix=".tmp",
+            dir=presentation_path.parent,
+        )
+        os.close(descriptor)
+        replacement_path = Path(replacement_name)
+        try:
+            with zipfile.ZipFile(
+                replacement_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as archive:
+                for path in sorted(unpacked_dir.rglob("*")):
+                    if path.is_file():
+                        archive.write(path, path.relative_to(unpacked_dir).as_posix())
+            replacement_path.chmod(original_mode)
+            os.replace(replacement_path, presentation_path)
+        finally:
+            replacement_path.unlink(missing_ok=True)
+    return removed
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python clean.py <unpacked_dir>", file=sys.stderr)
-        print("Example: python clean.py unpacked/", file=sys.stderr)
+        print("Usage: python clean.py <presentation.pptx|unpacked_dir>", file=sys.stderr)
+        print("Example: python clean.py output/presentation.pptx", file=sys.stderr)
         sys.exit(1)
 
-    unpacked_dir = Path(sys.argv[1])
+    target = Path(sys.argv[1])
 
-    if not unpacked_dir.exists():
-        print(f"Error: {unpacked_dir} not found", file=sys.stderr)
+    if not target.exists():
+        print(f"Error: {target} not found", file=sys.stderr)
         sys.exit(1)
 
     try:
-        removed = clean_unused_files(unpacked_dir)
-    except (RefusedToClean, ValueError) as e:
-        print(f"Error: {e}", file=sys.stderr)
+        removed = clean_unused_files(target) if target.is_dir() else clean_presentation(target)
+    except (OSError, RefusedToClean, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         print("Nothing was deleted.", file=sys.stderr)
         sys.exit(1)
 
     if removed:
-        print(f"Removed {len(removed)} unreferenced files:")
-        for f in removed:
-            print(f"  {f}")
+        print(f"Removed {len(removed)} files:")
+        for filename in removed:
+            print(f"  {filename}")
     else:
         print("No unreferenced files found")

@@ -31,6 +31,13 @@ class Settings(BaseSettings):
         min_length=1,
         validation_alias=AliasChoices("AGENT_EXTRACTION_MODEL"),
     )
+    # Stage 5 (docs/agents-sdk-migration-plan.md): the planner node's model policy
+    # follows the same per-node override pattern as extraction/author/reviewer.
+    agent_planner_model: str | None = Field(
+        default=None,
+        min_length=1,
+        validation_alias=AliasChoices("AGENT_PLANNER_MODEL"),
+    )
     agent_default_reasoning_effort: AgentReasoningEffort = Field(
         default=AgentReasoningEffort.HIGH,
         validation_alias=AliasChoices("AGENT_DEFAULT_REASONING_EFFORT"),
@@ -46,6 +53,10 @@ class Settings(BaseSettings):
     agent_extraction_reasoning_effort: AgentReasoningEffort | None = Field(
         default=None,
         validation_alias=AliasChoices("AGENT_EXTRACTION_REASONING_EFFORT"),
+    )
+    agent_planner_reasoning_effort: AgentReasoningEffort | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AGENT_PLANNER_REASONING_EFFORT"),
     )
     openai_chat_model: str = "gpt-5.6-luna"
     openai_vector_store_id: str | None = None
@@ -104,6 +115,54 @@ class Settings(BaseSettings):
     agent_require_process_isolation: bool = Field(
         default=True,
         validation_alias=AliasChoices("AGENT_REQUIRE_PROCESS_ISOLATION"),
+    )
+    # Runner selection per node (docs/agents-sdk-migration-plan.md, Stage 0). Each
+    # defaults to "codex" so registering "agents" in the runner allowlist is a no-op
+    # until an operator flips one of these by configuration rather than by deploy.
+    agent_extraction_runner: str = Field(
+        default="codex",
+        min_length=1,
+        validation_alias=AliasChoices("AGENT_EXTRACTION_RUNNER"),
+    )
+    agent_author_runner: str = Field(
+        default="codex",
+        min_length=1,
+        validation_alias=AliasChoices("AGENT_AUTHOR_RUNNER"),
+    )
+    agent_reviewer_runner: str = Field(
+        default="codex",
+        min_length=1,
+        validation_alias=AliasChoices("AGENT_REVIEWER_RUNNER"),
+    )
+    agent_planner_runner: str = Field(
+        default="codex",
+        min_length=1,
+        validation_alias=AliasChoices("AGENT_PLANNER_RUNNER"),
+    )
+    # Stage 5 inserts a new human-in-the-loop pause into the slides pipeline,
+    # not just a runner choice for an existing stage, so it defaults off: every
+    # slides job completes exactly as it does today until an operator opts in.
+    agent_planner_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("AGENT_PLANNER_ENABLED"),
+    )
+    # Risk 3 (docs/agents-sdk-migration-plan.md, Stage 5b): a job parked in
+    # AWAITING_INPUT holds its workspace under ``agent_jobs_root`` until a human
+    # approves or rejects the outline. Seven days covers a full review cycle,
+    # including a weekend, without leaking workspace disk indefinitely for an
+    # outline nobody is coming back to.
+    agent_awaiting_outline_ttl_seconds: int = Field(
+        default=604_800,
+        gt=0,
+        validation_alias=AliasChoices("AGENT_AWAITING_OUTLINE_TTL_SECONDS"),
+    )
+    # Sweep cadence is independent of the TTL above so expiry granularity can
+    # be tuned without changing how long a human is given to respond. Hourly
+    # matches the coarse granularity a multi-day TTL needs.
+    agent_awaiting_outline_sweep_interval_seconds: int = Field(
+        default=3_600,
+        gt=0,
+        validation_alias=AliasChoices("AGENT_AWAITING_OUTLINE_SWEEP_INTERVAL_SECONDS"),
     )
     # Agent telemetry is short-lived diagnostic data, not workflow history.
     agent_event_retention_seconds: int = Field(

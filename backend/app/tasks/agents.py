@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import re
 import socket
 from typing import Any
+from uuid import UUID
 
 import redis.asyncio as redis
-from sqlmodel import Session
+from sqlmodel import Session, select
 from loguru import logger
 
 from taskiq.depends.progress_tracker import TaskProgress
@@ -26,13 +27,21 @@ from app.services.agentic.runner import (
     bwrap_available,
     safe_error,
 )
+from app.services.agentic.sdk_runner import AgentsSdkRunner
 from app.services.agentic.events import AgentEventType, AgentTelemetryStore
 from app.services.slides.adapter import slides_adapter  # noqa: F401 - registers the built-in workflow
+from app.services.slides.approval_outbox import dispatch_approval_outbox
+from app.services.slides.artifacts import cleanup_job
 from app.db import engine
-from app.models.slides import JobStatus, SlidesTaskResult
+from app.models.slides import JobStatus, SlideJob, SlidesTaskResult
+from app.services.slides.outline_repository import (
+    SQLModelSlideOutlineRepository,
+    SlideOutlineApprovalOutbox,
+)
 from app.services.slides.repository import SQLModelSlideJobRepository, job_request
 
 _SAFE_STAGE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_OUTBOX_DISPATCH_INTERVAL_SECONDS = 60
 
 # TaskIQ workers do not import the FastAPI application lifespan, so they own a
 # process-level telemetry client. Redis connections are opened lazily by the
@@ -57,17 +66,27 @@ def _build_runner_registry() -> tuple[RunnerRegistry, float | None]:
     if settings.agent_require_process_isolation and not bwrap_available():
         raise RuntimeError("AGENT_REQUIRE_PROCESS_ISOLATION is enabled but bubblewrap is unavailable")
 
+    timeout_seconds = float(getattr(settings, "agent_timeout_minutes", 45)) * 60
     codex_runner = CodexAgentRunner(
         CodexRunner(
             model=settings.agent_default_model,
             reasoning_effort=settings.agent_default_reasoning_effort,
             api_key=settings.openai_api_key,
-            timeout_seconds=float(getattr(settings, "agent_timeout_minutes", 45)) * 60,
+            timeout_seconds=timeout_seconds,
             heartbeat_seconds=settings.agent_heartbeat_seconds,
             require_process_isolation=settings.agent_require_process_isolation,
         ),
     )
-    return RunnerRegistry({"codex": codex_runner}), codex_runner.timeout_seconds
+    # Registered, not selected: every ``agent_*_runner`` setting defaults to
+    # ``"codex"`` (app/config.py), so an adapter only reaches ``AgentsSdkRunner`` through
+    # an explicit configuration change, never by default.
+    agents_sdk_runner = AgentsSdkRunner(
+        model=settings.agent_default_model,
+        reasoning_effort=settings.agent_default_reasoning_effort,
+        timeout_seconds=timeout_seconds,
+        heartbeat_seconds=settings.agent_heartbeat_seconds,
+    )
+    return RunnerRegistry({"codex": codex_runner, "agents": agents_sdk_runner}), codex_runner.timeout_seconds
 
 
 def _now() -> datetime:
@@ -146,6 +165,11 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
                 # lease; keep a duplicate stream delivery from purchasing a
                 # second workflow while the original worker is still active.
                 lease_seconds=max(300, settings.agent_timeout_minutes * 60 + 60),
+                # Only an explicit resume (the outline-approval endpoint
+                # enqueues ``resume_from="author"``) may reclaim a job parked
+                # in AWAITING_INPUT; an ordinary delivery must not silently
+                # resume a workflow a human has not yet approved.
+                allow_resume_from_awaiting_input=payload.resume_from == "author",
             )
             if durable_job is None:
                 slide_db_session.close()
@@ -275,6 +299,51 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
 
     runner_registry, runner_timeout = _build_runner_registry()
     result = await execute_workflow(payload, registry=workflow_registry, runner=runner_registry, workspace_root=Path(getattr(settings, "agent_jobs_root", "/tmp/agentic/jobs")), skills_root=Path(__file__).resolve().parents[2] / ".agents" / "skills", progress_callback=progress, event_callback=telemetry_event, timeout_seconds=runner_timeout)
+
+    if result.status == WorkflowStatus.RUNNING and result.phase == AgentPhase.AWAITING_OUTLINE:
+        # Stage 5 (docs/agents-sdk-migration-plan.md): the planner paused this
+        # workflow for a human decision. This is a deliberate, non-terminal
+        # pause, never a failure -- the worker must never block on a human, so
+        # it releases its lease and returns instead of waiting.
+        message = "Waiting for outline approval."
+        if slide_repository is not None:
+            try:
+                persisted = await slide_repository.pause_for_outline_approval(
+                    payload.job_id,
+                    message=message,
+                    lease_token=slide_lease_token,
+                )
+                if persisted is None:
+                    raise RuntimeError("slide job lease is no longer owned")
+            except Exception:
+                logger.exception("Unable to persist durable slide job outline pause", job_id=job_id)
+                result = AgentTaskResult(
+                    job_id=result.job_id,
+                    workflow=result.workflow,
+                    status=WorkflowStatus.FAILED,
+                    phase=AgentPhase.FAILED,
+                    output=None,
+                    started_at=result.started_at,
+                    finished_at=result.finished_at,
+                    error="Presentation outline could not be persisted.",
+                )
+                await _set_progress(job_id, status=WorkflowStatus.FAILED, stage=AgentPhase.FAILED.value, phase=AgentPhase.FAILED, message=safe_error(result.error, "Agent workflow failed."), started_at=result.started_at, finished_at=result.finished_at)
+                if slide_db_session is not None:
+                    slide_db_session.close()
+                return result
+        await _set_progress(job_id, status=WorkflowStatus.RUNNING, stage=AgentPhase.AWAITING_OUTLINE.value, phase=AgentPhase.AWAITING_OUTLINE, message=message, started_at=result.started_at)
+        await _emit_telemetry(
+            job_id,
+            AgentEventType.PHASE_CHANGED,
+            workflow=payload.workflow,
+            status=WorkflowStatus.RUNNING,
+            phase=AgentPhase.AWAITING_OUTLINE,
+            message=message,
+        )
+        if slide_db_session is not None:
+            slide_db_session.close()
+        return result
+
     terminal_phase = result.phase or (AgentPhase.COMPLETED if result.status == WorkflowStatus.COMPLETED else AgentPhase.FAILED)
     if slide_repository is not None:
         try:
@@ -321,10 +390,135 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
     return result
 
 
+def _stale_awaiting_outline_job_ids(cutoff: datetime) -> list[UUID]:
+    """Read the ids of jobs parked in AWAITING_INPUT past the TTL cutoff.
+
+    A plain, lock-free read: the race safety against a concurrent resume
+    lives entirely in ``SlideJobRepository.expire_awaiting_input``, which
+    re-locks and re-checks each row's status before writing anything, so a
+    stale id returned here that has already resumed is simply skipped below.
+    """
+
+    with Session(engine) as session:
+        return list(
+            session.exec(
+                select(SlideJob.id).where(
+                    SlideJob.status == JobStatus.AWAITING_INPUT.value,
+                    SlideJob.updated_at <= cutoff,
+                )
+            ).all()
+        )
+
+
+@broker.task(
+    task_name="agents.expire_awaiting_outline",
+    schedule=[{"interval": settings.agent_awaiting_outline_sweep_interval_seconds}],
+)
+async def expire_awaiting_outline_task() -> dict[str, int]:
+    """Expire outline approvals abandoned past their TTL and reclaim workspace.
+
+    Risk 3 (docs/agents-sdk-migration-plan.md, Stage 5b): a job paused in
+    AWAITING_INPUT holds its workspace under ``agent_jobs_root`` indefinitely
+    until a human approves or rejects the outline. This sweep only ever
+    touches a job that is still parked in AWAITING_INPUT at expiry time; a
+    job a concurrent resume has already moved to RUNNING is left untouched,
+    because ``expire_awaiting_input`` re-locks and re-checks each row's
+    status before writing, and a lost race there simply comes back ``None``
+    and is skipped here.
+    """
+
+    ttl_seconds = settings.agent_awaiting_outline_ttl_seconds
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
+    reason = f"Outline approval was not completed within {ttl_seconds} seconds and the job was automatically expired."
+    jobs_root = Path(settings.agent_jobs_root).expanduser().resolve()
+    expired = 0
+    for job_id in _stale_awaiting_outline_job_ids(cutoff):
+        with Session(engine) as session:
+            repository = SQLModelSlideJobRepository(session)
+            job = await repository.expire_awaiting_input(job_id, cutoff=cutoff, error=reason)
+        if job is None:
+            # Already resumed, already terminal, or refreshed past the cutoff
+            # since the read above -- nothing to clean up.
+            continue
+        cleanup_job(jobs_root / str(job_id))
+        expired += 1
+        logger.info("Expired abandoned outline job {} after {}s TTL", job_id, ttl_seconds)
+    return {"expired": expired}
+
+
+def _pending_approval_outbox_ids() -> list[UUID]:
+    """Return undelivered approval events without holding a DB session open.
+
+    Each event is re-read by the dispatcher before publishing.  We do not
+    claim rows before TaskIQ accepts them: a process death at any point must
+    leave the event eligible for the next sweep, and duplicate publication is
+    safe because ``run`` claims the durable slide job before authoring.
+    """
+
+    with Session(engine) as session:
+        return list(
+            session.exec(
+                select(SlideOutlineApprovalOutbox.id)
+                .where(SlideOutlineApprovalOutbox.dispatched_at.is_(None))
+                .order_by(SlideOutlineApprovalOutbox.created_at)
+                .limit(100)
+            ).all()
+        )
+
+
+@broker.task(
+    task_name="agents.dispatch_outline_approval_outbox",
+    schedule=[{"interval": _OUTBOX_DISPATCH_INTERVAL_SECONDS}],
+)
+async def dispatch_outline_approval_outbox_task() -> dict[str, int]:
+    """Recover approvals committed before their TaskIQ publication completed."""
+
+    delivered = 0
+    failed = 0
+    for outbox_id in _pending_approval_outbox_ids():
+        with Session(engine) as session:
+            repository = SQLModelSlideOutlineRepository(session)
+            event = session.get(SlideOutlineApprovalOutbox, outbox_id)
+            if event is None or event.dispatched_at is not None:
+                continue
+            revision = await repository.get_revision(event.job_id, event.revision)
+            if revision is None:
+                # An approval row is immutable, so this is corruption rather
+                # than a client retry.  Keep the event pending and visible.
+                await repository.record_approval_outbox_failure(
+                    event.id, "Approved outline revision is missing."
+                )
+                failed += 1
+                continue
+            try:
+                if await dispatch_approval_outbox(
+                    event=event,
+                    revision=revision,
+                    repository=repository,
+                    task=run,
+                    jobs_root=Path(settings.agent_jobs_root),
+                ):
+                    delivered += 1
+            except Exception:
+                failed += 1
+                logger.warning(
+                    "Could not dispatch outline approval outbox event {}",
+                    outbox_id,
+                    exc_info=True,
+                )
+    return {"delivered": delivered, "failed": failed}
+
+
 # Readable aliases for callers and tests; Taskiq's decorated object remains
 # ``run`` and exposes ``original_func`` as usual.
 agents_run = run
 run_agent_task = run
 
 
-__all__ = ["run", "agents_run", "run_agent_task"]
+__all__ = [
+    "run",
+    "agents_run",
+    "run_agent_task",
+    "expire_awaiting_outline_task",
+    "dispatch_outline_approval_outbox_task",
+]

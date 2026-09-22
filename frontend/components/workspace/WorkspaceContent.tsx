@@ -3,6 +3,7 @@
 import { ChatView } from "./ChatView";
 import { FilesView } from "./FilesView";
 import { SlidesView } from "./SlidesView";
+import { SlideJobView } from "./SlideJobView";
 import { NewsView } from "./NewsView";
 import { UploadModal } from "./UploadModal";
 import { WorkflowList } from "./WorkflowList";
@@ -14,11 +15,15 @@ export function WorkspaceContent({
     view,
     onBrowseSources,
     onUploadSources,
+    slideJobId,
+    onSlideStart,
 }: {
     workspace: WorkspaceController;
     view: View;
     onBrowseSources?: () => void;
     onUploadSources?: () => void;
+    slideJobId?: string | null;
+    onSlideStart?: () => Promise<void>;
 }) {
     const catalogError = workspace.catalog.error?.message || null;
 
@@ -91,7 +96,10 @@ export function WorkspaceContent({
                     modes={workspace.modes}
                 />
             )}
-            {view === "slides" && (
+            {view === "slides" && slideJobId && (
+                <SlideJobView key={slideJobId} jobId={slideJobId} docs={workspace.catalog.documents} />
+            )}
+            {view === "slides" && !slideJobId && (
                 <SlidesView
                     docs={workspace.catalog.documents}
                     selected={workspace.selected}
@@ -108,15 +116,12 @@ export function WorkspaceContent({
                     setGuidance={workspace.setGuidance}
                     tone={workspace.tone}
                     setTone={workspace.setTone}
-                    job={workspace.slideJob.job}
-                    phase={workspace.slideJob.phase}
-                    phaseHistory={workspace.slideJob.phaseHistory}
-                    error={workspace.slideJob.error?.message || null}
-                    warning={workspace.slideJob.warning}
-                    pollNow={workspace.slideJob.pollNow}
-                    start={workspace.startSlides}
-                    retry={workspace.startSlides}
-                    onNewPresentation={workspace.startNewSlides}
+                    job={null}
+                    phase={workspace.slideSubmitting ? "submitting" : "idle"}
+                    error={null}
+                    warning={null}
+                    start={onSlideStart ?? (async () => { await workspace.startSlides(); })}
+                    retry={onSlideStart ?? (async () => { await workspace.startSlides(); })}
                 />
             )}
             {view === "news" && (

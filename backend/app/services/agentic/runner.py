@@ -18,9 +18,10 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 from loguru import logger
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox, SkillInput, TextInput
+from agents.strict_schema import ensure_strict_json_schema
 
 from .contracts import (
     AgentExecutionRequest,
@@ -165,6 +166,19 @@ _SECRET = re.compile(
     re.I,
 )
 _PATH = re.compile(r"(?:[A-Za-z]:[\\/]|/(?:tmp|app|home|workspace)(?:[\\/]|$)|(?:^|[\s(])\.\.?[\\/]|(?:^|[\s(])[^\s]+[\\/][^\s]+)")
+
+
+def _strict_output_schema(output_type: type[BaseModel]) -> dict[str, Any]:
+    """Return a structured-outputs-strict JSON schema for ``output_type``.
+
+    ``ensure_strict_json_schema`` ships with the Agents SDK and applies the two
+    rules Pydantic does not: every object gets ``additionalProperties: false``,
+    and every property is listed in ``required``. Both are enforced by the
+    provider, and a violation surfaces only as an ``invalid_json_schema`` error
+    mid-run, so normalize before the request is built.
+    """
+
+    return ensure_strict_json_schema(output_type.model_json_schema())
 
 
 def safe_error(value: object, fallback: str = "Workflow execution failed.") -> str:
@@ -330,6 +344,39 @@ class ProgressReporter:
             except TimeoutError:
                 if not stop.is_set():
                     await self.emit("heartbeat", "Workflow is still running.", heartbeat=True)
+
+
+_STRUCTURED_OUTPUT_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+
+
+def _parse_structured_output(text: str | None, output_type: type[BaseModel]) -> BaseModel:
+    """Validate one turn's raw text against a declared ``output_type``.
+
+    Codex has no first-class ``output_type`` the way the Agents SDK does; it
+    only accepts a raw per-turn JSON schema (``TurnRequest.output_schema``,
+    derived below from ``output_type.model_json_schema()``) and always
+    returns free-form text. This closes that gap for ``CodexAgentRunner`` so
+    both runners hand the coordinator an already-validated model rather than
+    a string the caller must trust: the response is stripped of an optional
+    markdown code fence, parsed as JSON, and validated against the same type
+    that produced the schema. A malformed or schema-violating response fails
+    closed with the same operational error either runner would raise.
+    """
+
+    if not text or not isinstance(text, str):
+        raise WorkflowExecutionError("structured turn response was empty")
+    candidate = text.strip()
+    fence = _STRUCTURED_OUTPUT_FENCE.fullmatch(candidate)
+    if fence:
+        candidate = fence.group(1).strip()
+    try:
+        payload = json.loads(candidate)
+    except (TypeError, ValueError) as exc:
+        raise WorkflowExecutionError("structured turn response was malformed") from exc
+    try:
+        return output_type.model_validate(payload)
+    except Exception as exc:
+        raise WorkflowExecutionError("structured turn response failed schema validation") from exc
 
 
 class CodexRunResult:
@@ -612,6 +659,8 @@ class CodexAgentRunner:
         *,
         progress_callback: ProgressCallback | None = None,
     ) -> AgentExecutionResult:
+        if request.output_schema is not None and request.output_type is not None:
+            raise WorkflowExecutionError("a turn cannot request both a raw output schema and a typed output")
         started = asyncio.get_running_loop().time()
         effective_model = request.model if request.model is not None else getattr(self.codex_runner, "model", None)
         effective_effort = request.reasoning_effort if request.reasoning_effort is not None else getattr(self.codex_runner, "reasoning_effort", None)
@@ -619,7 +668,18 @@ class CodexAgentRunner:
             kind=request.node_id if request.node_id else request.role,
             prompt=request.prompt,
             sandbox=request.sandbox,
-            output_schema=request.output_schema,
+            # ``output_type`` has no Codex primitive of its own; derive the
+            # same raw schema Codex has always accepted from the declared
+            # type so the provider wire format is unchanged.
+            #
+            # The derived schema must then be made strict. Pydantic emits
+            # ``additionalProperties`` only for models declaring
+            # ``extra="forbid"``, and omits defaulted fields from ``required``;
+            # structured outputs rejects both ("'additionalProperties' is
+            # required to be supplied and to be false"). Normalizing here rather
+            # than relying on every ``output_type`` to be declared strictly
+            # keeps a new typed node from failing at provider call time.
+            output_schema=_strict_output_schema(request.output_type) if request.output_type is not None else request.output_schema,
         )
 
         async def forward_progress(event: dict[str, Any]) -> None:
@@ -656,12 +716,14 @@ class CodexAgentRunner:
         )
         duration_ms = round((asyncio.get_running_loop().time() - started) * 1000)
         usage = result.last_turn.usage if result.last_turn is not None else None
+        output = _parse_structured_output(result.response, request.output_type) if request.output_type is not None else None
         return AgentExecutionResult(
             provider_run_id=result.thread_id,
             response=result.response,
             duration_ms=duration_ms,
             usage=usage,
             audits=result.audits,
+            output=output,
         )
 
 

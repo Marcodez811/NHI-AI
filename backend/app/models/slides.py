@@ -1,3 +1,7 @@
+"""Public and durable contracts for grounded presentation jobs."""
+
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -23,6 +27,10 @@ SUPPORTED_SLIDE_SOURCE_EXTENSIONS = frozenset({".pdf", ".docx", ".md", ".markdow
 class JobStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
+    # A job parked here is waiting on a human decision (e.g. outline
+    # approval), not a crashed or stalled worker.  Reconciliation and lease
+    # sweeps must treat this as a deliberate pause, never a retry target.
+    AWAITING_INPUT = "awaiting_input"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -112,6 +120,83 @@ class SlideJobBrief(BaseModel):
     tone: Literal["formal", "casual"]
 
 
+class OutlineNode(BaseModel):
+    """One planned section of the deck; the grounded unit the author must honor.
+
+    ``evidence_refs`` point into the frozen ``EvidenceStore`` rather than
+    carrying source text inline, so a node can be re-validated against
+    ``work/evidence.json`` without re-parsing prose.
+    """
+
+    id: str = Field(min_length=1, max_length=80)
+    heading: str = Field(min_length=1, max_length=200)
+    intent: str = Field(min_length=1, max_length=500)
+    key_points: list[str] = Field(min_length=2, max_length=5)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=50)
+    # The user's tuning knob: how much author attention this section earns
+    # relative to its siblings, without dictating a page-by-page structure.
+    emphasis: Literal["light", "normal", "deep"]
+    approx_slides: int = Field(gt=0, le=25)
+
+
+class SlideOutline(BaseModel):
+    """The planner's proposed structure, subject to human approval before authoring.
+
+    Granularity is deliberately medium: nodes are sections, not slides, so a
+    user can redirect emphasis without negotiating a per-page breakdown.
+    """
+
+    title: str = Field(min_length=1, max_length=300)
+    narrative: str = Field(min_length=1, max_length=600)
+    nodes: list[OutlineNode] = Field(min_length=1, max_length=30)
+    total_slides: int = Field(gt=0, le=100)
+
+    @model_validator(mode="after")
+    def node_ids_unique(self) -> "SlideOutline":
+        ids = [node.id for node in self.nodes]
+        if len(ids) != len(set(ids)):
+            raise ValueError("outline node ids must be unique")
+        return self
+
+
+class OutlineRevisionResponse(BaseModel):
+    """One immutable planner proposal, as returned to an API client."""
+
+    job_id: UUID
+    revision: int = Field(ge=1)
+    outline: SlideOutline
+    session_id: str
+    created_at: datetime
+    approved_at: datetime | None = None
+
+
+class OutlineMessageRequest(BaseModel):
+    """A human's turn in the outline planning conversation."""
+
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class ApproveOutlineRequest(BaseModel):
+    """Approve one outline revision and resume authoring from it.
+
+    ``expected_revision`` is both the staleness check and the retry key: a
+    dropped response can be retried with the same value and will not enqueue a
+    second author run.  See
+    ``app/api/routes/slides.py::approve_slide_job_outline``.
+    """
+
+    expected_revision: int = Field(ge=1)
+
+
+class ApproveOutlineResponse(BaseModel):
+    """Returned once an outline revision has been approved (or re-approved)."""
+
+    job_id: UUID
+    status: JobStatus
+    phase: AgentPhase
+    approved_revision: int = Field(ge=1)
+
+
 class SlidesJobStatusResponse(BaseModel):
     """Returned when a client polls for job status."""
 
@@ -127,6 +212,18 @@ class SlidesJobStatusResponse(BaseModel):
     # Durable jobs return their original input so a refreshed browser can
     # accurately describe and restart a presentation without guessing.
     brief: SlideJobBrief | None = None
+
+
+class SlideJobSummary(BaseModel):
+    """Only the durable fields needed to rediscover a presentation job."""
+
+    job_id: UUID
+    title: str
+    status: JobStatus
+    phase: AgentPhase
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 # --------------------------------------------------------------------------

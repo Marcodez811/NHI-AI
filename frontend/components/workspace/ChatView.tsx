@@ -27,6 +27,7 @@ const CHAT_STATUS_LABELS: Record<ChatStatusPhase, string> = {
     searching: "正在搜尋來源文件…",
     drafting: "正在整理回答…",
     validating: "正在核對引用來源…",
+    planning: "正在規劃簡報結構…",
 };
 
 function ScopePicker({

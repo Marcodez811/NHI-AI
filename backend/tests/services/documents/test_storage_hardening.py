@@ -75,12 +75,19 @@ def test_safe_filename_none_falls_back_to_source():
         safe_filename(None)
 
 
-def test_safe_filename_unicode_sanitized():
-    # Unicode characters outside [A-Za-z0-9._ -] are replaced with underscores.
-    result = safe_filename("報告書.pdf")
+def test_safe_filename_preserves_unicode_word_characters():
+    # Source documents are routinely named in Traditional Chinese, so
+    # sanitization must not flatten them to underscores (commit 5baedbc2).
+    assert safe_filename("報告書.pdf") == "報告書.pdf"
+
+
+def test_safe_filename_strips_directory_and_punctuation():
+    # The hardening that actually matters: a traversal attempt loses its
+    # directory components, and separators never reach the stored name.
+    result = safe_filename("../../etc/報告書*?.pdf")
     assert result.endswith(".pdf")
-    # Non-ASCII chars replaced.
-    assert all(ord(c) < 128 for c in result)
+    assert "/" not in result and ".." not in result
+    assert "*" not in result and "?" not in result
 
 
 # ── empty upload rejection ────────────────────────────────────────────────────

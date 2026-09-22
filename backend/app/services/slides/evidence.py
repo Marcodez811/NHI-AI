@@ -15,7 +15,10 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance only
+    from app.models.slides import SlideOutline
 
 
 EXTRACTION_FORMAT_VERSION = "1.0"
@@ -666,6 +669,38 @@ def load_frozen_evidence(evidence_path: Path, *, extracted_dir: Path | None = No
     return _object(_read_json(Path(evidence_path), "EvidenceStore"), "EvidenceStore")
 
 
+def known_evidence_ids(evidence_path: Path) -> set[str]:
+    """Return every block id in a frozen EvidenceStore.
+
+    Used to check a reference against the store without a caller needing to
+    know its internal shape (this module is deliberately independent of any
+    agent-execution or planning contract -- see the module docstring).
+    """
+
+    store = load_frozen_evidence(evidence_path)
+    return {str(block.get("id")) for block in store.get("blocks", ()) if isinstance(block, dict)}
+
+
+def validate_outline_evidence_references(outline: "SlideOutline", evidence_path: Path) -> None:
+    """Reject an outline node citing an evidence id the frozen store never produced.
+
+    This is the planner's output guardrail (docs/agents-sdk-migration-plan.md,
+    Stage 5): a hallucinated ``evidence_refs`` id must never reach a human for
+    approval or be written into ``work/outline.json``, because the author
+    treats an approved outline as authoritative and would otherwise carry the
+    bad reference straight into the deck. ``outline`` is duck-typed rather than
+    imported at runtime so this module's independence from any agent-execution
+    or planning contract still holds.
+    """
+
+    known_ids = known_evidence_ids(evidence_path)
+    unknown = sorted(
+        {ref for node in outline.nodes for ref in node.evidence_refs if ref not in known_ids}
+    )
+    if unknown:
+        raise EvidenceError("outline referenced unknown evidence ids: " + ", ".join(unknown))
+
+
 # Names used by integrations that prefer explicit verbs are kept as aliases;
 # all entry points share the same validation and atomic-freeze behavior.
 validate_extracted_artifacts = validate_extraction
@@ -678,11 +713,13 @@ __all__ = [
     "canonical_json",
     "consolidate_evidence",
     "freeze_evidence",
+    "known_evidence_ids",
     "load_frozen_evidence",
     "sha256_bytes",
     "sha256_file",
     "validate_extraction",
     "validate_extracted_artifacts",
     "validate_frozen_evidence",
+    "validate_outline_evidence_references",
     "verify_frozen_evidence",
 ]

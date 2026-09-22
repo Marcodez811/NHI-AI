@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent, AgentNodeSnapshot } from "../lib/api";
 import { deriveAgentAttempts } from "../components/dev/agent/attempts";
+import { nodeLabel } from "../components/dev/agent/format";
 
 const event = (
     sequence: number,
@@ -63,5 +64,21 @@ describe("deriveAgentAttempts", () => {
             { attempt: 1, status: "completed", durationMs: 5_000 },
             { attempt: 2, status: "running", durationMs: 3_000 },
         ]);
+    });
+});
+
+describe("nodeLabel", () => {
+    it("labels extraction and planning nodes in Traditional Chinese", () => {
+        expect(nodeLabel({ node_id: "extraction" })).toBe("擷取 Agent");
+        expect(nodeLabel({ node_id: "planning" })).toBe("規劃 Agent");
+    });
+
+    it("uses case-insensitive partial matching for known nodes", () => {
+        expect(nodeLabel({ node_id: "SOURCE_EXTRACTION" })).toBe("擷取 Agent");
+        expect(nodeLabel({ node_id: "planning_v2" })).toBe("規劃 Agent");
+    });
+
+    it("preserves an unknown node id", () => {
+        expect(nodeLabel({ node_id: "future_node" })).toBe("future_node");
     });
 });

@@ -14,22 +14,34 @@ import type {
     AgentJobRecord,
 } from "../../lib/hooks/useAgentJob";
 
-const AGENT_JOB_PHASES: readonly AgentJobPhase[] = [
+/**
+ * Canonical pipeline order used to judge "is this step before the current
+ * one", independent of what this browser session happened to observe.
+ * "revising" has no row of its own: every later author attempt re-enters at
+ * the drafting position, so it shares that step's index.
+ */
+const PIPELINE_ORDER: readonly AgentJobPhase[] = [
     "queued",
     "preparing",
     "extracting",
+    "planning",
+    "awaiting_outline",
     "drafting",
     "validating",
     "reviewing",
-    "revising",
     "publishing",
     "completed",
 ];
+
+/** Phases the backend only emits when the corresponding feature is active. */
+const CONDITIONAL_PHASES: ReadonlySet<AgentJobPhase> = new Set(["planning", "awaiting_outline"]);
 
 const AGENT_JOB_PHASE_LABELS: Record<AgentJobPhase, string> = {
     queued: "等待中",
     preparing: "準備中",
     extracting: "整理來源中",
+    planning: "規劃簡報結構中",
+    awaiting_outline: "等待大綱確認",
     drafting: "撰寫中",
     validating: "驗證中",
     reviewing: "檢查中",
@@ -39,17 +51,33 @@ const AGENT_JOB_PHASE_LABELS: Record<AgentJobPhase, string> = {
     failed: "失敗",
 };
 
-const PHASE_COPY: Partial<Record<AgentJobPhase, string>> = {
+/**
+ * Fixed, user-facing copy for every phase. The backend's raw status message
+ * names its internal runner (e.g. "Codex completed a workflow work step"),
+ * which is an implementation detail; this page shows only these curated
+ * sentences instead, never `job.message`.
+ */
+const PHASE_COPY: Record<AgentJobPhase, string> = {
     queued: "工作正在等待可用容量。",
     preparing: "正在準備來源與工作環境。",
     extracting: "正在抽取來源並建立固定的證據資料。",
-    drafting: "正在根據來源撰寫簡報。",
-    validating: "正在驗證簡報內容與格式。",
-    reviewing: "正在檢查簡報是否符合需求。",
+    planning: "正在根據來源規劃簡報結構。",
+    awaiting_outline: "正在等待您檢閱與核准簡報大綱。",
+    drafting: "正在依核准的大綱撰寫簡報。",
+    validating: "正在檢查格式與引用。",
+    reviewing: "正在核對內容與來源是否相符。",
     revising: "正在根據檢查結果修訂簡報。",
     publishing: "正在整理可下載的簡報檔案。",
     completed: "簡報已完成，可以下載。",
+    failed: "工作執行失敗。",
 };
+
+function canonicalIndex(phase: AgentJobPhase): number {
+    // A later author attempt occupies the drafting slot; it never gets its own row.
+    const position = phase === "revising" ? "drafting" : phase;
+    const index = PIPELINE_ORDER.indexOf(position);
+    return index === -1 ? PIPELINE_ORDER.length : index;
+}
 
 function fallbackPhase(job: AgentJobRecord | null): AgentJobPhase {
     if (!job) return "queued";
@@ -60,15 +88,22 @@ function fallbackPhase(job: AgentJobRecord | null): AgentJobPhase {
     return "preparing";
 }
 
-function phaseMessage(job: AgentJobRecord, phase: AgentJobPhase): string {
-    // Revision copy explains the intentional loop even if the worker sends a
-    // generic safe message for that boundary.
-    if (phase === "revising") return PHASE_COPY.revising!;
-    return job.message || PHASE_COPY[phase] || "工作正在進行中。";
-}
-
 function isTerminal(job: AgentJobRecord | null): boolean {
     return job?.status === "completed" || job?.status === "failed";
+}
+
+/**
+ * How many times this session has watched the job re-enter "revising".
+ * appendPhase() already collapses consecutive duplicates, so every
+ * surviving "revising" entry is a distinct retry, never a re-render of the
+ * same one. This intentionally has no maximum: the retry cap is a backend
+ * setting this page does not know.
+ */
+function countRevisions(phaseHistory: AgentJobPhase[], currentPhase: AgentJobPhase): number {
+    const observed = phaseHistory[phaseHistory.length - 1] === currentPhase
+        ? phaseHistory
+        : [...phaseHistory, currentPhase];
+    return observed.filter((phase) => phase === "revising").length;
 }
 
 export interface AgentJobActivityProps {
@@ -96,11 +131,30 @@ export function AgentJobActivity({
     if (!job) return null;
 
     const currentPhase = fallbackPhase(job);
-    const observedHistory = [...phaseHistory, currentPhase];
     const active =
         !isTerminal(job) &&
         (clientPhase === "polling" || clientPhase === "submitting");
-    const message = phaseMessage(job, currentPhase);
+    const revisionCount = countRevisions(phaseHistory, currentPhase);
+
+    // Failure freezes progress mid-pipeline. Rank against the last phase this
+    // session actually observed before "failed" rather than "failed" itself,
+    // so steps already completed stay ticked instead of all reverting to
+    // pending.
+    const rankingPhase = currentPhase === "failed"
+        ? [...phaseHistory].reverse().find((phase) => phase !== "failed")
+        : currentPhase;
+    const currentIndex = rankingPhase ? canonicalIndex(rankingPhase) : -1;
+
+    // Mandatory steps are always shown and are correct by construction: a
+    // step before the current pipeline position is done whether or not this
+    // session happened to observe it. Conditional steps (planner, outline
+    // review) only ever fire for some jobs, so they are omitted entirely
+    // unless this session actually saw them, rather than showing a step that
+    // will never complete for this job.
+    const visibleSteps = PIPELINE_ORDER.filter((phaseName) => {
+        if (!CONDITIONAL_PHASES.has(phaseName)) return true;
+        return phaseHistory.includes(phaseName) || currentPhase === phaseName;
+    });
 
     return (
         <section
@@ -134,13 +188,19 @@ export function AgentJobActivity({
                 className="mt-5 space-y-0"
                 aria-label={`${workflowLabel}工作生命週期`}
             >
-                {AGENT_JOB_PHASES.map((phaseName, index) => {
-                    const isCurrent = currentPhase === phaseName;
-                    const isCompleted =
-                        currentPhase === "completed" ||
-                        observedHistory.slice(0, -1).includes(phaseName);
+                {visibleSteps.map((phaseName, index) => {
+                    // The drafting row stands in for every later author attempt too:
+                    // its label and description track whichever of the two is live.
+                    const displayPhase: AgentJobPhase = phaseName === "drafting" && currentPhase === "revising"
+                        ? "revising"
+                        : phaseName;
+                    const isCurrent = phaseName === "drafting"
+                        ? currentPhase === "drafting" || currentPhase === "revising"
+                        : currentPhase === phaseName;
+                    const isCompleted = currentPhase === "completed" || canonicalIndex(phaseName) < currentIndex;
                     const isPending = !isCurrent && !isCompleted;
-                    const isLast = index === AGENT_JOB_PHASES.length - 1;
+                    const isLast = index === visibleSteps.length - 1;
+                    const showRevisionBadge = phaseName === "drafting" && revisionCount >= 1;
 
                     return (
                         <li
@@ -150,11 +210,11 @@ export function AgentJobActivity({
                             {!isLast && (
                                 <span
                                     aria-hidden="true"
-                                    className={`absolute left-[9px] top-5 h-[calc(100%-0.5rem)] w-px ${isCompleted ? "bg-primary/45" : "bg-border"}`}
+                                    className={`absolute left-[9px] top-5 h-[calc(100%-0.5rem)] w-px transition-colors duration-500 motion-reduce:transition-none ${isCompleted ? "bg-primary/45" : "bg-border"}`}
                                 />
                             )}
                             <span
-                                className={`relative z-10 flex size-5 shrink-0 items-center justify-center rounded-full border bg-card ${isCurrent ? "border-primary text-primary" : isCompleted ? "border-primary bg-primary text-primary-foreground" : "border-border text-muted-foreground"}`}
+                                className={`relative z-10 flex size-5 shrink-0 items-center justify-center rounded-full border bg-card transition-colors duration-500 motion-reduce:transition-none ${isCurrent ? "border-primary text-primary" : isCompleted ? "border-primary bg-primary text-primary-foreground" : "border-border text-muted-foreground"}`}
                             >
                                 {isCurrent && active ? (
                                     <LoaderCircle
@@ -163,9 +223,14 @@ export function AgentJobActivity({
                                         aria-label="進行中"
                                     />
                                 ) : isCompleted ? (
-                                    <Check size={12} strokeWidth={2.5} />
+                                    <Check
+                                        size={12}
+                                        strokeWidth={2.5}
+                                        className="animate-in zoom-in-50 duration-300 motion-reduce:animate-none"
+                                        aria-label="已完成"
+                                    />
                                 ) : (
-                                    <CircleDot size={10} />
+                                    <CircleDot size={10} aria-label="尚未開始" />
                                 )}
                             </span>
                             <div className="min-w-0 flex-1 -translate-y-0.5">
@@ -173,21 +238,30 @@ export function AgentJobActivity({
                                     <span
                                         className={`text-sm ${isCurrent ? "font-semibold text-foreground" : isPending ? "text-muted-foreground" : "text-foreground"}`}
                                     >
-                                        {AGENT_JOB_PHASE_LABELS[phaseName]}
+                                        {AGENT_JOB_PHASE_LABELS[displayPhase]}
                                     </span>
                                     {isCurrent && active && (
                                         <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
                                             現在
                                         </span>
                                     )}
+                                    {showRevisionBadge && (
+                                        <span
+                                            key={revisionCount}
+                                            className="rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-accent-foreground animate-in fade-in zoom-in-95 duration-300 motion-reduce:animate-none"
+                                        >
+                                            第 {revisionCount} 次修訂
+                                        </span>
+                                    )}
                                 </div>
                                 {isCurrent && (
                                     <p
+                                        key={displayPhase}
                                         role="status"
                                         aria-live="polite"
-                                        className="mt-1 text-xs leading-5 text-muted-foreground"
+                                        className="mt-1 text-xs leading-5 text-muted-foreground animate-in fade-in duration-300 motion-reduce:animate-none"
                                     >
-                                        {message}
+                                        {PHASE_COPY[displayPhase]}
                                     </p>
                                 )}
                             </div>
@@ -204,10 +278,7 @@ export function AgentJobActivity({
                             {AGENT_JOB_PHASE_LABELS.failed}
                         </p>
                         <p>
-                            {error ||
-                                job.error ||
-                                job.message ||
-                                "工作執行失敗。"}
+                            {error || job.error || PHASE_COPY.failed}
                         </p>
                         {onRetry && (
                             <Button

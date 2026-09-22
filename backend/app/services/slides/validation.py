@@ -30,11 +30,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from xml.etree import ElementTree as ET
 
-from .contracts import JobError
+from .contracts import GENERATED_NAMESPACE_PREFIX_RE, JobError, PACKAGE_XML_REWRITE_SENSITIVE_PARTS
+from .source_manifest import SlideSource, SourceManifestError, load_source_manifest
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance only
+    from app.models.slides import SlideOutline
 
 try:  # Pillow is a production dependency, but keep module import lightweight.
     from PIL import Image, ImageChops
@@ -373,6 +377,41 @@ def _load_pptx_package(path: Path) -> _PptxPackage:
         raise PptxPackageError(f"PPTX is missing required member: {exc.args[0]}") from exc
 
 
+def _package_xml_rewrite_findings(deck: Path, members: Sequence[str]) -> list[ValidationFinding]:
+    """Flag the two package parts where a generic-writer rewrite is known to break the deck.
+
+    Checks exactly ``PACKAGE_XML_REWRITE_SENSITIVE_PARTS`` -- the same set
+    ``artifacts.py``'s pre-cleanup guard uses, so this finding and that guard cannot drift
+    apart. Every other part (individual slides, notes, `.rels` files) tolerates an
+    ElementTree-style rewrite in both LibreOffice and the repository's own ``clean.py``
+    (each namespace-URI-aware consumer resolves ``ns0:`` exactly like the prefix it
+    replaced), so this check deliberately does not scan the whole package: flagging a
+    harmless rewrite elsewhere as blocking would reject an otherwise-working deck.
+    ``[Content_Types].xml`` and ``ppt/presentation.xml`` are different -- see
+    ``PACKAGE_XML_REWRITE_SENSITIVE_PARTS`` for why each one specifically breaks.
+    """
+
+    rewritten: list[str] = []
+    with zipfile.ZipFile(deck) as archive:
+        present = set(members)
+        for member in PACKAGE_XML_REWRITE_SENSITIVE_PARTS:
+            if member in present and GENERATED_NAMESPACE_PREFIX_RE.search(archive.read(member)):
+                rewritten.append(member)
+    if not rewritten:
+        return []
+    return [
+        ValidationFinding(
+            "package_xml_rewritten",
+            "package XML was re-serialized by a tool (such as ElementTree) that invents its own "
+            "namespace prefixes: this either makes LibreOffice refuse to load the deck "
+            "([Content_Types].xml) or defeats the repository's own package-cleanup tooling, "
+            "which silently drops every slide instead of refusing (ppt/presentation.xml)",
+            details={"parts": sorted(rewritten)},
+            origin="candidate",
+        )
+    ]
+
+
 def _text(root: ET.Element) -> str:
     """Join DrawingML runs while preserving meaningful line breaks."""
 
@@ -408,7 +447,10 @@ def _chart_snapshot(root: ET.Element, member: str) -> dict[str, Any]:
             "title": series_title or None,
             "caches": _chart_cache_points(item),
         })
-    chart_title = _text(root.find(f".//{_C}title") or ET.Element("empty"))
+    title_element = root.find(f".//{_C}title")
+    chart_title = _text(
+        title_element if title_element is not None else ET.Element("empty")
+    )
     return {
         "part": member,
         "title": chart_title or None,
@@ -526,6 +568,43 @@ def build_deck_snapshot(
             "The semantic reviewer must use the renders for content that is not represented as visible OOXML text.",
         ],
     }
+
+
+def _chart_title_findings(snapshot: Mapping[str, Any]) -> list[ValidationFinding]:
+    """Reject native charts whose subject is invisible to the audience."""
+
+    findings: list[ValidationFinding] = []
+    slides = snapshot.get("slides")
+    if not isinstance(slides, list):
+        return findings
+    for fallback_slide_number, slide in enumerate(slides, start=1):
+        if not isinstance(slide, Mapping):
+            continue
+        slide_number = slide.get("slide_number")
+        if type(slide_number) is not int:
+            slide_number = fallback_slide_number
+        charts = slide.get("charts")
+        if not isinstance(charts, list):
+            continue
+        for chart_index, chart in enumerate(charts, start=1):
+            if not isinstance(chart, Mapping):
+                continue
+            title = chart.get("title")
+            if isinstance(title, str) and title.strip():
+                continue
+            findings.append(
+                ValidationFinding(
+                    "chart_title_missing",
+                    "every native chart must have a non-empty descriptive title",
+                    slide_number=slide_number,
+                    details={
+                        "chart_index": chart_index,
+                        "part": chart.get("part"),
+                    },
+                    origin="candidate",
+                )
+            )
+    return findings
 
 
 def _unavailable_snapshot(
@@ -1103,6 +1182,689 @@ def _title_present(snapshot: Mapping[str, Any], requested_title: str) -> bool:
     return normalized in visible_shapes
 
 
+def _normalize_visible_text(value: str) -> str:
+    """Collapse whitespace so OOXML soft-wraps never defeat exact matching."""
+
+    return " ".join(value.split())
+
+
+_CITATION_FOOTER_RE = re.compile(
+    r"^(?:\[\s*(?P<number>\d+)\s*\]\s*)?資料來源\s*[：:]\s*(?P<source>.+)$"
+)
+_REFERENCE_ENTRY_RE = re.compile(
+    r"^\[(?P<number>[1-9]\d*)\] (?P<source>(?!.*\[\d+\] ).+)$"
+)
+# A footer-shaped paragraph: any "[N]" numbers, then the citation marker. Used to
+# detect one paragraph citing several sources, which the footer regex above cannot
+# represent: it captures everything after the first marker as a single "source", so
+# the allowlist check validates only the first name and never sees the rest.
+_FOOTER_SHAPE_RE = re.compile(r"^(?:\[\s*\d+\s*\]\s*)*資料來源")
+_CITATION_NUMBER_RE = re.compile(r"\[\s*\d+\s*\]")
+_CITATION_MARKER = "資料來源"
+_REFERENCES_SLIDE_TITLE = "參考資料"
+_SHA256_TOKEN_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
+_INTERNAL_ARTIFACT_RE = re.compile(
+    r"(?<!\w)(?:work[/\\][\w./\\-]+\.json|(?:ppt|word|xl)[/\\][\w./\\-]+\.xml|[\w.-]+\.(?:json|xml))\b",
+    re.IGNORECASE,
+)
+
+
+def _references_title_paragraph(root: ET.Element) -> tuple[str | None, ET.Element | None]:
+    """Prefer PowerPoint title placeholders; support minimal single-shape test decks.
+
+    A body paragraph saying ``參考資料`` cannot stand in for a present title
+    placeholder. Minimal OOXML fixtures have no placeholder metadata, so their
+    first visible paragraph is treated as the title instead.
+    """
+
+    shapes = root.findall(f".//{_P}sp")
+    for shape in shapes:
+        placeholder = shape.find(f"{_P}nvSpPr/{_P}nvPr/{_P}ph")
+        if placeholder is None or placeholder.get("type") not in {"title", "ctrTitle"}:
+            continue
+        paragraphs = [paragraph for paragraph in shape.findall(f".//{_A}p") if _text(paragraph)]
+        if paragraphs:
+            return _normalize_visible_text(_text(shape)), paragraphs[0]
+        return None, None
+    for shape in shapes:
+        for paragraph in shape.findall(f".//{_A}p"):
+            value = _normalize_visible_text(_text(paragraph))
+            if value:
+                return value, paragraph
+    return None, None
+
+
+def _catalog_source_name(value: str, sources: Sequence[SlideSource]) -> str | None:
+    """Return the exact catalog name at a citation-detail boundary."""
+
+    normalized = _normalize_visible_text(value)
+    names = sorted(
+        (_normalize_visible_text(source.display_name) for source in sources),
+        key=len,
+        reverse=True,
+    )
+    for name in names:
+        if (
+            normalized == name
+            or normalized.startswith(name + "，")
+            or normalized.startswith(name + ",")
+        ):
+            return name
+    return None
+
+
+def _combines_citation_sources(paragraph: str) -> bool:
+    """Whether one footer paragraph cites more than one source.
+
+    Two forms are caught: a repeated marker
+    (``[1] 資料來源：A；[2] 資料來源：B``), and stacked numbers before a single
+    marker (``[1][2] 資料來源：A；B``). The second form does not match the footer
+    regex at all, so without this it would be skipped as body text and neither
+    name would be checked. Numbers are counted only in the leading prefix, so a
+    bracket inside a locator such as ``第[3]節`` is not mistaken for a second
+    source.
+    """
+
+    shape = _FOOTER_SHAPE_RE.match(paragraph)
+    if shape is None:
+        return False
+    leading_numbers = len(_CITATION_NUMBER_RE.findall(shape.group(0)))
+    return leading_numbers > 1 or paragraph.count(_CITATION_MARKER) > 1
+
+
+def _citation_source_name(value: str, sources: Sequence[SlideSource]) -> str | None:
+    """Resolve one footer/reference payload to its allowlisted display name."""
+
+    source_text = value.strip()
+    nested_footer = _CITATION_FOOTER_RE.fullmatch(source_text)
+    if nested_footer is not None:
+        source_text = nested_footer.group("source").strip()
+    return _catalog_source_name(source_text, sources)
+
+
+def _citation_abstraction_leaks(
+    value: str,
+    sources: Sequence[SlideSource],
+) -> list[str]:
+    """Name internal artifacts that appear in an explicit visible citation."""
+
+    normalized = _normalize_visible_text(value)
+    folded = normalized.casefold()
+    leaks: set[str] = set()
+    for token in ("EvidenceStore",):
+        if token.casefold() in folded:
+            leaks.add(token)
+    display_names = {_normalize_visible_text(source.display_name).casefold() for source in sources}
+    for match in _INTERNAL_ARTIFACT_RE.finditer(normalized):
+        artifact = match.group()
+        if artifact.casefold() not in display_names:
+            leaks.add(artifact)
+    if _SHA256_TOKEN_RE.search(normalized):
+        leaks.add("sha256")
+    for source in sources:
+        staged_filename = _normalize_visible_text(source.staged_filename)
+        display_name = _normalize_visible_text(source.display_name)
+        if (
+            staged_filename != display_name
+            and normalized.count(staged_filename) > display_name.count(staged_filename)
+        ):
+            leaks.add(staged_filename)
+    return sorted(leaks)
+
+
+def _citation_source_name_findings(
+    package: _PptxPackage,
+    sources: Sequence[SlideSource],
+) -> list[ValidationFinding]:
+    """Reject non-catalog names only in explicit citation-shaped paragraphs."""
+
+    findings: list[ValidationFinding] = []
+    last_slide_index = len(package.slide_roots) - 1
+    for slide_index, root in enumerate(package.slide_roots):
+        paragraphs = [_normalize_visible_text(value) for value in _paragraph_texts(root)]
+        title, _ = _references_title_paragraph(root)
+        references_slide = slide_index == last_slide_index and title == _REFERENCES_SLIDE_TITLE
+        for paragraph in paragraphs:
+            if _combines_citation_sources(paragraph):
+                findings.append(
+                    ValidationFinding(
+                        "citation_footer_combines_sources",
+                        "one footer paragraph cites more than one source; give each source its own footer paragraph",
+                        slide_number=slide_index + 1,
+                        details={"citation": paragraph},
+                        origin="candidate",
+                    )
+                )
+                continue
+            footer_match = _CITATION_FOOTER_RE.fullmatch(paragraph)
+            reference_match = (
+                _REFERENCE_ENTRY_RE.fullmatch(paragraph) if references_slide else None
+            )
+            matched = footer_match or reference_match
+            if matched is None:
+                continue
+            leaks = _citation_abstraction_leaks(paragraph, sources)
+            if leaks:
+                findings.append(
+                    ValidationFinding(
+                        "citation_abstraction_leak",
+                        "citation exposes an internal workflow identifier or artifact",
+                        slide_number=slide_index + 1,
+                        details={"citation": paragraph, "leaks": leaks},
+                        origin="candidate",
+                    )
+                )
+                continue
+            source_text = matched.group("source").strip()
+            source_name = (
+                _catalog_source_name(source_text, sources)
+                if reference_match is not None
+                else _citation_source_name(source_text, sources)
+            )
+            if source_name is not None:
+                continue
+            findings.append(
+                ValidationFinding(
+                    "citation_source_name_invalid",
+                    "citation source name is not a knowledge-base display name",
+                    slide_number=slide_index + 1,
+                    details={"citation": paragraph},
+                    origin="candidate",
+                )
+            )
+    return findings
+
+
+def _is_slide_number_field_paragraph(paragraph_element: ET.Element) -> bool:
+    """Whether a paragraph's only visible content is a `<a:fld type="slidenum">` field.
+
+    PowerPoint renders a running page number as a field, not literal text; its cached
+    display value still lands inside `_text()`, so without this check a normal page
+    number reads exactly like a malformed reference entry.
+    """
+
+    fields = paragraph_element.findall(f".//{_A}fld")
+    if not any(field.get("type") == "slidenum" for field in fields):
+        return False
+    return not any(_text(run) for run in paragraph_element.findall(f".//{_A}r"))
+
+
+def _recurs_on_another_slide(text: str, package: _PptxPackage, *, exclude_index: int) -> bool:
+    """Whether ``text`` also appears verbatim as one shape's full text on a different slide.
+
+    Recurring header/footer chrome -- the deck title repeated in a running footer -- is
+    authored as its own text box and reappears unchanged on every slide, even when a
+    wrapped, multi-line title elsewhere splits the identical words across paragraphs
+    within that same box. Comparing whole shapes rather than individual paragraphs is
+    what makes those two renderings compare equal. A real reference entry never recurs
+    this way: its `資料來源`-carrying detail is unique to the references slide.
+    """
+
+    return any(
+        index != exclude_index
+        and any(
+            _normalize_visible_text(_text(shape)) == text
+            for shape in root.findall(f".//{_P}sp")
+        )
+        for index, root in enumerate(package.slide_roots)
+    )
+
+
+def _references_slide_findings(
+    package: _PptxPackage,
+    sources: Sequence[SlideSource],
+) -> list[ValidationFinding]:
+    """Validate the last-slide reference index against visible content citations."""
+
+    last_slide_number = len(package.slide_roots)
+    last_slide_index = last_slide_number - 1
+    last_root = package.slide_roots[-1]
+    title, title_paragraph = _references_title_paragraph(last_root)
+    if title != _REFERENCES_SLIDE_TITLE:
+        return [
+            ValidationFinding(
+                "references_slide_missing",
+                "the last slide must be titled exactly `參考資料`",
+                slide_number=last_slide_number,
+                details={"title": _REFERENCES_SLIDE_TITLE, "actual": title},
+                origin="candidate",
+            )
+        ]
+
+    findings: list[ValidationFinding] = []
+    content_sources: set[str] = set()
+    content_citations: list[tuple[int, int | None, str]] = []
+    for slide_number, root in enumerate(package.slide_roots[:-1], start=1):
+        for paragraph in (
+            _normalize_visible_text(value) for value in _paragraph_texts(root)
+        ):
+            footer_match = _CITATION_FOOTER_RE.fullmatch(paragraph)
+            if footer_match is None:
+                continue
+            marker_text = footer_match.group("number")
+            marker = int(marker_text) if marker_text is not None else None
+            if marker is None:
+                findings.append(
+                    ValidationFinding(
+                        "citation_footer_number_missing",
+                        "content citation footer must start with a numbered source marker",
+                        slide_number=slide_number,
+                        details={"citation": paragraph},
+                        origin="candidate",
+                    )
+                )
+            source_name = _citation_source_name(
+                footer_match.group("source"),
+                sources,
+            )
+            if source_name is not None:
+                content_sources.add(source_name)
+                content_citations.append((slide_number, marker, source_name))
+
+    numbers: list[int] = []
+    referenced_sources: list[str] = []
+    reference_citations: list[tuple[int, str]] = []
+    for paragraph_element in last_root.findall(f".//{_A}p"):
+        if paragraph_element is title_paragraph:
+            continue
+        if _is_slide_number_field_paragraph(paragraph_element):
+            continue
+        paragraph = _normalize_visible_text(_text(paragraph_element))
+        if not paragraph:
+            continue
+        entry_match = _REFERENCE_ENTRY_RE.fullmatch(paragraph)
+        if entry_match is None:
+            # Template chrome -- the slide's own page number, or a footer/title that
+            # recurs elsewhere in the deck -- is not an entry to validate. Anything
+            # else that fails the numbered-entry shape, including this slide's real
+            # unique content, is still a malformed reference and stays blocking.
+            if paragraph == str(last_slide_number) or _recurs_on_another_slide(
+                paragraph, package, exclude_index=last_slide_index
+            ):
+                continue
+            findings.append(
+                ValidationFinding(
+                    "references_entry_invalid",
+                    "each references-slide paragraph must be one numbered entry "
+                    "`[N] <display_name>，<detail>`; any other text, such as a caption or "
+                    "note, must be removed",
+                    slide_number=last_slide_number,
+                    details={"paragraph": paragraph},
+                    origin="candidate",
+                )
+            )
+            continue
+        number = int(entry_match.group("number"))
+        numbers.append(number)
+        source_name = _catalog_source_name(entry_match.group("source"), sources)
+        if source_name is not None:
+            referenced_sources.append(source_name)
+            reference_citations.append((number, source_name))
+
+    duplicate_numbers = sorted(
+        number for number in set(numbers) if numbers.count(number) > 1
+    )
+    if duplicate_numbers:
+        findings.append(
+            ValidationFinding(
+                "references_number_duplicate",
+                "reference numbers must be unique",
+                slide_number=last_slide_number,
+                details={"numbers": duplicate_numbers},
+                origin="candidate",
+            )
+        )
+    elif sorted(numbers) != list(range(1, len(numbers) + 1)):
+        findings.append(
+            ValidationFinding(
+                "references_number_sequence",
+                "reference numbers must form a contiguous sequence starting at 1",
+                slide_number=last_slide_number,
+                details={"numbers": sorted(numbers)},
+                origin="candidate",
+            )
+        )
+
+    duplicate_sources = sorted(
+        source_name
+        for source_name in set(referenced_sources)
+        if referenced_sources.count(source_name) > 1
+    )
+    if duplicate_sources:
+        findings.append(
+            ValidationFinding(
+                "references_source_duplicate",
+                "each cited source must appear exactly once on the references slide",
+                slide_number=last_slide_number,
+                details={"sources": duplicate_sources},
+                origin="candidate",
+            )
+        )
+
+    reference_source_set = set(referenced_sources)
+    missing_sources = sorted(content_sources - reference_source_set)
+    unused_sources = sorted(reference_source_set - content_sources)
+    if missing_sources or unused_sources:
+        findings.append(
+            ValidationFinding(
+                "references_source_mismatch",
+                "references must list exactly the sources cited by content slides",
+                slide_number=last_slide_number,
+                details={
+                    "missing_sources": missing_sources,
+                    "unused_sources": unused_sources,
+                },
+                origin="candidate",
+            )
+        )
+
+    marker_sources: dict[int, set[str]] = {}
+    for _, marker, source_name in content_citations:
+        if marker is not None:
+            marker_sources.setdefault(marker, set()).add(source_name)
+    for marker, source_name in reference_citations:
+        marker_sources.setdefault(marker, set()).add(source_name)
+    for marker, mapped_sources in sorted(marker_sources.items()):
+        if len(mapped_sources) > 1:
+            findings.append(
+                ValidationFinding(
+                    "citation_marker_source_conflict",
+                    "one citation marker maps to multiple sources",
+                    details={"marker": marker, "sources": sorted(mapped_sources)},
+                    origin="candidate",
+                )
+            )
+
+    content_markers_by_source: dict[str, set[int]] = {}
+    for _, marker, source_name in content_citations:
+        if marker is not None:
+            content_markers_by_source.setdefault(source_name, set()).add(marker)
+    for source_name, source_markers in sorted(content_markers_by_source.items()):
+        if len(source_markers) > 1:
+            findings.append(
+                ValidationFinding(
+                    "citation_source_marker_inconsistent",
+                    "a source must reuse one citation marker across content slides",
+                    details={"source": source_name, "markers": sorted(source_markers)},
+                    origin="candidate",
+                )
+            )
+
+    reference_sources_by_marker: dict[int, set[str]] = {}
+    for marker, source_name in reference_citations:
+        reference_sources_by_marker.setdefault(marker, set()).add(source_name)
+    for slide_number, marker, source_name in content_citations:
+        if marker is None:
+            continue
+        reference_sources = reference_sources_by_marker.get(marker, set())
+        if reference_sources != {source_name}:
+            findings.append(
+                ValidationFinding(
+                    "citation_footer_reference_mismatch",
+                    "content citation marker does not resolve to the same source in references",
+                    slide_number=slide_number,
+                    details={
+                        "marker": marker,
+                        "footer_source": source_name,
+                        "reference_sources": sorted(reference_sources),
+                    },
+                    origin="candidate",
+                )
+            )
+    return findings
+
+
+@dataclass(frozen=True)
+class _OutlineMappingEntry:
+    """One author-declared, inclusive content-slide range."""
+
+    node_id: str
+    slide_start: int
+    slide_end: int
+
+
+def _read_outline_mapping(path: Path) -> tuple[list[_OutlineMappingEntry] | None, ValidationFinding | None]:
+    """Load the narrow author sidecar without accepting ambiguous shapes."""
+
+    if not path.is_file() or path.is_symlink():
+        return None, ValidationFinding(
+            "outline_mapping_missing",
+            "work/outline_mapping.json is required for an approved outline",
+            details={"path": "work/outline_mapping.json"},
+            origin="candidate",
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return None, ValidationFinding(
+            "outline_mapping_invalid",
+            "work/outline_mapping.json is not valid JSON",
+            details={"error": str(exc)},
+            origin="candidate",
+        )
+    if not isinstance(payload, Mapping) or set(payload) != {"nodes"}:
+        return None, ValidationFinding(
+            "outline_mapping_invalid",
+            "outline mapping must contain only a nodes array",
+            origin="candidate",
+        )
+    raw_entries = payload["nodes"]
+    if not isinstance(raw_entries, list):
+        return None, ValidationFinding(
+            "outline_mapping_invalid",
+            "outline mapping nodes must be an array",
+            origin="candidate",
+        )
+
+    entries: list[_OutlineMappingEntry] = []
+    expected_keys = {"node_id", "slide_start", "slide_end"}
+    for index, raw_entry in enumerate(raw_entries):
+        if not isinstance(raw_entry, Mapping) or set(raw_entry) != expected_keys:
+            return None, ValidationFinding(
+                "outline_mapping_invalid",
+                "each outline mapping entry must contain only node_id, slide_start, and slide_end",
+                details={"entry_index": index},
+                origin="candidate",
+            )
+        node_id = raw_entry.get("node_id")
+        slide_start = raw_entry.get("slide_start")
+        slide_end = raw_entry.get("slide_end")
+        if (
+            not isinstance(node_id, str)
+            or not node_id.strip()
+            or type(slide_start) is not int
+            or type(slide_end) is not int
+        ):
+            return None, ValidationFinding(
+                "outline_mapping_invalid",
+                "outline mapping IDs must be non-empty strings and slide bounds must be integers",
+                details={"entry_index": index},
+                origin="candidate",
+            )
+        entries.append(
+            _OutlineMappingEntry(
+                node_id=node_id,
+                slide_start=slide_start,
+                slide_end=slide_end,
+            )
+        )
+    return entries, None
+
+
+def _outline_cross_check(
+    outline: "SlideOutline",
+    mapping_path: Path,
+    content_slide_count: int | None,
+) -> list[ValidationFinding]:
+    """Catch a candidate that silently drifted from the human-approved outline.
+
+    This is additive to, not a replacement for, the plain ``expected_slide_count``
+    check above: that one enforces the brief's requested count, this one enforces
+    the planner's approved structure. Both findings are ``origin="candidate"`` so
+    they flow through the existing validate-then-revise loop like any other
+    deterministic finding -- there is no separate failure path for outline drift.
+    """
+
+    findings: list[ValidationFinding] = []
+    entries, mapping_finding = _read_outline_mapping(mapping_path)
+    if mapping_finding is not None:
+        findings.append(mapping_finding)
+    if entries is None:
+        if content_slide_count is not None and content_slide_count != outline.total_slides:
+            findings.append(
+                ValidationFinding(
+                    "outline_slide_count_mismatch",
+                    "candidate content-slide count does not match the approved outline's total_slides",
+                    details={"expected": outline.total_slides, "actual": content_slide_count},
+                    origin="candidate",
+                )
+            )
+        return findings
+
+    approved_nodes = {node.id: node for node in outline.nodes}
+    approved_positions = {node.id: index for index, node in enumerate(outline.nodes)}
+    occurrences: dict[str, list[_OutlineMappingEntry]] = {node.id: [] for node in outline.nodes}
+    for entry in entries:
+        if entry.node_id not in approved_nodes:
+            findings.append(
+                ValidationFinding(
+                    "outline_node_unknown",
+                    f"outline mapping contains unapproved node ID `{entry.node_id}`",
+                    details={"node_id": entry.node_id},
+                    origin="candidate",
+                )
+            )
+            continue
+        occurrences[entry.node_id].append(entry)
+
+    for node in outline.nodes:
+        count = len(occurrences[node.id])
+        if count == 0:
+            findings.append(
+                ValidationFinding(
+                    "outline_node_missing",
+                    f"approved outline section `{node.id}` ({node.heading!r}) is absent from the mapping",
+                    details={"node_id": node.id, "heading": node.heading},
+                    origin="candidate",
+                )
+            )
+        elif count > 1:
+            findings.append(
+                ValidationFinding(
+                    "outline_node_duplicate",
+                    f"approved outline section `{node.id}` appears more than once in the mapping",
+                    details={"node_id": node.id, "occurrences": count},
+                    origin="candidate",
+                )
+            )
+
+    mapped_approved_ids = [entry.node_id for entry in entries if entry.node_id in approved_positions]
+    if mapped_approved_ids != sorted(mapped_approved_ids, key=approved_positions.__getitem__):
+        findings.append(
+            ValidationFinding(
+                "outline_node_order",
+                "outline mapping nodes are not in the approved order",
+                details={
+                    "expected": [node.id for node in outline.nodes],
+                    "actual": mapped_approved_ids,
+                },
+                origin="candidate",
+            )
+        )
+
+    valid_ranges: list[_OutlineMappingEntry] = []
+    for entry in entries:
+        if entry.slide_start > entry.slide_end:
+            findings.append(
+                ValidationFinding(
+                    "outline_range_invalid",
+                    f"outline mapping range for `{entry.node_id}` starts after it ends",
+                    details={
+                        "node_id": entry.node_id,
+                        "slide_start": entry.slide_start,
+                        "slide_end": entry.slide_end,
+                    },
+                    origin="candidate",
+                )
+            )
+            continue
+        if content_slide_count is not None and (
+            entry.slide_start < 1 or entry.slide_end > content_slide_count
+        ):
+            findings.append(
+                ValidationFinding(
+                    "outline_range_out_of_bounds",
+                    f"outline mapping range for `{entry.node_id}` falls outside the content slides",
+                    details={
+                        "node_id": entry.node_id,
+                        "slide_start": entry.slide_start,
+                        "slide_end": entry.slide_end,
+                        "content_slide_count": content_slide_count,
+                    },
+                    origin="candidate",
+                )
+            )
+            continue
+        valid_ranges.append(entry)
+
+    for previous, current in zip(valid_ranges, valid_ranges[1:]):
+        if current.slide_start < previous.slide_start:
+            findings.append(
+                ValidationFinding(
+                    "outline_range_order",
+                    f"outline mapping range for `{current.node_id}` precedes `{previous.node_id}`",
+                    details={"previous_node_id": previous.node_id, "node_id": current.node_id},
+                    origin="candidate",
+                )
+            )
+        elif current.slide_start <= previous.slide_end:
+            findings.append(
+                ValidationFinding(
+                    "outline_range_overlap",
+                    f"outline mapping ranges for `{previous.node_id}` and `{current.node_id}` overlap",
+                    details={"previous_node_id": previous.node_id, "node_id": current.node_id},
+                    origin="candidate",
+                )
+            )
+        elif current.slide_start != previous.slide_end + 1:
+            findings.append(
+                ValidationFinding(
+                    "outline_range_gap",
+                    f"outline mapping leaves a gap between `{previous.node_id}` and `{current.node_id}`",
+                    details={"previous_node_id": previous.node_id, "node_id": current.node_id},
+                    origin="candidate",
+                )
+            )
+
+    if content_slide_count is not None:
+        coverage = [0] * content_slide_count
+        for entry in valid_ranges:
+            for slide_number in range(entry.slide_start, entry.slide_end + 1):
+                coverage[slide_number - 1] += 1
+        missing_slides = [index for index, count in enumerate(coverage, start=1) if count == 0]
+        repeated_slides = [index for index, count in enumerate(coverage, start=1) if count > 1]
+        if missing_slides or repeated_slides:
+            findings.append(
+                ValidationFinding(
+                    "outline_slide_coverage",
+                    "outline mapping must cover each content slide exactly once",
+                    details={"missing_slides": missing_slides, "repeated_slides": repeated_slides},
+                    origin="candidate",
+                )
+            )
+
+    if content_slide_count is not None and content_slide_count != outline.total_slides:
+        findings.append(
+            ValidationFinding(
+                "outline_slide_count_mismatch",
+                "candidate content-slide count does not match the approved outline's total_slides",
+                details={"expected": outline.total_slides, "actual": content_slide_count},
+                origin="candidate",
+            )
+        )
+    return findings
+
+
 def _load_trusted_checker(path: Path = TRUSTED_CONTENT_CHECKER) -> Callable[[Path], dict[str, Any]]:
     """Load the repository-owned content checker, never one from the job.
 
@@ -1191,6 +1953,8 @@ def _validate_candidate_deck_in_render_root(
     expected_slide_count: int | None = None,
     requested_title: str | None = None,
     evidence_path: Path | None = None,
+    outline_path: Path | None = None,
+    sources_path: Path | None = None,
     logo_dir: Path | None = DEFAULT_LOGO_ASSET_DIR,
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
@@ -1202,12 +1966,26 @@ def _validate_candidate_deck_in_render_root(
 
     deck = job_dir / "output" / "presentation.pptx"
     evidence = Path(evidence_path) if evidence_path is not None else job_dir / "work" / "evidence.json"
+    outline_file = Path(outline_path) if outline_path is not None else job_dir / "work" / "outline.json"
+    sources_file = Path(sources_path) if sources_path is not None else job_dir / "work" / "sources.json"
     artifact_dir = job_dir / "work" / "intermediate"
     content_path = artifact_dir / "content_check.json"
     snapshot_path = artifact_dir / "deck_snapshot.json"
     _clear_final_renders(job_dir / "work" / "rendered" / "final")
     _clear_validator_artifacts(content_path, snapshot_path)
     findings: list[ValidationFinding] = []
+    sources: tuple[SlideSource, ...] | None = None
+    try:
+        sources = load_source_manifest(sources_file)
+    except SourceManifestError as exc:
+        findings.append(
+            ValidationFinding(
+                "source_manifest_unavailable",
+                "backend source-name manifest is missing or malformed",
+                details={"error": str(exc)},
+                origin="infrastructure",
+            )
+        )
     if runner is not None:
         # ``runner`` is the spelling used by the older artifacts helper.  It
         # is accepted here so the coordinator can migrate without an adapter
@@ -1221,18 +1999,65 @@ def _validate_candidate_deck_in_render_root(
     if deck.is_file() and not deck.is_symlink():
         pptx_sha256 = sha256_file(deck)
 
+    # Outline-driven jobs write ``work/outline.json`` once a human approves the
+    # planner's proposal (Stage 5b); every other job never creates that file, so
+    # this stays absent and the cross-check below never runs -- behavior for a
+    # non-planning job is unchanged. Imported locally, matching evidence.py's
+    # own avoidance of a module-level ``app.models`` dependency.
+    outline: "SlideOutline | None" = None
+    if outline_file.is_file() and not outline_file.is_symlink():
+        from app.models.slides import SlideOutline
+
+        outline = SlideOutline.model_validate(json.loads(outline_file.read_text(encoding="utf-8")))
+
     package: _PptxPackage | None = None
+    package_rewrite_findings: list[ValidationFinding] = []
     try:
         package = _load_pptx_package(deck)
+        # Run before rendering: a rewritten ``[Content_Types].xml`` still parses fine
+        # here (namespace-URI matching does not care about the literal prefix), so
+        # without this check the candidate would sail past package validation and only
+        # fail LibreOffice rendering below with an opaque ``renderer_error``.
+        package_rewrite_findings = _package_xml_rewrite_findings(deck, package.members)
+        findings.extend(package_rewrite_findings)
         slide_count = len(package.ordered_slides)
-        if expected_slide_count is not None and slide_count != expected_slide_count:
-            findings.append(ValidationFinding("slide_count", "PPTX slide count does not match the requested count", details={"expected": expected_slide_count, "actual": slide_count}, origin="candidate"))
+        content_slide_count = slide_count - 1
+        if sources is not None:
+            findings.extend(_citation_source_name_findings(package, sources))
+            findings.extend(_references_slide_findings(package, sources))
+        if expected_slide_count is not None and content_slide_count != expected_slide_count:
+            findings.append(
+                ValidationFinding(
+                    "slide_count",
+                    "PPTX content-slide count does not match the requested count",
+                    details={
+                        "expected_content_slides": expected_slide_count,
+                        "expected_total_slides": expected_slide_count + 1,
+                        "actual_total_slides": slide_count,
+                    },
+                    origin="candidate",
+                )
+            )
+        note_parts = sorted(
+            member
+            for member in package.members
+            if member.startswith("ppt/notesSlides/") and not member.endswith("/")
+        )
+        if note_parts:
+            findings.append(
+                ValidationFinding(
+                    "speaker_notes_present",
+                    "delivered PPTX must not contain speaker-notes parts",
+                    details={"parts": note_parts},
+                    origin="candidate",
+                )
+            )
     except PptxPackageError as exc:
         findings.append(ValidationFinding("pptx_invalid", str(exc), origin="candidate"))
 
     render_records: list[_RenderRecord] = []
     rendered_dir: Path | None = None
-    if slide_count is not None:
+    if slide_count is not None and not package_rewrite_findings:
         render_findings, render_records, rendered_dir = _render_backend_final(
             deck,
             slide_count,
@@ -1282,11 +2107,24 @@ def _validate_candidate_deck_in_render_root(
                 render_records=[record.as_dict() for record in render_records],
                 evidence_sha256=evidence_sha256,
             )
+            findings.extend(_chart_title_findings(snapshot))
         except Exception as exc:
             snapshot = _unavailable_snapshot(pptx_sha256, evidence_sha256, str(exc))
             findings.append(ValidationFinding("snapshot_error", "deck snapshot could not be generated", details={"error": str(exc)}, origin="infrastructure"))
     else:
         snapshot = _unavailable_snapshot(pptx_sha256, evidence_sha256, "PPTX package validation failed")
+
+    if outline is not None and snapshot.get("status") == "available":
+        # Only run against a snapshot that actually parsed; a broken package
+        # already produced ``pptx_invalid``/``snapshot_error`` above, and an
+        # "every node missing" pile-on would just be noise on top of that.
+        findings.extend(
+            _outline_cross_check(
+                outline,
+                job_dir / "work" / "outline_mapping.json",
+                slide_count - 1 if slide_count is not None else None,
+            )
+        )
 
     content_report["validator_binding"] = {
         **dict(content_report.get("validator_binding", {})),
@@ -1333,6 +2171,8 @@ def validate_candidate_deck(
     expected_slide_count: int | None = None,
     requested_title: str | None = None,
     evidence_path: Path | None = None,
+    outline_path: Path | None = None,
+    sources_path: Path | None = None,
     logo_dir: Path | None = DEFAULT_LOGO_ASSET_DIR,
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
@@ -1348,6 +2188,11 @@ def validate_candidate_deck(
     ``slide-<number>.png`` files there (or return their directory).  Its
     temporary directory is removed on every exit path, including unexpected
     validation and artifact-publication errors.
+
+    ``outline_path`` defaults to ``job_dir / "work" / "outline.json"``, exactly
+    where the approve route (Stage 5b) writes it. When that file is absent --
+    every job that never ran a planner -- no outline cross-check runs and
+    validation behaves exactly as it did before this check existed.
     """
 
     job_dir = Path(job_dir)
@@ -1360,6 +2205,8 @@ def validate_candidate_deck(
             expected_slide_count=expected_slide_count,
             requested_title=requested_title,
             evidence_path=evidence_path,
+            outline_path=outline_path,
+            sources_path=sources_path,
             logo_dir=logo_dir,
             command_runner=command_runner,
             runner=runner,

@@ -5,6 +5,10 @@ export {
   supportsSlideGeneration,
   createSlideJob,
   getSlideJob,
+  listSlideJobs,
+  getSlideJobOutline,
+  streamSlideJobOutlineMessage,
+  approveSlideJobOutline,
   slideDownloadUrl,
 } from "../api";
 
@@ -14,4 +18,10 @@ export type {
   CreateSlidesJobResponse,
   CreateSlidePayload,
   SlideJob,
+  SlideJobSummary,
+  SlideOutline,
+  SlideOutlineNode,
+  OutlineEmphasis,
+  OutlineRevisionResponse,
+  ApproveOutlineResponse,
 } from "../api";

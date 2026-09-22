@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
+from app.config import settings
 from app.models.slides import JobStatus, SlidesTaskPayload
 from app.services.agentic.contracts import (
     DeterministicValidationError,
@@ -137,54 +138,42 @@ class SlidesServiceTests(unittest.TestCase):
             self.assertEqual(existing.read_bytes(), b"existing deck")
             self.assertEqual(source.read_bytes(), b"new deck")
 
-    def test_semantic_review_rejects_malformed_findings(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ValueError):
-                slides_adapter.parse_review(
-                    '{"summary":"ok","findings":[{"finding_id":null,"status":"open","severity":"blocking","category":"factual","issue_key":"bad","locations":[],"description":"bad","correction":"fix"}]}',
-                    Path(temporary),
-                )
+    def test_extraction_and_reviewer_runner_follow_settings(self):
+        self.assertEqual(slides_adapter.extraction_runner, "codex")
+        self.assertEqual(slides_adapter.reviewer_runner, "codex")
+        with (
+            patch.object(settings, "agent_extraction_runner", "agents"),
+            patch.object(settings, "agent_reviewer_runner", "agents"),
+        ):
+            self.assertEqual(slides_adapter.extraction_runner, "agents")
+            self.assertEqual(slides_adapter.reviewer_runner, "agents")
+        # Both default back to "codex" once the override is gone: a developer
+        # who changes no settings sees no behavior change.
+        self.assertEqual(slides_adapter.extraction_runner, "codex")
+        self.assertEqual(slides_adapter.reviewer_runner, "codex")
 
-    def test_semantic_review_schema_and_parser_use_structured_findings(self):
-        schema = slides_adapter.review_output_schema
-        self.assertIn("findings", schema["properties"])
-        self.assertNotIn("blocking_findings", schema["properties"])
-        with tempfile.TemporaryDirectory() as temporary:
-            workspace = Path(temporary)
-            evidence = workspace / "work" / "evidence.json"
-            evidence.parent.mkdir(parents=True)
-            evidence.write_text(
-                json.dumps({"blocks": [{"id": "evidence_123"}], "assets": []}),
-                encoding="utf-8",
-            )
-            snapshot = workspace / "work" / "intermediate" / "deck_snapshot.json"
-            snapshot.parent.mkdir(parents=True)
-            snapshot.write_text(json.dumps({"slide_count": 8}), encoding="utf-8")
-            review = slides_adapter.parse_review(
-                '{"summary":"Two issues found.","findings":[{"severity":"blocking","category":"contradicted_claim","slide_number":4,"claim":"Growth is 8.2%.","judgement":"contradicted","evidence_refs":["evidence_123"],"reason":"The evidence states 4.1%.","correction":"Change the value to 4.1%."},{"severity":"advisory","category":"other","slide_number":2,"claim":"The title is vague.","judgement":"unclear","evidence_refs":[],"reason":"The wording is broad.","correction":"Clarify the title."}]}',
-                workspace,
-            )
-            self.assertIsInstance(review, ReviewOutcome)
-            self.assertEqual(review.findings[0].severity, ReviewSeverity.BLOCKING)
-            self.assertEqual(
-                json.loads((workspace / "work/intermediate/semantic_review.json").read_text(encoding="utf-8")),
-                review.model_dump(mode="json"),
-            )
-            with self.assertRaises(ValueError):
-                slides_adapter.parse_review('{"summary":"bad"}', workspace)
-            self.assertFalse((workspace / "work/intermediate/semantic_review.json").exists())
-            with self.assertRaisesRegex(ValueError, "malformed"):
-                slides_adapter.parse_review(
-                    '{"summary":"bad","findings":[{"severity":"blocking","category":"other","slide_number":"four","claim":"Claim","judgement":"unclear","evidence_refs":[],"reason":"Reason","correction":"Fix"}]}',
-                    workspace,
-                )
-
+    def test_review_prompt_includes_policy_guidance_and_ignores_history_argument(self):
         prompt = slides_adapter.build_review_prompt(_payload(uuid4()), Path("/tmp/workspace"), None, None)
         self.assertIn("authoritative requested presentation title", prompt)
         self.assertIn("ordinary rounding", prompt)
         self.assertIn("fresh semantic-only review", prompt)
         self.assertIn("internal EvidenceStore/block-ID/path/hash leakage", prompt)
         self.assertIn("image-chart values", prompt)
+        self.assertIn("expanded references on the final references slide", prompt)
+        self.assertIn("unsupported or fabricated reference entry as blocking", prompt)
+        self.assertIn("every footer and reference entry as an author claim", prompt)
+        self.assertIn("requested_slide_count` in Review inputs counts content slides only", prompt)
+        self.assertIn("requested_slide_count + 1` slides", prompt)
+        self.assertIn("Never raise a finding about the number of slides or the deck's overall length", prompt)
+        self.assertIn("verified deterministically before your review", prompt)
+        self.assertIn("Read footer and reference text from `work/intermediate/deck_snapshot.json`", prompt)
+        self.assertIn(
+            "Never raise a finding that a footer is missing, unreadable, or not visible in a rendered image",
+            prompt,
+        )
+        self.assertIn("never request a structural change such as adding or removing", prompt)
+        self.assertNotIn("expanded references in slide notes", prompt)
+        self.assertNotIn("Speaker notes are author claims", prompt)
         self.assertNotIn("Prior blocking findings", prompt)
 
         previous = ReviewOutcome(
@@ -256,6 +245,39 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertIn("verify each blocking finding individually", prompt)
         self.assertIn("2026 / Taiwan: NHI briefing", prompt)
         self.assertIn("audience-facing source footers", prompt)
+        self.assertIn("numbered final references slide", prompt)
+        self.assertIn("requested 8 content slides", prompt)
+        self.assertIn("final `\u53c3\u8003\u8cc7\u6599` slide", prompt)
+        self.assertIn("remove any speaker notes", prompt)
+        self.assertIn("work/sources.json", prompt)
+        self.assertIn("collision suffixes", prompt)
+
+    def test_correction_prompt_preserves_prior_validator_and_reviewer_findings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / "work").mkdir()
+            (workspace / "work/slide_context.json").write_text(
+                json.dumps({"staged_names": [], "font": "Noto Sans TC"}),
+                encoding="utf-8",
+            )
+            prompt = asyncio.run(
+                slides_adapter.build_prompt(
+                    _payload(uuid4()),
+                    workspace,
+                    revision_feedback='[{"code": "reviewer_policy_attribution"}]',
+                    prior_revision_feedback=(
+                        'After author attempt 1 (validator):\n[{"code": "pptx_missing"}]',
+                        'After author attempt 2 (validator):\n[{"code": "render_missing"}]',
+                    ),
+                )
+            )
+
+        self.assertTrue(slides_adapter.preserve_revision_feedback_history)
+        self.assertIn("pptx_missing", prompt)
+        self.assertIn("render_missing", prompt)
+        self.assertIn("reviewer_policy_attribution", prompt)
+        self.assertLess(prompt.index("pptx_missing"), prompt.index("render_missing"))
+        self.assertLess(prompt.index("render_missing"), prompt.index("reviewer_policy_attribution"))
 
     def test_review_context_lists_semantic_review_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -277,6 +299,8 @@ class SlidesServiceTests(unittest.TestCase):
             writable = slides_adapter.stage_writable_paths("author", workspace)
             self.assertTrue(all(path.exists() for path in writable))
             self.assertNotIn(workspace / "work" / "rendered" / "final", writable)
+            self.assertIn(workspace / "work" / "outline_mapping.json", writable)
+            self.assertNotIn(workspace / "work", writable)
 
     def test_validator_candidate_findings_are_structured_retry_feedback(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -334,6 +358,28 @@ class SlidesServiceTests(unittest.TestCase):
                 )
             )
 
+    def test_post_author_completion_check_cleans_every_author_attempt(self):
+        """The backend, not the author, owns package cleanup (Fix 1a).
+
+        ``post_author_completion_check`` runs after every author attempt, before
+        ``validate_generated`` -- this proves the slides adapter wires that hook to the
+        repository-owned cleaner rather than leaving cleanup to the author's own script.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / "output").mkdir(parents=True)
+            (workspace / "output" / "presentation.pptx").write_bytes(b"placeholder")
+
+            with patch("app.services.slides.adapter.clean_candidate_deck") as cleaner:
+                cleaner.return_value = ["ppt/notesSlides/notesSlide1.xml"]
+                result = slides_adapter.post_author_completion_check(
+                    _payload(uuid4()), None, workspace
+                )
+
+            self.assertIsNone(result)
+            cleaner.assert_called_once_with(workspace)
+
     def test_verify_output_rejects_requested_slide_count_mismatch(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -345,8 +391,26 @@ class SlidesServiceTests(unittest.TestCase):
                 archive.writestr("ppt/slides/slide2.xml", "slide")
                 archive.writestr("padding.bin", "x" * 12_000)
 
-            with self.assertRaisesRegex(JobError, "expected 8 slides, found 2"):
+            with self.assertRaisesRegex(
+                JobError,
+                "expected 8 content slides plus one references slide",
+            ):
                 verify_output(root, expected_slide_count=8)
+
+    def test_verify_output_rejects_speaker_notes_parts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            deck = root / "output" / "presentation.pptx"
+            deck.parent.mkdir()
+            with zipfile.ZipFile(deck, "w") as archive:
+                archive.writestr("[Content_Types].xml", "content")
+                archive.writestr("ppt/slides/slide1.xml", "slide")
+                archive.writestr("ppt/slides/slide2.xml", "slide")
+                archive.writestr("ppt/notesSlides/notesSlide1.xml", "notes")
+                archive.writestr("padding.bin", "x" * 12_000)
+
+            with self.assertRaisesRegex(JobError, "contains speaker notes"):
+                verify_output(root, expected_slide_count=1)
 
     def test_verify_output_rejects_identical_final_renders(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -380,7 +444,7 @@ class SlidesServiceTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
             with self.assertRaisesRegex(JobError, "all final slide renders are identical"):
-                verify_output(root, expected_slide_count=2, runner=office_runner)
+                verify_output(root, expected_slide_count=1, runner=office_runner)
 
     def test_preflight_requires_thumbnail_renderer(self):
         def tool_lookup(name):

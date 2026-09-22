@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -11,8 +12,10 @@ import app.services.slides.validation as validation_module
 from app.services.slides.validation import (
     ValidationStatus,
     _canonicalize_pdftoppm_output,
+    _chart_title_findings,
     validate_candidate_deck,
 )
+from app.services.slides.source_manifest import write_source_manifest
 
 
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -30,7 +33,29 @@ def _png_bytes(color: tuple[int, int, int]) -> bytes:
     return output.getvalue()
 
 
-def _write_deck(root: Path, slide_count: int = 2) -> Path:
+def _paragraph_xml(item: str | tuple[str, str]) -> str:
+    """Render one `<a:p>`; a ``("slidenum", text)`` tuple renders as a real PowerPoint field.
+
+    A `<a:fld type="slidenum">` is how PowerPoint represents a running page number: its
+    cached display value still lands inside a plain text scan, so tests need a way to
+    produce the field shape distinctly from a page number some author wrote as literal text.
+    """
+
+    if isinstance(item, tuple):
+        kind, text = item
+        return f'<a:p><a:fld id="{{2F2F2F2F-0000-0000-0000-000000000000}}" type="{kind}"><a:rPr/><a:t>{text}</a:t></a:fld></a:p>'
+    return f"<a:p><a:r><a:rPr/><a:t>{item}</a:t></a:r></a:p>"
+
+
+def _write_deck(
+    root: Path,
+    slide_count: int = 2,
+    *,
+    paragraphs_by_slide: dict[int, list[str | tuple[str, str]]] | None = None,
+    include_notes: bool = False,
+    title_placeholder_by_slide: set[int] | None = None,
+    extra_shapes_by_slide: dict[int, list[str]] | None = None,
+) -> Path:
     deck = root / "output" / "presentation.pptx"
     deck.parent.mkdir(parents=True)
     parts = {
@@ -39,6 +64,7 @@ def _write_deck(root: Path, slide_count: int = 2) -> Path:
           <Default Extension="xml" ContentType="application/xml"/>
           <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
           {''.join(f'<Override PartName="/ppt/slides/slide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>' for i in range(1, slide_count + 1))}
+          {''.join(f'<Override PartName="/ppt/notesSlides/notesSlide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>' for i in range(1, slide_count + 1)) if include_notes else ''}
         </Types>''',
         "ppt/presentation.xml": f'''<p:presentation xmlns:p="{P_NS}" xmlns:r="{R_NS}">
           <p:sldIdLst>{''.join(f'<p:sldId id="{i}" r:id="rId{i}"/>' for i in range(1, slide_count + 1))}</p:sldIdLst>
@@ -48,12 +74,40 @@ def _write_deck(root: Path, slide_count: int = 2) -> Path:
         </Relationships>''',
     }
     for index in range(1, slide_count + 1):
-        text = "Cover title" if index == 1 else f"Slide {index}"
+        paragraphs = (paragraphs_by_slide or {}).get(
+            index,
+            [
+                "Cover title"
+                if index == 1
+                else "參考資料"
+                if index == slide_count
+                else f"Slide {index}"
+            ],
+        )
+        text_xml = "".join(_paragraph_xml(text) for text in paragraphs)
+        title_shape_xml = ""
+        if index in (title_placeholder_by_slide or set()):
+            title_shape_xml = (
+                f'<p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/>'
+                f'<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{paragraphs[0]}</a:t></a:r></a:p></p:txBody></p:sp>'
+            )
+            text_xml = "".join(_paragraph_xml(text) for text in paragraphs[1:])
+        extra_shapes_xml = "".join(
+            f'<p:sp><p:nvSpPr/><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>{_paragraph_xml(text)}</p:txBody></p:sp>'
+            for text in (extra_shapes_by_slide or {}).get(index, [])
+        )
         parts[f"ppt/slides/slide{index}.xml"] = f'''<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}">
-          <p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/><p:sp><p:nvSpPr/><p:spPr/>
-            <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr/><a:t>{text}</a:t></a:r></a:p></p:txBody>
-          </p:sp></p:spTree></p:cSld>
+          <p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>{title_shape_xml}<p:sp><p:nvSpPr/><p:spPr/>
+            <p:txBody><a:bodyPr/><a:lstStyle/>{text_xml}</p:txBody>
+          </p:sp>{extra_shapes_xml}</p:spTree></p:cSld>
         </p:sld>'''
+        if include_notes:
+            parts[f"ppt/slides/_rels/slide{index}.xml.rels"] = f'''<Relationships xmlns="{REL_NS}">
+              <Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide{index}.xml"/>
+            </Relationships>'''
+            parts[f"ppt/notesSlides/notesSlide{index}.xml"] = f'''<p:notes xmlns:p="{P_NS}" xmlns:a="{A_NS}">
+              <p:notesText><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{"cover" if index == 1 else "body"}</a:t></a:r></a:p></p:txBody></p:notesText>
+            </p:notes>'''
     with zipfile.ZipFile(deck, "w") as archive:
         for name, value in parts.items():
             archive.writestr(name, value)
@@ -79,9 +133,58 @@ def _pass_checker(path: Path) -> dict[str, object]:
     }
 
 
+def _write_outline(root: Path, *, nodes: list[dict[str, object]], total_slides: int) -> Path:
+    outline_path = root / "work" / "outline.json"
+    outline_path.parent.mkdir(parents=True, exist_ok=True)
+    outline_path.write_text(
+        json.dumps(
+            {
+                "title": "Cover title",
+                "narrative": "A through-line covering the approved sections.",
+                "nodes": nodes,
+                "total_slides": total_slides,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return outline_path
+
+
+def _outline_node(node_id: str, heading: str) -> dict[str, object]:
+    return {
+        "id": node_id,
+        "heading": heading,
+        "intent": f"Cover {heading} with grounded evidence.",
+        "key_points": ["first point", "second point"],
+        "evidence_refs": [],
+        "emphasis": "normal",
+        "approx_slides": 1,
+    }
+
+
+def _write_outline_mapping(root: Path, nodes: list[tuple[str, int, int]]) -> Path:
+    mapping_path = root / "work" / "outline_mapping.json"
+    mapping_path.parent.mkdir(parents=True, exist_ok=True)
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"node_id": node_id, "slide_start": slide_start, "slide_end": slide_end}
+                    for node_id, slide_start, slide_end in nodes
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return mapping_path
+
+
 def _validate(root: Path, **kwargs: object):
+    sources_path = root / "work" / "sources.json"
+    if "sources_path" not in kwargs and not sources_path.exists():
+        write_source_manifest(sources_path, ["source.pdf"], ["年度報告.pdf"])
     options: dict[str, object] = {
-        "expected_slide_count": 2,
+        "expected_slide_count": 1,
         "requested_title": "Cover title",
         "content_checker": _pass_checker,
         "require_logo": False,
@@ -89,6 +192,47 @@ def _validate(root: Path, **kwargs: object):
     }
     options.update(kwargs)
     return validate_candidate_deck(root, **options)
+
+
+def test_chart_title_findings_rejects_an_untitled_native_chart() -> None:
+    findings = _chart_title_findings(
+        {
+            "slides": [
+                {
+                    "slide_number": 3,
+                    "charts": [
+                        {"part": "ppt/charts/chart1.xml", "title": None},
+                        {"part": "ppt/charts/chart2.xml", "title": "給付件數年度趨勢"},
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert [finding.code for finding in findings] == ["chart_title_missing"]
+    assert findings[0].slide_number == 3
+    assert findings[0].details == {
+        "chart_index": 1,
+        "part": "ppt/charts/chart1.xml",
+    }
+
+
+def test_chart_title_findings_accepts_non_empty_native_chart_titles() -> None:
+    assert not _chart_title_findings(
+        {
+            "slides": [
+                {
+                    "slide_number": 2,
+                    "charts": [
+                        {
+                            "part": "ppt/charts/chart1.xml",
+                            "title": "各年度門診申報件數",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
 
 
 def test_backend_renders_replace_stale_author_previews_and_bind_snapshot(tmp_path: Path) -> None:
@@ -106,6 +250,131 @@ def test_backend_renders_replace_stale_author_previews_and_bind_snapshot(tmp_pat
     assert (final / "slide-1.png").read_bytes() != (preview / "slide-1.png").read_bytes()
     assert result.deck_snapshot["artifact_binding"]["pptx_sha256"] == result.pptx_sha256
     assert result.deck_snapshot["trusted_renders"] == []
+
+
+def test_requested_count_excludes_the_final_references_slide(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+
+    result = _validate(tmp_path, expected_slide_count=2)
+
+    finding = next(finding for finding in result.findings if finding.code == "slide_count")
+    assert finding.details == {
+        "expected_content_slides": 2,
+        "expected_total_slides": 3,
+        "actual_total_slides": 2,
+    }
+
+
+def test_speaker_notes_parts_are_a_candidate_finding(tmp_path: Path) -> None:
+    deck = _write_deck(tmp_path, include_notes=True)
+
+    result = _validate(tmp_path)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "speaker_notes_present"
+    )
+    assert finding.origin == "candidate"
+    assert finding.details["parts"] == [
+        "ppt/notesSlides/notesSlide1.xml",
+        "ppt/notesSlides/notesSlide2.xml",
+    ]
+    snapshot = validation_module.build_deck_snapshot(deck)
+    assert snapshot["slides"][0]["notes"] == ["cover"]
+
+
+def _rewrite_parts_with_elementtree(deck: Path, *part_names: str) -> None:
+    """Re-serialize exactly ``part_names`` through ``ElementTree``, byte for byte.
+
+    Mirrors how the production defect was reproduced: this is namespace-equivalent XML
+    that most consumers still parse, but with ``ns0:``/``ns1:``-style generated prefixes
+    instead of the original human-readable ones.
+    """
+
+    from xml.etree import ElementTree as ET
+
+    with zipfile.ZipFile(deck) as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+    for name in part_names:
+        parts[name] = ET.tostring(ET.fromstring(parts[name]), encoding="utf-8")
+    with zipfile.ZipFile(deck, "w") as archive:
+        for name, data in parts.items():
+            archive.writestr(name, data)
+
+
+def test_normal_deck_is_not_flagged_as_package_xml_rewritten(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+
+    result = _validate(tmp_path)
+
+    assert not any(finding.code == "package_xml_rewritten" for finding in result.findings)
+
+
+def test_elementtree_rewritten_slide_and_rels_parts_are_not_flagged(tmp_path: Path) -> None:
+    """A rewrite outside the two harmful parts must not block an otherwise-working deck.
+
+    Both LibreOffice and the repository's own ``clean.py`` tolerate an ElementTree-style
+    rewrite of an individual slide, notes part, or `.rels` file -- confirmed by rendering a
+    known-good deck with exactly these parts rewritten. Flagging them as blocking would
+    reject a deck that actually opens and prints fine.
+    """
+
+    deck = _write_deck(tmp_path)
+    _rewrite_parts_with_elementtree(
+        deck, "ppt/slides/slide1.xml", "ppt/_rels/presentation.xml.rels"
+    )
+
+    result = _validate(tmp_path)
+
+    assert not any(finding.code == "package_xml_rewritten" for finding in result.findings)
+
+
+def test_package_xml_rewritten_by_elementtree_is_flagged_and_skips_rendering(
+    tmp_path: Path,
+) -> None:
+    """Reproduces the production defect precisely: an author (or ad hoc tooling)
+    re-serializing ``[Content_Types].xml`` with ``xml.etree.ElementTree`` renames
+    namespace prefixes to ``ns0:``/``ns1:`` and drops declarations LibreOffice needs, so
+    the part still parses here but the deck cannot be opened at all. This must surface as
+    a named, actionable finding -- not the opaque ``renderer_error`` that a doomed render
+    attempt would otherwise produce, so rendering must be skipped once this finding fires.
+    """
+
+    deck = _write_deck(tmp_path)
+    _rewrite_parts_with_elementtree(deck, "[Content_Types].xml")
+
+    def _unreachable_renderer(deck_path: Path, output_dir: Path) -> None:
+        raise AssertionError("rendering must be skipped once package_xml_rewritten fires")
+
+    result = _validate(tmp_path, renderer=_unreachable_renderer)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "package_xml_rewritten"
+    )
+    assert finding.origin == "candidate"
+    assert finding.details["parts"] == ["[Content_Types].xml"]
+
+
+def test_presentation_xml_rewritten_by_elementtree_is_flagged_and_skips_rendering(
+    tmp_path: Path,
+) -> None:
+    """The second harmful part: a rewritten ``presentation.xml`` defeats ``clean.py``'s
+    slide-reference regex (see ``PACKAGE_XML_REWRITE_SENSITIVE_PARTS``), so it must be
+    caught here too, even though LibreOffice alone tolerates this specific part rewritten.
+    """
+
+    deck = _write_deck(tmp_path)
+    _rewrite_parts_with_elementtree(deck, "ppt/presentation.xml")
+
+    def _unreachable_renderer(deck_path: Path, output_dir: Path) -> None:
+        raise AssertionError("rendering must be skipped once package_xml_rewritten fires")
+
+    result = _validate(tmp_path, renderer=_unreachable_renderer)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "package_xml_rewritten"
+    )
+    assert finding.origin == "candidate"
+    assert finding.details["parts"] == ["ppt/presentation.xml"]
 
 
 def test_failed_validation_clears_old_final_renders(tmp_path: Path) -> None:
@@ -291,3 +560,771 @@ def test_pdftoppm_canonicalization_rejects_padded_name_collisions(tmp_path: Path
     else:
         raise AssertionError("padded names must collide")
     assert not destination.exists()
+
+
+def test_no_outline_file_leaves_validation_unaffected(tmp_path: Path) -> None:
+    """A non-planning job never writes ``work/outline.json``; behavior must be unchanged."""
+
+    _write_deck(tmp_path)
+    result = _validate(tmp_path)
+
+    assert result.status is ValidationStatus.PASS
+    assert not any(finding.code.startswith("outline_") for finding in result.findings)
+
+
+def test_citation_source_names_accept_only_catalog_display_names(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: [
+                "Cover title",
+                "本文提到 report__2.pdf，但不是引用。",
+                "[2] 普通編號內容，不是來源清單。",
+            ],
+            2: [
+                "參考資料",
+                "[1] 2025，年度報告.pdf，〈財務〉，PDF 第 12 頁",
+                "[1] 資料來源：2025，年度報告.pdf，PDF 第 12 頁",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report__2.pdf"],
+        ["2025，年度報告.pdf"],
+    )
+
+    result = _validate(tmp_path)
+
+    source_findings = [
+        finding for finding in result.findings if finding.code == "citation_source_name_invalid"
+    ]
+    assert source_findings == []
+
+
+def test_citation_source_name_rejects_unknown_and_prefix_names(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "Slide 2",
+                "[1] 資料來源：年度報告.pdf.bak，PDF 第 3 頁",
+                "[2] 資料來源：內部摘要.pdf，PDF 第 8 頁",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf"],
+        ["年度報告.pdf"],
+    )
+
+    result = _validate(tmp_path)
+
+    findings = [
+        finding for finding in result.findings if finding.code == "citation_source_name_invalid"
+    ]
+    assert [finding.slide_number for finding in findings] == [2, 2]
+    assert all(finding.origin == "candidate" for finding in findings)
+
+
+def test_citation_rejects_internal_tokens_after_an_allowed_source_name(tmp_path: Path) -> None:
+    digest = "a" * 64
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "參考資料",
+                "[1] 年度報告.pdf，report__2.pdf",
+                "[2] 年度報告.pdf，EvidenceStore，work/evidence.json",
+                f"[3] 年度報告.pdf，{digest}",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report__2.pdf"],
+        ["年度報告.pdf"],
+    )
+
+    result = _validate(tmp_path)
+
+    findings = [
+        finding for finding in result.findings if finding.code == "citation_abstraction_leak"
+    ]
+    assert [finding.slide_number for finding in findings] == [2, 2, 2]
+    assert findings[0].details["leaks"] == ["report__2.pdf"]
+    assert findings[1].details["leaks"] == ["EvidenceStore", "work/evidence.json"]
+    assert findings[2].details["leaks"] == ["sha256"]
+
+
+def test_citation_does_not_treat_a_filename_inside_its_display_name_as_leakage(
+    tmp_path: Path,
+) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "[1] 資料來源：Annual report.pdf"],
+            2: ["參考資料", "[1] Annual report.pdf"],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf"],
+        ["Annual report.pdf"],
+    )
+
+    result = _validate(tmp_path, requested_title=None)
+
+    assert result.status is ValidationStatus.PASS
+
+
+def test_references_slide_matches_unique_numbered_content_sources(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        slide_count=3,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "Policy result",
+                "[1] 資料來源：年度報告.pdf，PDF 第 12 頁",
+                "[2] 資料來源：政策說明.docx，〈給付範圍〉",
+            ],
+            3: [
+                "參考資料",
+                "[1] 年度報告.pdf，〈財務〉，PDF 第 12 頁",
+                "[2] 政策說明.docx，〈給付範圍〉",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf", "policy.docx"],
+        ["年度報告.pdf", "政策說明.docx"],
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    assert result.status is ValidationStatus.PASS
+
+
+def test_references_slide_requires_exact_last_title(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "[1] 資料來源：年度報告.pdf"],
+            2: ["參考文獻", "[1] 年度報告.pdf"],
+        },
+    )
+
+    result = _validate(tmp_path)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "references_slide_missing"
+    )
+    assert finding.slide_number == 2
+    assert finding.details["title"] == "參考資料"
+
+
+def test_references_slide_rejects_body_title_spoofing_a_title_placeholder(
+    tmp_path: Path,
+) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: ["附錄", "參考資料", "[1] 年度報告.pdf"],
+        },
+        title_placeholder_by_slide={2},
+    )
+
+    result = _validate(tmp_path)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "references_slide_missing"
+    )
+    assert finding.details["actual"] == "附錄"
+
+
+def test_references_slide_rejects_each_unnumbered_or_malformed_paragraph(
+    tmp_path: Path,
+) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "[1] 資料來源：年度報告.pdf"],
+            2: [
+                "參考資料",
+                "[1] 年度報告.pdf",
+                "年度報告.pdf，PDF 第 12 頁",
+                "[2]資料來源：年度報告.pdf",
+                "[3] 年度報告.pdf，[4] 政策說明.docx",
+            ],
+        },
+    )
+
+    result = _validate(tmp_path)
+
+    invalid = [
+        finding.details["paragraph"]
+        for finding in result.findings
+        if finding.code == "references_entry_invalid"
+    ]
+    assert invalid == [
+        "年度報告.pdf，PDF 第 12 頁",
+        "[2]資料來源：年度報告.pdf",
+        "[3] 年度報告.pdf，[4] 政策說明.docx",
+    ]
+
+
+def test_references_slide_rejects_closing_caption_sentence(tmp_path: Path) -> None:
+    """Reproduces a live defect: the author appended a closing summary sentence after the
+    numbered entries. The references slide must contain only the title and entries, so the
+    sentence is still a blocking `references_entry_invalid` finding, and its message must
+    tell the author to remove it rather than to number it.
+    """
+    caption = "本簡報各項事實、數字與圖表均依上述來源及題號定位。"
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "[1] 資料來源：年度報告.pdf"],
+            2: ["參考資料", "[1] 年度報告.pdf", caption],
+        },
+    )
+
+    result = _validate(tmp_path)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "references_entry_invalid"
+    )
+    assert finding.details["paragraph"] == caption
+    assert "must be removed" in finding.message
+    assert "caption" in finding.message
+
+
+def test_references_slide_ignores_template_chrome_but_still_flags_malformed_entries(
+    tmp_path: Path,
+) -> None:
+    """Page numbers and a recurring footer are chrome, not entries to validate.
+
+    Reproduces the production defect (a live deck's references slide failed on its own
+    page-number paragraph and a recurring title footer that also appears on the cover):
+    neither a real `<a:fld type="slidenum">` field, a page number written as literal text,
+    nor text that recurs verbatim as another slide's own shape may be treated as a
+    malformed entry -- while a genuinely malformed, non-recurring paragraph must still be
+    flagged blocking.
+    """
+
+    _write_deck(
+        tmp_path,
+        slide_count=3,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: ["Body content", "[1] 資料來源：年度報告.pdf"],
+            3: [
+                "參考資料",
+                "[1] 年度報告.pdf",
+                ("slidenum", "3"),
+                "3",
+                "年度報告.pdf，PDF 第 12 頁",
+            ],
+        },
+        extra_shapes_by_slide={2: ["Policy briefing title"], 3: ["Policy briefing title"]},
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    invalid = [
+        finding.details["paragraph"]
+        for finding in result.findings
+        if finding.code == "references_entry_invalid"
+    ]
+    assert invalid == ["年度報告.pdf，PDF 第 12 頁"]
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        "work/sources.json",
+        "work/outline_mapping.json",
+        "trace.json",
+        "ppt/charts/chart1.xml",
+        "ppt/slides/slide2.xml",
+        "word/document.xml",
+    ],
+)
+def test_citation_rejects_additional_internal_artifact_names(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "[1] 資料來源：年度報告.pdf"],
+            2: ["參考資料", f"[1] 年度報告.pdf，{artifact}"],
+        },
+    )
+
+    result = _validate(tmp_path)
+
+    leak = next(
+        finding for finding in result.findings if finding.code == "citation_abstraction_leak"
+    )
+    assert artifact in leak.details["leaks"]
+
+
+def test_references_slide_rejects_duplicate_numbers_sources_and_mismatch(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        slide_count=3,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "Policy result",
+                "[1] 資料來源：年度報告.pdf，PDF 第 12 頁",
+                "[2] 資料來源：政策說明.docx，〈給付範圍〉",
+            ],
+            3: [
+                "參考資料",
+                "[1] 年度報告.pdf，PDF 第 12 頁",
+                "[1] 年度報告.pdf，〈財務〉",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf", "policy.docx"],
+        ["年度報告.pdf", "政策說明.docx"],
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    finding_codes = {finding.code for finding in result.findings}
+    assert "references_number_duplicate" in finding_codes
+    assert "references_source_duplicate" in finding_codes
+    mismatch = next(
+        finding for finding in result.findings if finding.code == "references_source_mismatch"
+    )
+    assert mismatch.details == {
+        "missing_sources": ["政策說明.docx"],
+        "unused_sources": [],
+    }
+
+
+def test_content_footers_reuse_reference_number_for_a_repeated_source(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        slide_count=4,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: ["Finding A", "[1] 資料來源：年度報告.pdf，PDF 第 12 頁"],
+            3: ["Finding B", "[1] 資料來源：年度報告.pdf，〈財務〉"],
+            4: ["參考資料", "[1] 年度報告.pdf，〈財務〉，PDF 第 12 頁"],
+        },
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=3,
+        renderer=_renderer(
+            ((10, 20, 30), (20, 30, 40), (30, 40, 50), (40, 50, 60))
+        ),
+    )
+
+    assert result.status is ValidationStatus.PASS
+
+
+def test_content_footer_requires_a_numbered_marker(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={
+            1: ["Cover title", "資料來源：年度報告.pdf，PDF 第 12 頁"],
+            2: ["參考資料", "[1] 年度報告.pdf，PDF 第 12 頁"],
+        },
+    )
+
+    result = _validate(tmp_path)
+
+    finding = next(
+        finding
+        for finding in result.findings
+        if finding.code == "citation_footer_number_missing"
+    )
+    assert finding.slide_number == 1
+    assert finding.origin == "candidate"
+
+
+def test_content_footer_markers_must_map_one_to_one_with_references(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        slide_count=4,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "Finding A",
+                "[1] 資料來源：年度報告.pdf，PDF 第 12 頁",
+                "[1] 資料來源：政策說明.docx，〈給付範圍〉",
+            ],
+            3: ["Finding B", "[2] 資料來源：年度報告.pdf，〈財務〉"],
+            4: [
+                "參考資料",
+                "[1] 年度報告.pdf，PDF 第 12 頁",
+                "[2] 政策說明.docx，〈給付範圍〉",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf", "policy.docx"],
+        ["年度報告.pdf", "政策說明.docx"],
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=3,
+        renderer=_renderer(
+            ((10, 20, 30), (20, 30, 40), (30, 40, 50), (40, 50, 60))
+        ),
+    )
+
+    finding_codes = {finding.code for finding in result.findings}
+    assert "citation_marker_source_conflict" in finding_codes
+    assert "citation_source_marker_inconsistent" in finding_codes
+    mismatch_findings = [
+        finding
+        for finding in result.findings
+        if finding.code == "citation_footer_reference_mismatch"
+    ]
+    assert [(finding.slide_number, finding.details["marker"]) for finding in mismatch_findings] == [
+        (2, 1),
+        (3, 2),
+    ]
+
+
+def test_citation_footer_rejects_a_repeated_marker_combining_two_sources(tmp_path: Path) -> None:
+    combined = (
+        "[1] 資料來源：年度報告.pdf，PDF 第 3 頁；"
+        "[2] 資料來源：全民健保檢討報告（草案），PDF 第 7 頁"
+    )
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={1: ["Cover title", combined]},
+    )
+
+    result = _validate(tmp_path)
+
+    findings = [
+        finding
+        for finding in result.findings
+        if finding.code == "citation_footer_combines_sources"
+    ]
+    assert len(findings) == 1
+    assert findings[0].slide_number == 1
+    assert findings[0].details == {"citation": combined}
+    assert findings[0].origin == "candidate"
+
+
+def test_citation_footer_rejects_stacked_numbers_before_one_marker(tmp_path: Path) -> None:
+    combined = "[1][2] 資料來源：A；B"
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={1: ["Cover title", combined]},
+    )
+
+    result = _validate(tmp_path)
+
+    findings = [
+        finding
+        for finding in result.findings
+        if finding.code == "citation_footer_combines_sources"
+    ]
+    assert len(findings) == 1
+    assert findings[0].slide_number == 1
+    assert findings[0].details == {"citation": combined}
+
+
+def test_citation_footer_bracket_in_locator_is_not_a_combined_source(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={1: ["Cover title", "[1] 資料來源：年度報告.pdf，第[3]節"]},
+    )
+
+    result = _validate(tmp_path)
+
+    assert not any(
+        finding.code == "citation_footer_combines_sources" for finding in result.findings
+    )
+
+
+def test_body_text_mentioning_the_citation_marker_once_is_not_combined(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        paragraphs_by_slide={1: ["Cover title", "本報告的資料來源包括多份文件"]},
+    )
+
+    result = _validate(tmp_path)
+
+    assert not any(
+        finding.code == "citation_footer_combines_sources" for finding in result.findings
+    )
+
+
+def test_two_sources_on_separate_footer_paragraphs_still_passes(tmp_path: Path) -> None:
+    _write_deck(
+        tmp_path,
+        slide_count=3,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: [
+                "Policy result",
+                "[1] 資料來源：年度報告.pdf，PDF 第 12 頁",
+                "[2] 資料來源：政策說明.docx，〈給付範圍〉",
+            ],
+            3: [
+                "參考資料",
+                "[1] 年度報告.pdf，〈財務〉，PDF 第 12 頁",
+                "[2] 政策說明.docx，〈給付範圍〉",
+            ],
+        },
+    )
+    write_source_manifest(
+        tmp_path / "work" / "sources.json",
+        ["report.pdf", "policy.docx"],
+        ["年度報告.pdf", "政策說明.docx"],
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    assert result.status is ValidationStatus.PASS
+    assert not any(
+        finding.code == "citation_footer_combines_sources" for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize("manifest_contents", [None, "not JSON"])
+def test_source_manifest_missing_or_malformed_is_infrastructure_failure(
+    tmp_path: Path,
+    manifest_contents: str | None,
+) -> None:
+    _write_deck(tmp_path)
+    sources_path = tmp_path / "work" / "sources-invalid.json"
+    if manifest_contents is not None:
+        sources_path.parent.mkdir(parents=True, exist_ok=True)
+        sources_path.write_text(manifest_contents, encoding="utf-8")
+
+    result = _validate(tmp_path, sources_path=sources_path)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "source_manifest_unavailable"
+    )
+    assert finding.origin == "infrastructure"
+
+
+def test_approved_outline_matching_the_deck_passes(tmp_path: Path) -> None:
+    _write_deck(tmp_path, slide_count=3)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=2,
+    )
+    _write_outline_mapping(tmp_path, [("cover", 1, 1), ("body", 2, 2)])
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    assert result.status is ValidationStatus.PASS
+    assert not any(finding.code.startswith("outline_") for finding in result.findings)
+
+
+def test_outline_node_missing_from_deck_is_a_candidate_finding(tmp_path: Path) -> None:
+    _write_deck(tmp_path, slide_count=3)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("missing", "Regional Risk Outlook")],
+        total_slides=2,
+    )
+    _write_outline_mapping(tmp_path, [("cover", 1, 2)])
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    assert result.status is ValidationStatus.FAIL
+    finding = next(finding for finding in result.findings if finding.code == "outline_node_missing")
+    assert finding.origin == "candidate"
+    assert finding.details["node_id"] == "missing"
+    assert finding.details["heading"] == "Regional Risk Outlook"
+
+
+def test_outline_total_slides_mismatch_is_a_candidate_finding(tmp_path: Path) -> None:
+    _write_deck(tmp_path, slide_count=3)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=5,
+    )
+    _write_outline_mapping(tmp_path, [("cover", 1, 1), ("body", 2, 2)])
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    assert result.status is ValidationStatus.FAIL
+    finding = next(finding for finding in result.findings if finding.code == "outline_slide_count_mismatch")
+    assert finding.origin == "candidate"
+    assert finding.details == {"expected": 5, "actual": 2}
+
+
+def test_missing_outline_mapping_is_a_candidate_finding(tmp_path: Path) -> None:
+    _write_deck(tmp_path, slide_count=3)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=2,
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    finding = next(finding for finding in result.findings if finding.code == "outline_mapping_missing")
+    assert finding.origin == "candidate"
+
+
+def test_malformed_outline_mapping_is_a_candidate_finding(tmp_path: Path) -> None:
+    _write_deck(tmp_path, slide_count=3)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=2,
+    )
+    mapping_path = tmp_path / "work" / "outline_mapping.json"
+    mapping_path.write_text("not JSON", encoding="utf-8")
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    finding = next(finding for finding in result.findings if finding.code == "outline_mapping_invalid")
+    assert finding.origin == "candidate"
+
+
+def test_outline_mapping_rejects_extra_top_level_fields(tmp_path: Path) -> None:
+    _write_deck(tmp_path, slide_count=3)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=2,
+    )
+    mapping_path = _write_outline_mapping(tmp_path, [("cover", 1, 1), ("body", 2, 2)])
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    payload["unexpected"] = True
+    mapping_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    assert any(finding.code == "outline_mapping_invalid" for finding in result.findings)
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected_codes"),
+    [
+        (
+            [("cover", 1, 1), ("cover", 2, 2), ("body", 2, 2)],
+            {"outline_node_duplicate", "outline_range_overlap", "outline_slide_coverage"},
+        ),
+        (
+            [("body", 1, 1), ("cover", 2, 2)],
+            {"outline_node_order"},
+        ),
+        (
+            [("cover", 2, 2), ("body", 1, 1)],
+            {"outline_range_order"},
+        ),
+        (
+            [("cover", 1, 1), ("body", 3, 3)],
+            {"outline_range_out_of_bounds", "outline_slide_coverage"},
+        ),
+    ],
+)
+def test_outline_mapping_structural_violations_are_candidate_findings(
+    tmp_path: Path,
+    mapping: list[tuple[str, int, int]],
+    expected_codes: set[str],
+) -> None:
+    _write_deck(tmp_path, slide_count=3)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 2")],
+        total_slides=2,
+    )
+    _write_outline_mapping(tmp_path, mapping)
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    finding_codes = {finding.code for finding in result.findings}
+    assert expected_codes <= finding_codes
+    assert all(
+        finding.origin == "candidate"
+        for finding in result.findings
+        if finding.code in expected_codes
+    )
+
+
+def test_outline_mapping_ranges_must_be_contiguous_and_cover_content_slides(tmp_path: Path) -> None:
+    _write_deck(tmp_path, slide_count=4)
+    _write_outline(
+        tmp_path,
+        nodes=[_outline_node("cover", "Cover title"), _outline_node("body", "Slide 3")],
+        total_slides=3,
+    )
+    _write_outline_mapping(tmp_path, [("cover", 1, 1), ("body", 3, 3)])
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=3,
+        renderer=_renderer(
+            ((10, 20, 30), (20, 30, 40), (30, 40, 50), (40, 50, 60))
+        ),
+    )
+
+    finding_codes = {finding.code for finding in result.findings}
+    assert "outline_range_gap" in finding_codes
+    assert "outline_slide_coverage" in finding_codes

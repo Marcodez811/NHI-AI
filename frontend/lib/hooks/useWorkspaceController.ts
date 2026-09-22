@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ApiError } from "../api/client";
 import {
     Category,
@@ -12,11 +12,11 @@ import {
     getDocumentDownloadUrl,
 } from "../api/documents";
 import { fetchQaModes } from "../api/chat";
-import { supportsSlideGeneration } from "../api/slides";
+import { createSlideJob, supportsSlideGeneration } from "../api/slides";
+import type { CreateSlidesJobResponse } from "../api/slides";
 import { useDocuments } from "./useDocuments";
 import { useChatRequest } from "./useChatRequest";
 import { useRetrievalStatus } from "./useRetrievalStatus";
-import { useSlideJob } from "./useSlideJob";
 import { useWorkspaceSession } from "./useWorkspaceSession";
 
 const fallbackModes: QaModeInfo[] = CATEGORY_VALUES.map((mode) => ({
@@ -44,8 +44,7 @@ function errorText(error: unknown): string {
 export function useWorkspaceController() {
     const catalog = useDocuments();
     const retrieval = useRetrievalStatus();
-    const slideJob = useSlideJob();
-    const restoredSlideBrief = useRef<string | null>(null);
+    const [slideSubmitting, setSlideSubmitting] = useState(false);
     const session = useWorkspaceSession();
     const {
         view,
@@ -82,17 +81,6 @@ export function useWorkspaceController() {
         setTone,
     } = session;
 
-    useEffect(() => {
-        const brief = slideJob.job?.brief;
-        const jobId = slideJob.job?.job_id;
-        if (!brief || !jobId || restoredSlideBrief.current === jobId) return;
-        restoredSlideBrief.current = jobId;
-        setSlideTitle(brief.title);
-        setSlideCount(brief.slides_count);
-        setGuidance(brief.guidance);
-        setTone(brief.tone);
-        setSelected(brief.document_ids);
-    }, [setGuidance, setSelected, setSlideCount, setSlideTitle, setTone, slideJob.job]);
     const [uploading, setUploading] = useState(false);
     const [qaModes, setQaModes] = useState<QaModeInfo[]>([]);
     const [qaError, setQaError] = useState<string | null>(null);
@@ -279,11 +267,13 @@ export function useWorkspaceController() {
         }
     };
 
-    const startSlides = async () => {
+    const startSlides = async (): Promise<CreateSlidesJobResponse | null> => {
         const eligible = selectedDocs.filter((doc) => doc.status === "ready" && supportsSlideGeneration(doc));
-        if (!eligible.length || !slideTitle.trim()) return;
+        if (!eligible.length || !slideTitle.trim() || slideSubmitting) return null;
+        setActionError(null);
+        setSlideSubmitting(true);
         try {
-            await slideJob.start({
+            return await createSlideJob({
                 title: slideTitle.trim(),
                 document_ids: eligible.map((doc) => doc.id),
                 slides_count: slideCount,
@@ -292,19 +282,10 @@ export function useWorkspaceController() {
             });
         } catch (error) {
             setActionError(errorText(error));
+            return null;
+        } finally {
+            setSlideSubmitting(false);
         }
-    };
-
-    const startNewSlides = () => {
-        const brief = slideJob.job?.brief;
-        if (brief) {
-            setSlideTitle(brief.title);
-            setSlideCount(brief.slides_count);
-            setGuidance(brief.guidance);
-            setTone(brief.tone);
-            setSelected(brief.document_ids);
-        }
-        slideJob.reset();
     };
 
     const startNewChat = () => {
@@ -317,7 +298,7 @@ export function useWorkspaceController() {
 
     return {
         catalog,
-        slideJob,
+        slideSubmitting,
         view,
         setView,
         selected,
@@ -379,7 +360,6 @@ export function useWorkspaceController() {
         tone,
         setTone,
         startSlides,
-        startNewSlides,
         startNewChat,
     };
 }

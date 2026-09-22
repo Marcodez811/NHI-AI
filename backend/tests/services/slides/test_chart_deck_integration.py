@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -14,12 +15,14 @@ from app.services.agentic.runner import bwrap_available, build_bwrap_launch_args
 from app.services.slides.adapter import SlidesWorkflowAdapter
 from app.services.slides.artifacts import BACKEND_ROOT, create_job_workspace, stage_required_skills
 from app.services.slides.evidence import freeze_evidence, load_frozen_evidence
+from app.services.slides.source_manifest import write_source_manifest
 from app.services.slides.validation import ValidationStatus, build_deck_snapshot, validate_candidate_deck
 
 
 SKILL = BACKEND_ROOT / ".agents" / "skills" / "pptx-nhi-tw"
 CHART_RENDERER = SKILL / "scripts" / "render_chart_image.js"
 SLIDE_RENDERER = SKILL / "scripts" / "render_slides.py"
+CLEANER = SKILL / "scripts" / "clean.py"
 FIXTURE = Path(__file__).parent / "fixtures" / "generate_mixed_chart_deck.js"
 EXTRACTION_SCRIPT = BACKEND_ROOT / ".agents" / "skills" / "source-document-extraction" / "scripts" / "source_extraction.py"
 
@@ -48,6 +51,14 @@ def _mixed_deck(tmp_path: Path) -> Path:
         cwd=BACKEND_ROOT,
     )
     assert result.returncode == 0, result.stderr
+    cleaned = subprocess.run(
+        [sys.executable, str(CLEANER), str(deck)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=BACKEND_ROOT,
+    )
+    assert cleaned.returncode == 0, cleaned.stderr
     return deck
 
 
@@ -82,19 +93,26 @@ def _sandbox_command(workspace: Path, command: list[str]) -> subprocess.Complete
     )
 
 
-def test_mixed_chart_deck_snapshot_preserves_editable_chart_citations_and_notes(tmp_path: Path) -> None:
+def test_mixed_chart_deck_snapshot_preserves_editable_chart_citations_without_notes(tmp_path: Path) -> None:
     deck = _mixed_deck(tmp_path)
 
     snapshot = build_deck_snapshot(deck)
 
-    assert snapshot["slide_count"] == 4
+    assert snapshot["slide_count"] == 5
     assert len(snapshot["slides"][1]["charts"]) == 1
+    assert snapshot["slides"][1]["charts"][0]["title"] == "年度申報件數"
     assert len(snapshot["slides"][2]["images"]) == 1
     assert len(snapshot["slides"][3]["images"]) == 1
     assert any("年度報告.pdf，PDF 第 12 頁" in item["text"] for item in snapshot["slides"][1]["text"])
-    assert any("80、100、120件" in note for note in snapshot["slides"][1]["notes"])
-    assert any("1.2、2.4、3.6" in note for note in snapshot["slides"][2]["notes"])
-    assert any("比率：6%、9%、11%" in note for note in snapshot["slides"][3]["notes"])
+    assert all(not slide["notes"] for slide in snapshot["slides"])
+    references_text = " ".join(item["text"] for item in snapshot["slides"][4]["text"])
+    assert "參考資料" in references_text
+    assert "[1] 年度報告.pdf" in references_text
+    with zipfile.ZipFile(deck) as archive:
+        assert not any(
+            name.startswith("ppt/notesSlides/") and not name.endswith("/")
+            for name in archive.namelist()
+        )
     cover_text = " ".join(item["text"] for item in snapshot["slides"][0]["text"])
     assert "EvidenceStore" not in cover_text and "evidence.json" not in cover_text
 
@@ -151,7 +169,13 @@ def test_mixed_chart_deck_real_preview_render_replaces_stale_pages(tmp_path: Pat
 
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
-    assert sorted(path.name for path in preview.glob("slide-*.png")) == ["slide-1.png", "slide-2.png", "slide-3.png", "slide-4.png"]
+    assert sorted(path.name for path in preview.glob("slide-*.png")) == [
+        "slide-1.png",
+        "slide-2.png",
+        "slide-3.png",
+        "slide-4.png",
+        "slide-5.png",
+    ]
 
 
 @pytest.mark.skipif(
@@ -170,6 +194,11 @@ def test_changed_chart_data_survives_author_correction_and_backend_validation(tm
     extraction.extract([str(source)], str(workspace / "work" / "extracted"))
     evidence_path = workspace / "work" / "evidence.json"
     freeze_evidence(workspace / "work" / "extracted", evidence_path)
+    write_source_manifest(
+        workspace / "work" / "sources.json",
+        ["annual.pdf", "policy.docx", "appendix.md"],
+        ["年度報告.pdf", "政策說明.docx", "政策附件.md"],
+    )
     evidence_bytes = evidence_path.read_bytes()
 
     skill = workspace / ".agents" / "skills" / "pptx-nhi-tw"
@@ -192,6 +221,11 @@ def test_changed_chart_data_survives_author_correction_and_backend_validation(tm
         assert dual.returncode == 0, dual.stderr
         generated = _sandbox_command(workspace, ["/usr/bin/node", str(FIXTURE), str(deck), str(chart_png), str(dual_png), str(skill / "assets" / "nhi_logo_large.png"), str(value)])
         assert generated.returncode == 0, generated.stderr
+        cleaned = _sandbox_command(
+            workspace,
+            [sys.executable, str(skill / "scripts" / "clean.py"), str(deck)],
+        )
+        assert cleaned.returncode == 0, cleaned.stderr
         rendered = _sandbox_command(workspace, [sys.executable, str(skill / "scripts" / "render_slides.py"), str(deck), "--output-dir", str(preview), "--pdf-dir", str(preview_pdf)])
         assert rendered.returncode == 0, rendered.stderr
 
@@ -209,10 +243,10 @@ def test_changed_chart_data_survives_author_correction_and_backend_validation(tm
     assert _sha(deck) != first_pptx
     assert _sha(preview / "slide-3.png") != first_preview
     assert _sha(workspace / "work" / "rendered" / "final" / "slide-3.png") != first_final
-    assert sorted(path.name for path in (workspace / "work" / "rendered" / "final").glob("slide-*.png")) == [f"slide-{index}.png" for index in range(1, 5)]
+    assert sorted(path.name for path in (workspace / "work" / "rendered" / "final").glob("slide-*.png")) == [f"slide-{index}.png" for index in range(1, 6)]
     assert evidence_path.read_bytes() == evidence_bytes
     assert load_frozen_evidence(evidence_path, extracted_dir=workspace / "work" / "extracted")["frozen"] is True
-    assert any("3.6" in note and "9.9" not in note for note in second.deck_snapshot["slides"][2]["notes"])
+    assert all(not slide["notes"] for slide in second.deck_snapshot["slides"])
     assert second.pptx_sha256 == _sha(deck)
     assert second.content_check["validator_binding"]["pptx_sha256"] == _sha(deck)
     assert list(preview.glob("slide-*.png"))

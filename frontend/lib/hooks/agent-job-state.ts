@@ -4,6 +4,8 @@ const VALID_PHASES: readonly AgentJobPhase[] = [
     "queued",
     "preparing",
     "extracting",
+    "planning",
+    "awaiting_outline",
     "drafting",
     "validating",
     "reviewing",
@@ -69,6 +71,7 @@ export function phaseForJob(job: {
     if (job.status === "queued") return "queued";
     if (job.status === "completed") return "completed";
     if (job.status === "failed") return "failed";
+    if (job.status === "awaiting_input") return "awaiting_outline";
     return "preparing";
 }
 
