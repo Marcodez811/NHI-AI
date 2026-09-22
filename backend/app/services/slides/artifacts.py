@@ -18,7 +18,7 @@ from xml.sax.saxutils import escape
 
 from app.models.slides import DEFAULT_MAX_DOCUMENTS, SUPPORTED_SLIDE_SOURCE_EXTENSIONS
 
-from .contracts import JobError
+from .contracts import GENERATED_NAMESPACE_PREFIX_RE, JobError, PACKAGE_XML_REWRITE_SENSITIVE_PARTS
 
 ASSETS_ROOT = Path(__file__).resolve().parent
 BACKEND_ROOT = ASSETS_ROOT.parents[2]
@@ -51,6 +51,7 @@ REQUIRED_PPTX_TOOLS = (
     "office/schemas/ISO-IEC29500-4_2016/pml.xsd",
 )
 REQUIRED_TESSERACT_LANGUAGES = {"chi_tra", "eng"}
+TRUSTED_PACKAGE_CLEANER = REPOSITORY_SKILLS_DIR / PPTX_SKILL / "scripts" / "clean.py"
 CJK_FONT_PREFERENCES = (
     "Microsoft JhengHei", "Noto Sans CJK", "Noto Sans TC", "Noto Serif CJK", "Source Han", "PingFang TC",
 )
@@ -544,6 +545,85 @@ def publish_output(output_path: Path, job_id: str, destination_dir: Path) -> Pat
         temporary.unlink(missing_ok=True)
         raise JobError("publish", "presentation artifact could not be published") from exc
     return published
+
+
+def _load_trusted_cleaner(path: Path = TRUSTED_PACKAGE_CLEANER) -> Callable[[Path], list[str]]:
+    """Load the repository-owned package cleaner, never one from the job.
+
+    Mirrors ``validation.py``'s ``_load_trusted_checker``: importing this exact file ties
+    the backend's post-author package cleanup to the trusted checkout instead of anything
+    staged into a job workspace, while still letting tests inject a fake cleaner. ``clean.py``
+    imports the sibling ``office.helpers`` package by absolute name, so any prior
+    ``office``/``office.*`` module is saved and restored around the import the same way the
+    checker loader protects ``contracts`` -- this trusted import must not leak into, or be
+    shadowed by, an unrelated module of the same name.
+    """
+
+    if not path.is_file():
+        raise FileNotFoundError(f"trusted package cleaner is missing: {path}")
+    module_name = "_trusted_slides_package_cleaner"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load trusted package cleaner: {path}")
+    module = importlib.util.module_from_spec(spec)
+    module_dir = str(path.parent)
+    saved_modules = {name: sys.modules[name] for name in list(sys.modules) if name == "office" or name.startswith("office.")}
+    sys.path.insert(0, module_dir)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(module_dir)
+        for name in list(sys.modules):
+            if name == "office" or name.startswith("office."):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved_modules)
+    cleaner = getattr(module, "clean_presentation", None)
+    if not callable(cleaner):
+        raise AttributeError("trusted package cleaner has no clean_presentation function")
+    return cleaner
+
+
+def _package_xml_looks_rewritten(deck: Path) -> bool:
+    """Whether ``clean.py`` would be unsafe to run on this candidate.
+
+    Checks exactly the two parts ``PACKAGE_XML_REWRITE_SENSITIVE_PARTS`` names -- the same
+    set the deterministic validator's ``package_xml_rewritten`` finding uses, so this guard
+    and that finding cannot drift apart. ``ppt/presentation.xml`` is in that set because
+    ``clean.py``'s slide-reference scan is a regex that hardcodes the literal ``p:sldId``/
+    ``r:id`` OOXML prefixes; a ``presentation.xml`` already re-serialized by a generic XML
+    writer (such as ``xml.etree.ElementTree``, which renames prefixes to ``ns0:sldId``/
+    ``ns1:id``) makes that regex match nothing -- for the real slide list *and* for its own
+    empty-package refusal check -- so it silently deletes every slide instead of refusing
+    (confirmed against the failing production deck). Skipping the cleaner here leaves the
+    candidate untouched for that finding to report accurately, instead of destroying it first.
+    """
+
+    with zipfile.ZipFile(deck) as archive:
+        members = set(archive.namelist())
+        return any(
+            member in members and GENERATED_NAMESPACE_PREFIX_RE.search(archive.read(member))
+            for member in PACKAGE_XML_REWRITE_SENSITIVE_PARTS
+        )
+
+
+def clean_candidate_deck(workspace: Path, *, cleaner: Callable[[Path], list[str]] | None = None) -> list[str]:
+    """Deterministically strip the notes graph and orphaned parts from the candidate deck.
+
+    Runs after every author attempt, before the deck is validated. Asking the model to
+    hand-edit or re-serialize PPTX package XML itself is what produced an
+    ElementTree-mangled, LibreOffice-unreadable deck in production (the deterministic
+    validator's ``package_xml_rewritten`` finding catches any case that still slips
+    through); doing the cleanup here, deterministically, removes that responsibility from
+    the author entirely.
+    """
+
+    deck = workspace / "output" / "presentation.pptx"
+    if not deck.is_file() or deck.is_symlink():
+        return []
+    if _package_xml_looks_rewritten(deck):
+        return []
+    clean = cleaner if cleaner is not None else _load_trusted_cleaner()
+    return clean(deck)
 
 
 def cleanup_job(job_dir: Path) -> None:

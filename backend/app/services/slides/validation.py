@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from xml.etree import ElementTree as ET
 
-from .contracts import JobError
+from .contracts import GENERATED_NAMESPACE_PREFIX_RE, JobError, PACKAGE_XML_REWRITE_SENSITIVE_PARTS
 from .source_manifest import SlideSource, SourceManifestError, load_source_manifest
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance only
@@ -375,6 +375,41 @@ def _load_pptx_package(path: Path) -> _PptxPackage:
         raise PptxPackageError("presentation is not a valid OOXML ZIP archive") from exc
     except KeyError as exc:
         raise PptxPackageError(f"PPTX is missing required member: {exc.args[0]}") from exc
+
+
+def _package_xml_rewrite_findings(deck: Path, members: Sequence[str]) -> list[ValidationFinding]:
+    """Flag the two package parts where a generic-writer rewrite is known to break the deck.
+
+    Checks exactly ``PACKAGE_XML_REWRITE_SENSITIVE_PARTS`` -- the same set
+    ``artifacts.py``'s pre-cleanup guard uses, so this finding and that guard cannot drift
+    apart. Every other part (individual slides, notes, `.rels` files) tolerates an
+    ElementTree-style rewrite in both LibreOffice and the repository's own ``clean.py``
+    (each namespace-URI-aware consumer resolves ``ns0:`` exactly like the prefix it
+    replaced), so this check deliberately does not scan the whole package: flagging a
+    harmless rewrite elsewhere as blocking would reject an otherwise-working deck.
+    ``[Content_Types].xml`` and ``ppt/presentation.xml`` are different -- see
+    ``PACKAGE_XML_REWRITE_SENSITIVE_PARTS`` for why each one specifically breaks.
+    """
+
+    rewritten: list[str] = []
+    with zipfile.ZipFile(deck) as archive:
+        present = set(members)
+        for member in PACKAGE_XML_REWRITE_SENSITIVE_PARTS:
+            if member in present and GENERATED_NAMESPACE_PREFIX_RE.search(archive.read(member)):
+                rewritten.append(member)
+    if not rewritten:
+        return []
+    return [
+        ValidationFinding(
+            "package_xml_rewritten",
+            "package XML was re-serialized by a tool (such as ElementTree) that invents its own "
+            "namespace prefixes: this either makes LibreOffice refuse to load the deck "
+            "([Content_Types].xml) or defeats the repository's own package-cleanup tooling, "
+            "which silently drops every slide instead of refusing (ppt/presentation.xml)",
+            details={"parts": sorted(rewritten)},
+            origin="candidate",
+        )
+    ]
 
 
 def _text(root: ET.Element) -> str:
@@ -1974,8 +2009,15 @@ def _validate_candidate_deck_in_render_root(
         outline = SlideOutline.model_validate(json.loads(outline_file.read_text(encoding="utf-8")))
 
     package: _PptxPackage | None = None
+    package_rewrite_findings: list[ValidationFinding] = []
     try:
         package = _load_pptx_package(deck)
+        # Run before rendering: a rewritten ``[Content_Types].xml`` still parses fine
+        # here (namespace-URI matching does not care about the literal prefix), so
+        # without this check the candidate would sail past package validation and only
+        # fail LibreOffice rendering below with an opaque ``renderer_error``.
+        package_rewrite_findings = _package_xml_rewrite_findings(deck, package.members)
+        findings.extend(package_rewrite_findings)
         slide_count = len(package.ordered_slides)
         content_slide_count = slide_count - 1
         if sources is not None:
@@ -2013,7 +2055,7 @@ def _validate_candidate_deck_in_render_root(
 
     render_records: list[_RenderRecord] = []
     rendered_dir: Path | None = None
-    if slide_count is not None:
+    if slide_count is not None and not package_rewrite_findings:
         render_findings, render_records, rendered_dir = _render_backend_final(
             deck,
             slide_count,

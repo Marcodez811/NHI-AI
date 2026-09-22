@@ -30,6 +30,7 @@ from app.services.agentic.contracts import (
 from app.services.virtual_fs import SharedVolumeDocumentResolver
 
 from .artifacts import (
+    clean_candidate_deck,
     cleanup_job,
     create_job_fontconfig,
     create_job_workspace,
@@ -542,6 +543,21 @@ rather than presenting both sides unreconciled.
             "differences as advisory. The delivered deck must not use speaker notes. "
             f"Review inputs: {json.dumps(review_context or {}, ensure_ascii=False)}"
         )
+
+    def post_author_completion_check(self, value: SlidesTaskPayload, result: Any, workspace: Path) -> None:
+        """Deterministically clean the candidate package after every author attempt.
+
+        This runs for every attempt (initial and correction), before ``validate_generated``.
+        Package cleanup -- stripping the notes graph, orphaned parts, and stale
+        Content-Type overrides -- was previously left to the author's own ad hoc script,
+        which once re-serialized ``[Content_Types].xml``/``presentation.xml`` with
+        ``xml.etree.ElementTree`` and produced a deck LibreOffice could not open at all.
+        Doing it here, deterministically, with the repository-owned ``clean.py``, removes
+        package surgery from the author's job entirely.
+        """
+
+        del value, result
+        clean_candidate_deck(workspace)
 
     async def validate_generated(self, value: SlidesTaskPayload, workspace: Path) -> None:
         """Run the trusted deterministic validator and expose all findings."""

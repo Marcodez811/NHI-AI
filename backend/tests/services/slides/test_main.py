@@ -321,6 +321,28 @@ class SlidesServiceTests(unittest.TestCase):
                 )
             )
 
+    def test_post_author_completion_check_cleans_every_author_attempt(self):
+        """The backend, not the author, owns package cleanup (Fix 1a).
+
+        ``post_author_completion_check`` runs after every author attempt, before
+        ``validate_generated`` -- this proves the slides adapter wires that hook to the
+        repository-owned cleaner rather than leaving cleanup to the author's own script.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / "output").mkdir(parents=True)
+            (workspace / "output" / "presentation.pptx").write_bytes(b"placeholder")
+
+            with patch("app.services.slides.adapter.clean_candidate_deck") as cleaner:
+                cleaner.return_value = ["ppt/notesSlides/notesSlide1.xml"]
+                result = slides_adapter.post_author_completion_check(
+                    _payload(uuid4()), None, workspace
+                )
+
+            self.assertIsNone(result)
+            cleaner.assert_called_once_with(workspace)
+
     def test_verify_output_rejects_requested_slide_count_mismatch(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

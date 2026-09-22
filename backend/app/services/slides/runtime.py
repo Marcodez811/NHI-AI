@@ -126,11 +126,17 @@ explanation to the cover. Never expose an XML path or invent a page, section, pu
 date, or office.
 
 Every chart must carry a descriptive title naming what it shows, with units on the relevant
-axis label. Keep simple charts editable. For combination or dual-axis charts, dense labels, heatmaps,
+axis label. The title belongs on the chart object itself, not on a slide heading placed above
+it: for PptxGenJS, pass `showTitle: true` and `title` in the chart's own options so the title
+is part of the chart, not just nearby text. Keep simple charts editable. For combination or dual-axis charts, dense labels, heatmaps,
 or a native chart that still renders incorrectly after one correction, create a data-rendered
 PNG from exact evidence values with the bundled chart-image script and add that image alone.
 Keep all surrounding text and citations editable. Do not create or write speaker notes; the
-delivered PPTX must contain no `ppt/notesSlides/` parts.
+delivered PPTX must contain no `ppt/notesSlides/` parts. Never re-serialize PPTX package XML
+with `ElementTree` or any tool that invents its own namespace prefixes, and never hand-edit
+`[Content_Types].xml`, `ppt/presentation.xml`, or any other package part directly -- the
+backend runs deterministic package cleanup after every attempt, so you never need to touch
+package internals yourself.
 
 If template/ contains a PPTX, use it as the visual basis.
 Assume network access and package installation are unavailable.

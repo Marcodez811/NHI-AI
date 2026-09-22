@@ -282,6 +282,101 @@ def test_speaker_notes_parts_are_a_candidate_finding(tmp_path: Path) -> None:
     assert snapshot["slides"][0]["notes"] == ["cover"]
 
 
+def _rewrite_parts_with_elementtree(deck: Path, *part_names: str) -> None:
+    """Re-serialize exactly ``part_names`` through ``ElementTree``, byte for byte.
+
+    Mirrors how the production defect was reproduced: this is namespace-equivalent XML
+    that most consumers still parse, but with ``ns0:``/``ns1:``-style generated prefixes
+    instead of the original human-readable ones.
+    """
+
+    from xml.etree import ElementTree as ET
+
+    with zipfile.ZipFile(deck) as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+    for name in part_names:
+        parts[name] = ET.tostring(ET.fromstring(parts[name]), encoding="utf-8")
+    with zipfile.ZipFile(deck, "w") as archive:
+        for name, data in parts.items():
+            archive.writestr(name, data)
+
+
+def test_normal_deck_is_not_flagged_as_package_xml_rewritten(tmp_path: Path) -> None:
+    _write_deck(tmp_path)
+
+    result = _validate(tmp_path)
+
+    assert not any(finding.code == "package_xml_rewritten" for finding in result.findings)
+
+
+def test_elementtree_rewritten_slide_and_rels_parts_are_not_flagged(tmp_path: Path) -> None:
+    """A rewrite outside the two harmful parts must not block an otherwise-working deck.
+
+    Both LibreOffice and the repository's own ``clean.py`` tolerate an ElementTree-style
+    rewrite of an individual slide, notes part, or `.rels` file -- confirmed by rendering a
+    known-good deck with exactly these parts rewritten. Flagging them as blocking would
+    reject a deck that actually opens and prints fine.
+    """
+
+    deck = _write_deck(tmp_path)
+    _rewrite_parts_with_elementtree(
+        deck, "ppt/slides/slide1.xml", "ppt/_rels/presentation.xml.rels"
+    )
+
+    result = _validate(tmp_path)
+
+    assert not any(finding.code == "package_xml_rewritten" for finding in result.findings)
+
+
+def test_package_xml_rewritten_by_elementtree_is_flagged_and_skips_rendering(
+    tmp_path: Path,
+) -> None:
+    """Reproduces the production defect precisely: an author (or ad hoc tooling)
+    re-serializing ``[Content_Types].xml`` with ``xml.etree.ElementTree`` renames
+    namespace prefixes to ``ns0:``/``ns1:`` and drops declarations LibreOffice needs, so
+    the part still parses here but the deck cannot be opened at all. This must surface as
+    a named, actionable finding -- not the opaque ``renderer_error`` that a doomed render
+    attempt would otherwise produce, so rendering must be skipped once this finding fires.
+    """
+
+    deck = _write_deck(tmp_path)
+    _rewrite_parts_with_elementtree(deck, "[Content_Types].xml")
+
+    def _unreachable_renderer(deck_path: Path, output_dir: Path) -> None:
+        raise AssertionError("rendering must be skipped once package_xml_rewritten fires")
+
+    result = _validate(tmp_path, renderer=_unreachable_renderer)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "package_xml_rewritten"
+    )
+    assert finding.origin == "candidate"
+    assert finding.details["parts"] == ["[Content_Types].xml"]
+
+
+def test_presentation_xml_rewritten_by_elementtree_is_flagged_and_skips_rendering(
+    tmp_path: Path,
+) -> None:
+    """The second harmful part: a rewritten ``presentation.xml`` defeats ``clean.py``'s
+    slide-reference regex (see ``PACKAGE_XML_REWRITE_SENSITIVE_PARTS``), so it must be
+    caught here too, even though LibreOffice alone tolerates this specific part rewritten.
+    """
+
+    deck = _write_deck(tmp_path)
+    _rewrite_parts_with_elementtree(deck, "ppt/presentation.xml")
+
+    def _unreachable_renderer(deck_path: Path, output_dir: Path) -> None:
+        raise AssertionError("rendering must be skipped once package_xml_rewritten fires")
+
+    result = _validate(tmp_path, renderer=_unreachable_renderer)
+
+    finding = next(
+        finding for finding in result.findings if finding.code == "package_xml_rewritten"
+    )
+    assert finding.origin == "candidate"
+    assert finding.details["parts"] == ["ppt/presentation.xml"]
+
+
 def test_failed_validation_clears_old_final_renders(tmp_path: Path) -> None:
     _write_deck(tmp_path)
     final = tmp_path / "work" / "rendered" / "final"
