@@ -381,6 +381,27 @@ indexing dependency and latency for content already on disk, and would break the
 guarantee that planner and author see byte-identical evidence. This closes the second
 open decision below.
 
+## Running the planner on Gemini
+
+Set `AGENT_PLANNER_ENABLED=true`, `AGENT_PLANNER_RUNNER=agents`,
+`AGENT_PLANNER_MODEL=litellm/gemini/<model-id>`, and `GEMINI_API_KEY` in
+`backend/.env`; keep the existing required `OPENAI_API_KEY` setting. The SDK
+routes the `litellm/` prefix, while the application passes the configured
+Gemini key explicitly, requests usage, and disables SDK tracing for that run.
+For a later Claude trial, use `litellm/anthropic/<model-id>` and
+`ANTHROPIC_API_KEY` instead. Bare model names still use the existing OpenAI
+path. Do not approve the outline during a planner-only trial: the job remains
+parked and the author never runs.
+
+Read the initial planner turn's token counts in
+`<AGENT_JOBS_ROOT>/<job-id>/work/agents/planning/attempt-1.json`, under
+`turns[0].usage` (`input_tokens`, `output_tokens`, and `total_tokens`). Outline
+chat turns currently do not persist a turn audit. This path has not been run
+live with Gemini. The first-run risk is `SlideOutline` structured output:
+some providers reject strict JSON schema or return malformed JSON, and the
+SDK documents no reliable fallback. Validate Gemini's response and usage
+before relying on cost estimates.
+
 ## Risks
 
 1. **Author-node parity is the long pole.** Mitigated by the runner seam: if the SDK
