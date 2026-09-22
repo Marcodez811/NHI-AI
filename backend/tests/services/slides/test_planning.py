@@ -201,6 +201,66 @@ def test_planner_keeps_references_slide_outside_content_outline() -> None:
     assert "final references slide is deck furniture" in prompt
 
 
+def test_build_planning_prompt_default_is_unchanged_and_the_agents_path_differs() -> None:
+    """Stage 5 architecture decision: the codex planner prompt must not change.
+
+    The default (and explicit ``runner_name="codex"``) rendering must stay
+    byte-identical to before this work -- it still points at a mounted,
+    read-only ``work/evidence.json``. Only ``runner_name="agents"`` describes
+    evidence arriving inlined, since that stage has no file or shell access.
+    """
+
+    from app.models.slides import SlidesTaskPayload as Payload
+
+    request = Payload(job_id=uuid4(), title="Q3", document_ids=[uuid4()], slides_count=8, guidance="g", tone="formal")
+    adapter = SlidesWorkflowAdapter()
+
+    default_prompt = asyncio.run(adapter.build_planning_prompt(request, Path("/tmp/unused")))
+    explicit_codex_prompt = asyncio.run(adapter.build_planning_prompt(request, Path("/tmp/unused"), runner_name="codex"))
+    agents_prompt = asyncio.run(adapter.build_planning_prompt(request, Path("/tmp/unused"), runner_name="agents"))
+
+    assert default_prompt == explicit_codex_prompt
+    assert "already mounted read-only" in default_prompt
+    assert "`work/sources.json` is the authoritative mapping" in default_prompt
+    assert "already mounted read-only" not in agents_prompt
+    assert "authoritative mapping" not in agents_prompt
+    assert "neither is available to you here" in agents_prompt
+    assert "`<evidence>` block" in agents_prompt
+    assert "no file or shell access" in agents_prompt
+
+
+@pytest.mark.asyncio
+async def test_build_planning_evidence_block_renders_the_compact_block(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    known_id = _freeze_one_block_evidence(workspace)
+    from app.services.slides.source_manifest import write_source_manifest
+
+    write_source_manifest(workspace / "work" / "sources.json", ["brief.txt"], ["Q3 Policy Brief"])
+    adapter = SlidesWorkflowAdapter()
+    value = SlidesTaskPayload(job_id=uuid4(), title="Q3", document_ids=[uuid4()], slides_count=8, guidance="g", tone="formal")
+
+    block = await adapter.build_planning_evidence_block(value, workspace)
+
+    assert block.startswith("<evidence>")
+    assert known_id in block
+    assert "Q3 Policy Brief" in block
+
+
+@pytest.mark.asyncio
+async def test_build_planning_evidence_block_fails_fast_as_a_job_error_over_budget(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    _freeze_one_block_evidence(workspace)
+    from app.services.slides.source_manifest import write_source_manifest
+
+    write_source_manifest(workspace / "work" / "sources.json", ["brief.txt"], ["Q3 Policy Brief"])
+    monkeypatch.setattr(settings, "agent_planner_max_evidence_chars", 1)
+    adapter = SlidesWorkflowAdapter()
+    value = SlidesTaskPayload(job_id=uuid4(), title="Q3", document_ids=[uuid4()], slides_count=8, guidance="g", tone="formal")
+
+    with pytest.raises(JobError, match="planning"):
+        await adapter.build_planning_evidence_block(value, workspace)
+
+
 def test_build_prompt_instructs_node_order_and_emphasis_when_outline_is_approved():
     from app.models.slides import SlidesTaskPayload as Payload
 
