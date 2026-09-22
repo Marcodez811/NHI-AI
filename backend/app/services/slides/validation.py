@@ -1340,6 +1340,41 @@ def _citation_source_name_findings(
     return findings
 
 
+def _is_slide_number_field_paragraph(paragraph_element: ET.Element) -> bool:
+    """Whether a paragraph's only visible content is a `<a:fld type="slidenum">` field.
+
+    PowerPoint renders a running page number as a field, not literal text; its cached
+    display value still lands inside `_text()`, so without this check a normal page
+    number reads exactly like a malformed reference entry.
+    """
+
+    fields = paragraph_element.findall(f".//{_A}fld")
+    if not any(field.get("type") == "slidenum" for field in fields):
+        return False
+    return not any(_text(run) for run in paragraph_element.findall(f".//{_A}r"))
+
+
+def _recurs_on_another_slide(text: str, package: _PptxPackage, *, exclude_index: int) -> bool:
+    """Whether ``text`` also appears verbatim as one shape's full text on a different slide.
+
+    Recurring header/footer chrome -- the deck title repeated in a running footer -- is
+    authored as its own text box and reappears unchanged on every slide, even when a
+    wrapped, multi-line title elsewhere splits the identical words across paragraphs
+    within that same box. Comparing whole shapes rather than individual paragraphs is
+    what makes those two renderings compare equal. A real reference entry never recurs
+    this way: its `資料來源`-carrying detail is unique to the references slide.
+    """
+
+    return any(
+        index != exclude_index
+        and any(
+            _normalize_visible_text(_text(shape)) == text
+            for shape in root.findall(f".//{_P}sp")
+        )
+        for index, root in enumerate(package.slide_roots)
+    )
+
+
 def _references_slide_findings(
     package: _PptxPackage,
     sources: Sequence[SlideSource],
@@ -1347,6 +1382,7 @@ def _references_slide_findings(
     """Validate the last-slide reference index against visible content citations."""
 
     last_slide_number = len(package.slide_roots)
+    last_slide_index = last_slide_number - 1
     last_root = package.slide_roots[-1]
     title, title_paragraph = _references_title_paragraph(last_root)
     if title != _REFERENCES_SLIDE_TITLE:
@@ -1396,11 +1432,21 @@ def _references_slide_findings(
     for paragraph_element in last_root.findall(f".//{_A}p"):
         if paragraph_element is title_paragraph:
             continue
+        if _is_slide_number_field_paragraph(paragraph_element):
+            continue
         paragraph = _normalize_visible_text(_text(paragraph_element))
         if not paragraph:
             continue
         entry_match = _REFERENCE_ENTRY_RE.fullmatch(paragraph)
         if entry_match is None:
+            # Template chrome -- the slide's own page number, or a footer/title that
+            # recurs elsewhere in the deck -- is not an entry to validate. Anything
+            # else that fails the numbered-entry shape, including this slide's real
+            # unique content, is still a malformed reference and stays blocking.
+            if paragraph == str(last_slide_number) or _recurs_on_another_slide(
+                paragraph, package, exclude_index=last_slide_index
+            ):
+                continue
             findings.append(
                 ValidationFinding(
                     "references_entry_invalid",

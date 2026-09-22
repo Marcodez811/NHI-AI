@@ -33,13 +33,28 @@ def _png_bytes(color: tuple[int, int, int]) -> bytes:
     return output.getvalue()
 
 
+def _paragraph_xml(item: str | tuple[str, str]) -> str:
+    """Render one `<a:p>`; a ``("slidenum", text)`` tuple renders as a real PowerPoint field.
+
+    A `<a:fld type="slidenum">` is how PowerPoint represents a running page number: its
+    cached display value still lands inside a plain text scan, so tests need a way to
+    produce the field shape distinctly from a page number some author wrote as literal text.
+    """
+
+    if isinstance(item, tuple):
+        kind, text = item
+        return f'<a:p><a:fld id="{{2F2F2F2F-0000-0000-0000-000000000000}}" type="{kind}"><a:rPr/><a:t>{text}</a:t></a:fld></a:p>'
+    return f"<a:p><a:r><a:rPr/><a:t>{item}</a:t></a:r></a:p>"
+
+
 def _write_deck(
     root: Path,
     slide_count: int = 2,
     *,
-    paragraphs_by_slide: dict[int, list[str]] | None = None,
+    paragraphs_by_slide: dict[int, list[str | tuple[str, str]]] | None = None,
     include_notes: bool = False,
     title_placeholder_by_slide: set[int] | None = None,
+    extra_shapes_by_slide: dict[int, list[str]] | None = None,
 ) -> Path:
     deck = root / "output" / "presentation.pptx"
     deck.parent.mkdir(parents=True)
@@ -69,24 +84,22 @@ def _write_deck(
                 else f"Slide {index}"
             ],
         )
-        text_xml = "".join(
-            f"<a:p><a:r><a:rPr/><a:t>{text}</a:t></a:r></a:p>"
-            for text in paragraphs
-        )
+        text_xml = "".join(_paragraph_xml(text) for text in paragraphs)
         title_shape_xml = ""
         if index in (title_placeholder_by_slide or set()):
             title_shape_xml = (
                 f'<p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/>'
                 f'<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{paragraphs[0]}</a:t></a:r></a:p></p:txBody></p:sp>'
             )
-            text_xml = "".join(
-                f"<a:p><a:r><a:rPr/><a:t>{text}</a:t></a:r></a:p>"
-                for text in paragraphs[1:]
-            )
+            text_xml = "".join(_paragraph_xml(text) for text in paragraphs[1:])
+        extra_shapes_xml = "".join(
+            f'<p:sp><p:nvSpPr/><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>{_paragraph_xml(text)}</p:txBody></p:sp>'
+            for text in (extra_shapes_by_slide or {}).get(index, [])
+        )
         parts[f"ppt/slides/slide{index}.xml"] = f'''<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}">
           <p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>{title_shape_xml}<p:sp><p:nvSpPr/><p:spPr/>
             <p:txBody><a:bodyPr/><a:lstStyle/>{text_xml}</p:txBody>
-          </p:sp></p:spTree></p:cSld>
+          </p:sp>{extra_shapes_xml}</p:spTree></p:cSld>
         </p:sld>'''
         if include_notes:
             parts[f"ppt/slides/_rels/slide{index}.xml.rels"] = f'''<Relationships xmlns="{REL_NS}">
@@ -673,6 +686,50 @@ def test_references_slide_rejects_each_unnumbered_or_malformed_paragraph(
         "[2]資料來源：年度報告.pdf",
         "[3] 年度報告.pdf，[4] 政策說明.docx",
     ]
+
+
+def test_references_slide_ignores_template_chrome_but_still_flags_malformed_entries(
+    tmp_path: Path,
+) -> None:
+    """Page numbers and a recurring footer are chrome, not entries to validate.
+
+    Reproduces the production defect (a live deck's references slide failed on its own
+    page-number paragraph and a recurring title footer that also appears on the cover):
+    neither a real `<a:fld type="slidenum">` field, a page number written as literal text,
+    nor text that recurs verbatim as another slide's own shape may be treated as a
+    malformed entry -- while a genuinely malformed, non-recurring paragraph must still be
+    flagged blocking.
+    """
+
+    _write_deck(
+        tmp_path,
+        slide_count=3,
+        paragraphs_by_slide={
+            1: ["Cover title"],
+            2: ["Body content", "[1] 資料來源：年度報告.pdf"],
+            3: [
+                "參考資料",
+                "[1] 年度報告.pdf",
+                ("slidenum", "3"),
+                "3",
+                "年度報告.pdf，PDF 第 12 頁",
+            ],
+        },
+        extra_shapes_by_slide={2: ["Policy briefing title"], 3: ["Policy briefing title"]},
+    )
+
+    result = _validate(
+        tmp_path,
+        expected_slide_count=2,
+        renderer=_renderer(((10, 20, 30), (20, 30, 40), (30, 40, 50))),
+    )
+
+    invalid = [
+        finding.details["paragraph"]
+        for finding in result.findings
+        if finding.code == "references_entry_invalid"
+    ]
+    assert invalid == ["年度報告.pdf，PDF 第 12 頁"]
 
 
 @pytest.mark.parametrize(
