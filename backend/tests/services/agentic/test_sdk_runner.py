@@ -82,6 +82,40 @@ def test_hidden_path_colliding_with_a_granted_path_is_rejected(tmp_path):
         _build_path_grants(request, workspace=tmp_path.resolve())
 
 
+def test_hidden_path_outside_the_workspace_is_accepted(tmp_path):
+    # The slides adapter hides the original source documents, which live on the
+    # shared documents volume rather than in the job workspace. In this sandbox they
+    # are invisible by construction, so hiding them must not fail the request.
+    workspace = tmp_path / "job"
+    evidence = workspace / "work" / "evidence.json"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("{}", encoding="utf-8")
+    original_source = tmp_path / "documents" / "doc-1" / "報告書.docx"
+
+    request = _request(workspace, hidden_paths=(original_source,), read_only_paths=(evidence,))
+    grants = _build_path_grants(request, workspace=workspace.resolve())
+
+    assert [grant.path for grant in grants] == [evidence.resolve().as_posix()]
+
+
+def test_granting_a_directory_that_contains_a_hidden_file_is_rejected(tmp_path):
+    hidden_history = tmp_path / "work" / "intermediate" / "semantic_review_history.json"
+    hidden_history.parent.mkdir(parents=True)
+
+    request = _request(tmp_path, hidden_paths=(hidden_history,), read_only_paths=(hidden_history.parent,))
+    with pytest.raises(WorkflowExecutionError, match="both hidden and granted"):
+        _build_path_grants(request, workspace=tmp_path.resolve())
+
+
+def test_granting_a_file_inside_a_hidden_directory_is_rejected(tmp_path):
+    hidden_inputs = tmp_path / "input"
+    hidden_inputs.mkdir()
+
+    request = _request(tmp_path, hidden_paths=(hidden_inputs,), writable_paths=(hidden_inputs / "source.pdf",))
+    with pytest.raises(WorkflowExecutionError, match="both hidden and granted"):
+        _build_path_grants(request, workspace=tmp_path.resolve())
+
+
 def test_path_outside_the_workspace_is_rejected(tmp_path, monkeypatch):
     outside = tmp_path.parent / "sibling-job" / "secret.txt"
     request = _request(tmp_path, read_only_paths=(outside,))

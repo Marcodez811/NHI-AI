@@ -149,25 +149,36 @@ def _require_within_workspace(raw_path: Path, workspace: Path, *, label: str) ->
     return path
 
 
+def _overlaps(first: Path, second: Path) -> bool:
+    """Whether one path is the other, or contains it."""
+
+    return first == second or first.is_relative_to(second) or second.is_relative_to(first)
+
+
 def _build_path_grants(request: AgentExecutionRequest, *, workspace: Path) -> tuple[SandboxPathGrant, ...]:
     """Translate the stage path policy into ``SandboxPathGrant`` objects.
 
-    ``hidden_paths`` has no positive representation here -- see the module docstring --
-    so it is only used to reject a request that also tries to grant the same path.
+    ``hidden_paths`` has no positive representation here -- see the module docstring. In
+    this sandbox nothing is visible unless granted, so a hidden path is already invisible
+    and is used only to reject a grant that would expose it. Hidden paths may therefore
+    lie outside the workspace: the slides adapter hides the original source documents on
+    the shared documents volume so that no stage after extraction can reread them.
+
+    A grant is rejected when it overlaps a hidden path in either direction: granting a
+    directory that contains a hidden file would expose it, and granting a file inside a
+    hidden directory would contradict the policy.
     """
 
-    hidden = {_require_within_workspace(path, workspace, label="hidden stage path") for path in request.hidden_paths}
+    hidden = tuple(Path(path).resolve() for path in request.hidden_paths)
     grants: list[SandboxPathGrant] = []
-    for raw_path in request.read_only_paths:
-        path = _require_within_workspace(Path(raw_path), workspace, label="read-only stage path")
-        if path in hidden:
+    for raw_path, read_only, label in (
+        *((raw_path, True, "read-only stage path") for raw_path in request.read_only_paths),
+        *((raw_path, False, "writable stage path") for raw_path in request.writable_paths),
+    ):
+        path = _require_within_workspace(Path(raw_path), workspace, label=label)
+        if any(_overlaps(path, hidden_path) for hidden_path in hidden):
             raise WorkflowExecutionError("a stage path cannot be both hidden and granted")
-        grants.append(SandboxPathGrant(path=path.as_posix(), read_only=True))
-    for raw_path in request.writable_paths:
-        path = _require_within_workspace(Path(raw_path), workspace, label="writable stage path")
-        if path in hidden:
-            raise WorkflowExecutionError("a stage path cannot be both hidden and granted")
-        grants.append(SandboxPathGrant(path=path.as_posix(), read_only=False))
+        grants.append(SandboxPathGrant(path=path.as_posix(), read_only=read_only))
     return tuple(grants)
 
 
