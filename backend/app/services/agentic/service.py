@@ -400,6 +400,26 @@ def _stage_writable_paths(adapter: Any, stage: str, workspace: Path) -> tuple[Pa
     return tuple(Path(item) for item in (values or ()))
 
 
+async def _planning_instructions(adapter: Any, value: Any, workspace: Path, runner_name: str) -> str:
+    """Call the adapter's planning-prompt hook, tolerating an older two-arg signature.
+
+    ``runner_name`` lets ``SlidesWorkflowAdapter.build_planning_prompt`` describe how
+    the frozen evidence reaches the model (a sandbox mount for Codex, an inlined
+    ``<evidence>`` block for the plain "agents" path -- see ``_execute_planning``)
+    without every adapter needing to accept a parameter it has no use for. The
+    fallback mirrors ``_stage_hidden_paths``/``_stage_read_only_paths`` above, which
+    tolerate an adapter hook written before their own extra argument existed.
+    """
+
+    hook = getattr(adapter, "build_planning_prompt", None)
+    if hook is None:
+        return str(value)
+    try:
+        return str(await _call(hook, value, workspace, runner_name=runner_name))
+    except TypeError:
+        return str(await _call(hook, value, workspace))
+
+
 def _stage_sandbox(adapter: Any, stage: str) -> Any:
     """Keep existing workflows compatible unless they opt into stage isolation."""
 
@@ -534,10 +554,27 @@ async def _execute_planning(
     if not role:
         return None
     await _emit_phase(progress_callback, AgentPhase.PLANNING)
-    prompt_hook = getattr(adapter, "build_planning_prompt", None)
-    prompt = str(await _call(prompt_hook, value, workspace)) if prompt_hook else str(value)
     runner_name = str(getattr(adapter, "planner_runner", "codex"))
     runner = _runner_for_node(selected_runner, runner_name)
+    instructions = await _planning_instructions(adapter, value, workspace, runner_name)
+    if runner_name == "agents":
+        # AgentsSdkRunner's "no grants -> no sandbox" rule (sdk_runner.py): the
+        # frozen evidence is rendered compactly into the prompt instead of read
+        # through a sandbox filesystem grant, so this activation carries no path
+        # grants at all. The Codex branch below is unchanged -- it still reads
+        # work/evidence.json through its bwrap sandbox exactly as before.
+        evidence_hook = getattr(adapter, "build_planning_evidence_block", None)
+        if evidence_hook is None:
+            raise WorkflowExecutionError("planner evidence rendering hook is missing")
+        prompt = str(await _call(evidence_hook, value, workspace))
+        agent_instructions: str | None = instructions
+        read_only_paths: tuple[Path, ...] = ()
+        writable_paths: tuple[Path, ...] = ()
+    else:
+        prompt = instructions
+        agent_instructions = None
+        read_only_paths = _stage_read_only_paths(adapter, "planner", workspace)
+        writable_paths = _stage_writable_paths(adapter, "planner", workspace)
     request = AgentExecutionRequest(
         run_id=run_id,
         node_id="planning",
@@ -547,13 +584,14 @@ async def _execute_planning(
         reasoning_effort=getattr(adapter, "planner_reasoning_effort", None),
         workspace=workspace,
         prompt=prompt,
+        instructions=agent_instructions,
         sandbox=_stage_sandbox(adapter, "planner"),
         output_type=getattr(adapter, "planner_output_type", None),
         skill_names=_stage_skills(adapter, "planner", staged),
         audit_path=_attempt_audit_path(workspace, "planning", 1),
         hidden_paths=_stage_hidden_paths(adapter, "planner", workspace),
-        read_only_paths=_stage_read_only_paths(adapter, "planner", workspace),
-        writable_paths=_stage_writable_paths(adapter, "planner", workspace),
+        read_only_paths=read_only_paths,
+        writable_paths=writable_paths,
         restrict_workspace=bool(getattr(adapter, "stage_isolation", False)),
     )
     await _emit_event(

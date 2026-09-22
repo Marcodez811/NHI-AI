@@ -386,19 +386,49 @@ the frozen `work/evidence.json` store after this activation.
         except EvidenceError as exc:
             raise JobError("extraction", "extraction artifacts could not be consolidated") from exc
 
-    async def build_planning_prompt(self, value: SlidesTaskPayload, workspace: Path) -> str:
+    async def build_planning_prompt(self, value: SlidesTaskPayload, workspace: Path, *, runner_name: str = "codex") -> str:
+        """Return the planning activation's instructions.
+
+        ``runner_name`` only changes how this describes evidence access: on the "codex"
+        path (unchanged; the default) the frozen store is a mounted, read-only file, so
+        the instructions point at `work/evidence.json`/`work/sources.json` exactly as
+        before. On the "agents" path -- ``_execute_planning``
+        (app/services/agentic/service.py) -- this stage has no file or shell access at
+        all; the frozen evidence instead arrives inlined as an ``<evidence>`` block in
+        the same message (``build_planning_evidence_block`` below), already carrying
+        each block's knowledge-base source name, so there is nothing left to mount or
+        look up.
+        """
+
         del workspace
+        if runner_name == "agents":
+            evidence_access = (
+                "Propose a structured outline for a presentation grounded entirely in the "
+                "evidence given to you in the `<evidence>` block of this message -- this stage "
+                "has no file or shell access, so that block is the only evidence you can see. Do "
+                "not draft slide content or invent facts outside it -- return only the structured "
+                "outline.\n\n"
+                "Each evidence entry already carries its `source` as the knowledge-base name to "
+                "use verbatim in a `key_point`; never invent, translate, or alter a source name, "
+                "and never reference `work/sources.json` or `work/evidence.json` -- neither is "
+                "available to you here."
+            )
+            evidence_refs_note = "ids copied verbatim from the `<evidence>` block above"
+        else:
+            evidence_access = (
+                "Propose a structured outline for a presentation grounded entirely in the frozen\n"
+                "EvidenceStore at `work/evidence.json` (already mounted read-only; you cannot write to it\n"
+                "or to any other workspace path from this stage). Do not draft slide content or write any\n"
+                "file -- return only the structured outline.\n\n"
+                "`work/sources.json` is the authoritative mapping from staged evidence filenames to the\n"
+                "knowledge-base names users recognize. Whenever a `key_point` names a source, use only its\n"
+                "`display_name` from that file; never expose a staged filename, collision suffix, hash, or\n"
+                "derived document title."
+            )
+            evidence_refs_note = "ids copied verbatim from `work/evidence.json` blocks"
         return f"""# Planning stage
 
-Propose a structured outline for a presentation grounded entirely in the frozen
-EvidenceStore at `work/evidence.json` (already mounted read-only; you cannot write to it
-or to any other workspace path from this stage). Do not draft slide content or write any
-file -- return only the structured outline.
-
-`work/sources.json` is the authoritative mapping from staged evidence filenames to the
-knowledge-base names users recognize. Whenever a `key_point` names a source, use only its
-`display_name` from that file; never expose a staged filename, collision suffix, hash, or
-derived document title.
+{evidence_access}
 
 ## Brief
 - Title: {value.title}
@@ -410,7 +440,7 @@ derived document title.
 
 Organize the presentation into sections, not per-slide breakdowns: each node needs a
 `heading`, an `intent` describing what it must accomplish, 2-5 evidence-grounded
-`key_points`, and `evidence_refs` -- ids copied verbatim from `work/evidence.json` blocks.
+`key_points`, and `evidence_refs` -- {evidence_refs_note}.
 An id that does not exist in that store will be rejected before a human ever reviews this
 outline. Set `emphasis` (light/normal/deep) to reflect how much author attention each
 section deserves relative to the others, and `approx_slides` as a realistic hint whose sum
@@ -418,6 +448,30 @@ lands near the requested {value.slides_count} content slides. Do not add a refer
 the final references slide is deck furniture. Resolve conflicting evidence explicitly
 rather than presenting both sides unreconciled.
 """
+
+    async def build_planning_evidence_block(self, value: SlidesTaskPayload, workspace: Path) -> str:
+        """Render the compact, delimited evidence block for the "agents" planner path.
+
+        Only reached when ``planner_runner == "agents"`` (``_execute_planning``,
+        app/services/agentic/service.py): the Codex path never calls this and keeps
+        reading `work/evidence.json` through its own bwrap sandbox exactly as before.
+        ``EvidenceError`` (including the size guard in ``render_compact_evidence``)
+        becomes a tagged ``JobError`` here, the same conversion ``post_planning`` already
+        does, so a job-level caller sees one consistent error surface regardless of
+        which stage raised it.
+        """
+
+        del value
+        from .evidence import EvidenceError, build_planner_evidence_block
+
+        try:
+            return await asyncio.to_thread(
+                build_planner_evidence_block,
+                workspace,
+                max_chars=settings.agent_planner_max_evidence_chars,
+            )
+        except EvidenceError as exc:
+            raise JobError("planning", str(exc)) from exc
 
     async def post_planning(self, value: SlidesTaskPayload, result: AgentExecutionResult, workspace: Path) -> None:
         """Validate and persist the planner's proposal as durable revision 1.
