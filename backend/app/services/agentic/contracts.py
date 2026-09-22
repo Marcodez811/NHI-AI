@@ -457,6 +457,14 @@ class AgentExecutionRequest(BaseModel):
     reasoning_effort: AgentReasoningEffort | None = None
     workspace: Path
     prompt: str = Field(min_length=1)
+    # Optional system-prompt text, kept structurally separate from ``prompt``
+    # (the per-turn input). Only the Agents SDK runner's grant-less path uses
+    # this -- it sets it on the native ``agents.Agent.instructions`` field, so
+    # task instructions and untrusted turn data (e.g. evidence a planner must
+    # cite, never obey) never share one undifferentiated string. ``None``
+    # means the caller relies on ``prompt`` alone, matching every runner's
+    # behavior before this field existed.
+    instructions: str | None = None
     sandbox: Any = None
     # A raw provider JSON schema, understood only by Codex's per-turn schema
     # pass-through.  ``output_type`` below is the provider-neutral successor:

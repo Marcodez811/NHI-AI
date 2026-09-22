@@ -154,6 +154,21 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("AGENT_PLANNER_ENABLED"),
     )
+    # The "agents" planner path folds a compact rendering of the frozen evidence into
+    # its prompt instead of reading it through a sandbox grant (see sdk_runner.py's "no
+    # grants -> no sandbox" rule and docs/agents-sdk-migration-plan.md's Stage 5
+    # architecture note). This bounds that rendering by the total characters of block
+    # *text* it carries -- the field the guard is measuring, not the compact JSON's
+    # id/citation overhead. Real documents measured so far range 25k-93k characters of
+    # block text; 150,000 gives roughly 1.6x headroom over the largest observed
+    # document set while still failing fast on a document large enough to risk
+    # crowding out the outline instructions and other context in one turn, rather than
+    # silently truncating evidence a planner would then cite incompletely.
+    agent_planner_max_evidence_chars: int = Field(
+        default=150_000,
+        gt=0,
+        validation_alias=AliasChoices("AGENT_PLANNER_MAX_EVIDENCE_CHARS"),
+    )
     # Risk 3 (docs/agents-sdk-migration-plan.md, Stage 5b): a job parked in
     # AWAITING_INPUT holds its workspace under ``agent_jobs_root`` until a human
     # approves or rejects the outline. Seven days covers a full review cycle,
