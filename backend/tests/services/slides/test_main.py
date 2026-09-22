@@ -162,6 +162,16 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertIn("expanded references on the final references slide", prompt)
         self.assertIn("unsupported or fabricated reference entry as blocking", prompt)
         self.assertIn("every footer and reference entry as an author claim", prompt)
+        self.assertIn("requested_slide_count` in Review inputs counts content slides only", prompt)
+        self.assertIn("requested_slide_count + 1` slides", prompt)
+        self.assertIn("Never raise a finding about the number of slides or the deck's overall length", prompt)
+        self.assertIn("verified deterministically before your review", prompt)
+        self.assertIn("Read footer and reference text from `work/intermediate/deck_snapshot.json`", prompt)
+        self.assertIn(
+            "Never raise a finding that a footer is missing, unreadable, or not visible in a rendered image",
+            prompt,
+        )
+        self.assertIn("never request a structural change such as adding or removing", prompt)
         self.assertNotIn("expanded references in slide notes", prompt)
         self.assertNotIn("Speaker notes are author claims", prompt)
         self.assertNotIn("Prior blocking findings", prompt)
