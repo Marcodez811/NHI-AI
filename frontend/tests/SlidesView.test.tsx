@@ -279,6 +279,36 @@ describe("SlidesView", () => {
         expect(await screen.findByText(/尚無簡報工作/)).toBeInTheDocument();
     });
 
+    it("shows the new-presentation header on the new tab", () => {
+        renderView({ docs: [document()], selected: ["doc-1"] });
+
+        expect(screen.getByRole("heading", { level: 1, name: "生成簡報" })).toBeInTheDocument();
+        expect(screen.getByText("先選取來源，再調整設定，建立結構清晰的政策簡報。")).toBeInTheDocument();
+    });
+
+    it("switches the page header to the recent-jobs copy on that tab, without duplicating it", async () => {
+        routeSearch.current = "tab=recent";
+        renderView({ docs: [document()], selected: ["doc-1"] });
+
+        await screen.findByText(/尚無簡報工作/);
+        expect(screen.getByRole("heading", { level: 1, name: "最近的簡報工作" })).toBeInTheDocument();
+        expect(screen.getByText("從這裡返回待審核的大綱，或開啟已完成的簡報。")).toBeInTheDocument();
+        expect(screen.getAllByText("最近的簡報工作")).toHaveLength(1);
+    });
+
+    it("refetches recent jobs when 重新整理 is clicked on the recent tab", async () => {
+        routeSearch.current = "tab=recent";
+        const user = userEvent.setup();
+        vi.mocked(listSlideJobs).mockResolvedValue([jobSummary()]);
+        renderView({ docs: [document()], selected: ["doc-1"] });
+
+        await screen.findByText("年度政策簡報");
+        expect(listSlideJobs).toHaveBeenCalledOnce();
+
+        await user.click(screen.getByRole("button", { name: "重新整理簡報工作" }));
+        expect(listSlideJobs).toHaveBeenCalledTimes(2);
+    });
+
     it("pushes the tab into the URL when the user switches tabs", async () => {
         const user = userEvent.setup();
         renderView({ docs: [document()], selected: ["doc-1"] });

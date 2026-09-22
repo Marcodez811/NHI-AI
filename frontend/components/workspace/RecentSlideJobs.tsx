@@ -60,9 +60,12 @@ function jobState(job: SlideJobSummary) {
 /** The index reads fresh server state; a browser tab is not a job registry. */
 export function RecentSlideJobs({
     onJobsChange,
+    showHeading = true,
 }: {
     /** Lets the index tab badge reuse this fetch instead of loading the list twice. */
     onJobsChange?: (jobs: SlideJobSummary[] | null) => void;
+    /** Off when a caller (e.g. a tab panel) already renders this heading itself. */
+    showHeading?: boolean;
 } = {}) {
     const [jobs, setJobs] = useState<SlideJobSummary[] | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -86,12 +89,17 @@ export function RecentSlideJobs({
     }, [jobs, onJobsChange]);
 
     return (
-        <section aria-labelledby="recent-slide-jobs-title" className="mt-12 border-t border-border pt-8">
-            <div className="flex items-start justify-between gap-4">
-                <div>
-                    <h2 id="recent-slide-jobs-title" className="text-lg font-semibold tracking-tight">最近的簡報工作</h2>
-                    <p className="mt-1 text-sm text-muted-foreground">從這裡返回待審核的大綱，或開啟已完成的簡報。</p>
-                </div>
+        <section
+            aria-labelledby={showHeading ? "recent-slide-jobs-title" : undefined}
+            className={showHeading ? "mt-12 border-t border-border pt-8" : undefined}
+        >
+            <div className={showHeading ? "flex items-start justify-between gap-4" : "flex justify-end"}>
+                {showHeading && (
+                    <div>
+                        <h2 id="recent-slide-jobs-title" className="text-lg font-semibold tracking-tight">最近的簡報工作</h2>
+                        <p className="mt-1 text-sm text-muted-foreground">從這裡返回待審核的大綱，或開啟已完成的簡報。</p>
+                    </div>
+                )}
                 <Button type="button" variant="ghost" size="sm" onClick={() => setReload((value) => value + 1)} aria-label="重新整理簡報工作" className="shrink-0 gap-1.5">
                     <RefreshCw size={14} aria-hidden="true" />
                     重新整理

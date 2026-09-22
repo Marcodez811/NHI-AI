@@ -104,6 +104,16 @@ export function SlidesView({
     const searchParams = useSearchParams();
     // Unknown or missing ?tab means the new-presentation form, per the "no state-dependent default" rule.
     const activeTab: "new" | "recent" = searchParams.get("tab") === "recent" ? "recent" : "new";
+    const pageHeader =
+        activeTab === "recent"
+            ? {
+                  title: "最近的簡報工作",
+                  subtitle: "從這裡返回待審核的大綱，或開啟已完成的簡報。",
+              }
+            : {
+                  title: "生成簡報",
+                  subtitle: "先選取來源，再調整設定，建立結構清晰的政策簡報。",
+              };
     const [recentJobs, setRecentJobs] = useState<SlideJobSummary[] | null>(null);
     const awaitingReviewCount = useMemo(
         () =>
@@ -158,10 +168,10 @@ export function SlidesView({
                 <div className="mb-7">
                     <Link href="/workflows" className="mb-5 inline-flex items-center text-xs text-info hover:text-info/80">← 返回 AI 工作流</Link>
                     <h1 className="text-[24px] font-semibold tracking-tight">
-                        生成簡報
+                        {pageHeader.title}
                     </h1>
                     <p className="mt-1 text-sm text-muted-foreground">
-                        先選取來源，再調整設定，建立結構清晰的政策簡報。
+                        {pageHeader.subtitle}
                     </p>
                 </div>
 
@@ -533,7 +543,7 @@ export function SlidesView({
                     aria-labelledby="slides-tab-recent"
                     hidden={activeTab !== "recent"}
                 >
-                    <RecentSlideJobs onJobsChange={setRecentJobs} />
+                    <RecentSlideJobs onJobsChange={setRecentJobs} showHeading={false} />
                 </div>
             </div>
         </section>

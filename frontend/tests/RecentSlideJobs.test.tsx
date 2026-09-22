@@ -64,6 +64,17 @@ describe("RecentSlideJobs", () => {
         expect(listSlideJobs).toHaveBeenCalledOnce();
     });
 
+    it("hides its own heading when the caller renders one instead", async () => {
+        vi.mocked(listSlideJobs).mockResolvedValue([summary()]);
+
+        render(<RecentSlideJobs showHeading={false} />);
+
+        expect(await screen.findByText("年度政策簡報")).toBeInTheDocument();
+        expect(screen.queryByText("最近的簡報工作")).not.toBeInTheDocument();
+        expect(screen.queryByText("從這裡返回待審核的大綱，或開啟已完成的簡報。")).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "重新整理簡報工作" })).toBeInTheDocument();
+    });
+
     it("lets the user retry a failed list request", async () => {
         vi.mocked(listSlideJobs)
             .mockRejectedValueOnce(new Error("服務暫時無法使用"))
