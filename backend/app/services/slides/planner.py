@@ -199,8 +199,11 @@ class PlannerConversationService:
             yield _sse("error", {"code": "planner_invalid_evidence", "message": "大綱引用了不存在的佐證資料，請重新提出要求。"})
             return
         revision = await outline_repository.create_next_revision(job_id, outline, session_id=latest.session_id)
-        if result.response:
-            yield _sse("text_delta", {"text": result.response})
+        # Never forward the model's raw output to the chat. For a structured
+        # outline it *is* the outline's JSON, evidence ids included, and users must
+        # never see internal identifiers. The new revision is rendered from the
+        # ``done`` payload; the chat only confirms that it exists.
+        yield _sse("text_delta", {"text": f"已依你的要求更新大綱，產生第 {revision.revision} 版。"})
         yield _sse(
             "done",
             {"revision": revision.revision, "outline": outline.model_dump(mode="json")},

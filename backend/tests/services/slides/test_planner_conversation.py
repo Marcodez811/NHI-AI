@@ -138,3 +138,74 @@ async def test_conversation_request_carries_no_grants_and_inlines_evidence_on_ag
     assert request.instructions is not None
     assert "`<evidence>` block" in request.instructions
     assert '"type": "error"' in frames[-1]
+
+
+class OutlineReturningRunner:
+    """Returns a real outline, with the raw JSON a structured-output model emits."""
+
+    def __init__(self, outline: SlideOutline) -> None:
+        self.outline = outline
+
+    async def run(self, request, *, progress_callback=None):
+        from app.services.agentic.contracts import AgentExecutionResult
+
+        return AgentExecutionResult(
+            provider_run_id="fake-run",
+            response=self.outline.model_dump_json(),
+            output=self.outline,
+        )
+
+
+@pytest.mark.asyncio
+async def test_chat_reply_never_shows_the_raw_outline_or_evidence_ids(tmp_path, monkeypatch) -> None:
+    """A structured outline's raw output is JSON carrying evidence ids.
+
+    Forwarding it as the chat reply showed users the whole JSON, sha256 ids
+    included. The chat must only confirm the new revision, which the outline
+    panel renders from the ``done`` payload.
+    """
+
+    from app.models.slides import OutlineNode
+
+    monkeypatch.setattr(settings, "agent_planner_runner", "agents")
+    job_id = uuid4()
+    workspace = tmp_path / str(job_id)
+    _freeze_workspace_evidence(workspace)
+    evidence_id = json.loads((workspace / "work" / "evidence.json").read_text(encoding="utf-8"))["blocks"][0]["id"]
+    outline = SlideOutline(
+        title="Q3 policy briefing",
+        narrative="A grounded walkthrough.",
+        nodes=[
+            OutlineNode(
+                id="intro",
+                heading="Introduction",
+                intent="Frame the question.",
+                key_points=["Context", "Stakes"],
+                evidence_refs=[evidence_id],
+                emphasis="normal",
+                approx_slides=1,
+            )
+        ],
+        total_slides=1,
+    )
+    repository = InMemorySlideOutlineRepository()
+    await repository.create_next_revision(job_id, outline, session_id=str(job_id))
+    latest = await repository.get_latest(job_id)
+    service = PlannerConversationService(runner=OutlineReturningRunner(outline), jobs_root=tmp_path)
+
+    frames = [
+        frame
+        async for frame in service.continue_conversation(
+            job_id=job_id,
+            message="Tighten the introduction.",
+            latest=latest,
+            outline_repository=repository,
+        )
+    ]
+
+    reply_frames = [frame for frame in frames if '"type": "text_delta"' in frame]
+    assert reply_frames, "the chat should still confirm the new revision"
+    reply = "".join(reply_frames)
+    assert "第 2 版" in reply
+    assert evidence_id not in reply
+    assert '"nodes"' not in reply
