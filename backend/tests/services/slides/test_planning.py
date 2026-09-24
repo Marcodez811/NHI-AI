@@ -183,9 +183,9 @@ def test_build_prompt_is_unchanged_without_an_outline():
     assert "no `ppt/notesSlides/` parts" in without_kwarg
     assert "Exactly 8 content slides" in without_kwarg
     assert "`\u53c3\u8003\u8cc7\u6599` (9 slides total)" in without_kwarg
-    assert "List each source cited by the content slides exactly once" in without_kwarg
-    assert "never fabricate a bibliography entry" in without_kwarg
-    assert "name alone only when no reliable locator exists" in without_kwarg
+    assert "work/slide_citations.json" in without_kwarg
+    assert "{{CITATION}}" in without_kwarg
+    assert "{{REFERENCES}}" in without_kwarg
 
 
 def test_planner_keeps_references_slide_outside_content_outline() -> None:
