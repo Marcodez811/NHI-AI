@@ -72,6 +72,10 @@ async def generate_slides(
         fontconfig_file = await asyncio.to_thread(create_job_fontconfig, job_dir)
         preflight_environment = build_job_environment(fontconfig_file=fontconfig_file)
         cjk_font = await asyncio.to_thread(preflight, validated_sources, environment=preflight_environment)
+        # Rewrite the fontconfig now that the real CJK font is known, so the delivery
+        # font declared in the prompt (Microsoft JhengHei) aliases to it for rendering
+        # here. See create_job_fontconfig.
+        fontconfig_file = await asyncio.to_thread(create_job_fontconfig, job_dir, cjk_font=cjk_font)
         await asyncio.to_thread(stage_required_skills, job_dir)
         staged_names = await asyncio.to_thread(stage_uploads, job_dir, validated_sources)
         prompt = build_prompt(request, staged_names, font_family=cjk_font)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from xml.sax.saxutils import escape
+
+from lxml import etree
 
 from app.models.slides import DEFAULT_MAX_DOCUMENTS, SUPPORTED_SLIDE_SOURCE_EXTENSIONS
 
@@ -55,6 +58,14 @@ TRUSTED_PACKAGE_CLEANER = REPOSITORY_SKILLS_DIR / PPTX_SKILL / "scripts" / "clea
 CJK_FONT_PREFERENCES = (
     "Microsoft JhengHei", "Noto Sans CJK", "Noto Sans TC", "Noto Serif CJK", "Source Han", "PingFang TC",
 )
+# The font the delivered deck always declares, regardless of which CJK font the
+# container's preflight actually found. Windows machines -- where these decks are
+# opened -- reliably have Microsoft JhengHei (微軟正黑體); they do not have the Linux
+# container's Noto fallback, and PowerPoint substitutes an ugly default font for any
+# family it cannot resolve. The per-job fontconfig aliases this name back to the
+# detected container font so rendering here still works. See ``create_job_fontconfig``.
+DELIVERY_CJK_FONT = "Microsoft JhengHei"
+DELIVERY_CJK_FONT_ALIASES = (DELIVERY_CJK_FONT, "微軟正黑體")
 FONT_SUFFIXES = {".ttf", ".otf", ".ttc"}
 WINDOWS_JHENGHEI_FILES = ("msjh.ttc", "msjhbd.ttc", "msjhl.ttc")
 
@@ -115,7 +126,19 @@ def discover_cjk_font_dirs(assets_root: Path = ASSETS_ROOT, windows_fonts_dir: P
     return directories
 
 
-def create_job_fontconfig(job_dir: Path, *, assets_root: Path = ASSETS_ROOT, windows_fonts_dir: Path = WINDOWS_FONTS_DIR) -> Path | None:
+def create_job_fontconfig(job_dir: Path, *, assets_root: Path = ASSETS_ROOT, windows_fonts_dir: Path = WINDOWS_FONTS_DIR, cjk_font: str | None = None) -> Path | None:
+    """Write the per-job fontconfig, optionally aliasing the delivery font to what's real.
+
+    The delivered deck always declares ``DELIVERY_CJK_FONT`` (Microsoft JhengHei), because
+    that is what Windows -- where these decks are actually opened -- has installed. This
+    container usually does not, so rendering here (LibreOffice previews/final PNGs, native
+    chart XML) needs an alias so "Microsoft JhengHei"/"微軟正黑體" resolve to whichever CJK
+    font ``preflight`` actually found (``cjk_font``, e.g. a bundled Noto family). When the
+    real Microsoft JhengHei font is installed (the Windows fonts dir case ``discover_cjk_font_dirs``
+    already detects), ``preflight`` returns that same name and no alias is needed or added --
+    the direct family match already wins.
+    """
+
     font_dirs = discover_cjk_font_dirs(assets_root, windows_fonts_dir)
     if not font_dirs:
         return None
@@ -123,11 +146,18 @@ def create_job_fontconfig(job_dir: Path, *, assets_root: Path = ASSETS_ROOT, win
     cache_dir = config_dir / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     directories = "\n".join(f"  <dir>{escape(str(path))}</dir>" for path in font_dirs)
+    aliases = ""
+    if cjk_font and cjk_font.strip().casefold() != DELIVERY_CJK_FONT.casefold():
+        fallback = escape(cjk_font)
+        aliases = "\n" + "\n".join(
+            f"  <alias>\n    <family>{escape(name)}</family>\n    <accept><family>{fallback}</family></accept>\n  </alias>"
+            for name in DELIVERY_CJK_FONT_ALIASES
+        )
     config_path = config_dir / "fonts.conf"
     config_path.write_text(
         "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n<fontconfig>\n"
         "  <include ignore_missing=\"yes\">/etc/fonts/fonts.conf</include>\n"
-        f"{directories}\n  <cachedir>{escape(str(cache_dir))}</cachedir>\n</fontconfig>\n",
+        f"{directories}\n  <cachedir>{escape(str(cache_dir))}</cachedir>{aliases}\n</fontconfig>\n",
         encoding="utf-8",
     )
     return config_path
@@ -611,6 +641,110 @@ def _package_xml_looks_rewritten(deck: Path) -> bool:
         )
 
 
+_DRAWINGML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_A_NS_Q = f"{{{_DRAWINGML_NS}}}"
+_THEME_PART_RE = re.compile(r"ppt/theme/theme[^/]*\.xml")
+_CHART_PART_RE = re.compile(r"ppt/charts/chart[^/]*\.xml")
+_XML_PARSER = etree.XMLParser(resolve_entities=False, no_network=True, remove_blank_text=False)
+
+
+def _set_ea_after_latin(latin: etree._Element, delivery_font: str) -> bool:
+    """Insert ``<a:ea typeface=.../>`` right after ``latin`` if it has no ``ea`` sibling.
+
+    ``a:ea`` always follows ``a:latin`` in ``CT_TextCharacterProperties``/``CT_TextFont``,
+    so inserting immediately after ``latin`` is schema-correct regardless of what (``cs``,
+    ``sym``, ...) comes next.
+    """
+
+    parent = latin.getparent()
+    if parent is None or parent.find(f"{_A_NS_Q}ea") is not None:
+        return False
+    ea = etree.Element(f"{_A_NS_Q}ea")
+    ea.set("typeface", delivery_font)
+    latin.addnext(ea)
+    return True
+
+
+def _normalize_theme_font_xml(root: etree._Element, delivery_font: str) -> bool:
+    """Fill an empty theme major/minor ``<a:ea typeface="">`` with the delivery font."""
+
+    changed = False
+    for font_tag in ("majorFont", "minorFont"):
+        for scheme in root.iter(f"{_A_NS_Q}{font_tag}"):
+            ea = scheme.find(f"{_A_NS_Q}ea")
+            if ea is None:
+                latin = scheme.find(f"{_A_NS_Q}latin")
+                if latin is not None and _set_ea_after_latin(latin, delivery_font):
+                    changed = True
+                continue
+            if not (ea.get("typeface") or "").strip():
+                ea.set("typeface", delivery_font)
+                changed = True
+    return changed
+
+
+def _normalize_chart_font_xml(root: etree._Element, delivery_font: str) -> bool:
+    """Add a missing ``<a:ea>`` next to every ``<a:latin>`` run property in a chart part."""
+
+    changed = False
+    for latin in list(root.iter(f"{_A_NS_Q}latin")):
+        if _set_ea_after_latin(latin, delivery_font):
+            changed = True
+    return changed
+
+
+def normalize_delivery_fonts(deck: Path, *, delivery_font: str = DELIVERY_CJK_FONT) -> list[str]:
+    """Force East Asian chart/theme text onto the delivery font, atomically.
+
+    The author declares ``delivery_font`` (Microsoft JhengHei) for slide text per the
+    prompt, but PptxGenJS only ever writes native charts' ``<a:latin>`` run properties --
+    never a sibling ``<a:ea>`` -- and the theme's font scheme ships with an empty
+    ``<a:ea typeface="">``. Both make PowerPoint fall back to a system default (新細明體
+    on Windows) for any Chinese chart/theme text instead of the declared font. This is a
+    narrow, deterministic typeface-only fix: it never touches layout, colors, or any other
+    package content, and it writes the archive back atomically the same way ``clean.py`` does.
+    """
+
+    try:
+        with zipfile.ZipFile(deck, "r") as archive:
+            names = archive.namelist()
+            targets = [name for name in names if _THEME_PART_RE.fullmatch(name) or _CHART_PART_RE.fullmatch(name)]
+            if not targets:
+                return []
+            contents = {name: archive.read(name) for name in targets}
+    except (FileNotFoundError, zipfile.BadZipFile) as exc:
+        raise CandidateDeckCleanupError(f"presentation is not a valid PPTX/ZIP: {exc}") from exc
+
+    replacements: dict[str, bytes] = {}
+    for name, data in contents.items():
+        try:
+            root = etree.fromstring(data, parser=_XML_PARSER)
+        except etree.XMLSyntaxError:
+            continue
+        is_theme = bool(_THEME_PART_RE.fullmatch(name))
+        changed = _normalize_theme_font_xml(root, delivery_font) if is_theme else _normalize_chart_font_xml(root, delivery_font)
+        if changed:
+            replacements[name] = etree.tostring(root, encoding="UTF-8", xml_declaration=True, standalone=True)
+
+    if not replacements:
+        return []
+
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=f".{deck.name}.", suffix=".tmp", dir=deck.parent, delete=False) as handle:
+            temporary = handle.name
+        with zipfile.ZipFile(deck, "r") as source_archive, zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as destination_archive:
+            for info in source_archive.infolist():
+                data = replacements.get(info.filename)
+                destination_archive.writestr(info, data if data is not None else source_archive.read(info.filename))
+        os.chmod(temporary, deck.stat().st_mode)
+        os.replace(temporary, deck)
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
+    return sorted(replacements)
+
+
 def clean_candidate_deck(workspace: Path, *, cleaner: Callable[[Path], list[str]] | None = None) -> list[str]:
     """Deterministically strip the notes graph and orphaned parts from the candidate deck.
 
@@ -619,7 +753,10 @@ def clean_candidate_deck(workspace: Path, *, cleaner: Callable[[Path], list[str]
     ElementTree-mangled, LibreOffice-unreadable deck in production (the deterministic
     validator's ``package_xml_rewritten`` finding catches any case that still slips
     through); doing the cleanup here, deterministically, removes that responsibility from
-    the author entirely.
+    the author entirely. After the trusted cleaner runs, ``normalize_delivery_fonts`` forces
+    chart/theme East Asian text onto the delivery font declared in the prompt (see
+    ``DELIVERY_CJK_FONT``), the same way this function owns every other piece of package
+    surgery the author must not do by hand.
     """
 
     deck = workspace / "output" / "presentation.pptx"
@@ -632,7 +769,7 @@ def clean_candidate_deck(workspace: Path, *, cleaner: Callable[[Path], list[str]
         raise CandidateDeckCleanupError("presentation is not a valid PPTX/ZIP") from exc
     clean = cleaner if cleaner is not None else _load_trusted_cleaner()
     try:
-        return clean(deck)
+        removed = clean(deck)
     except Exception as exc:
         # The trusted cleaner is dynamically loaded; its exception class lives
         # in that function's globals rather than an importable backend module.
@@ -640,6 +777,8 @@ def clean_candidate_deck(workspace: Path, *, cleaner: Callable[[Path], list[str]
         if isinstance(refusal, type) and isinstance(exc, refusal):
             raise CandidateDeckCleanupError(str(exc)) from exc
         raise
+    normalize_delivery_fonts(deck)
+    return removed
 
 
 def cleanup_job(job_dir: Path) -> None:

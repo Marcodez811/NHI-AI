@@ -16,6 +16,19 @@ RUN apt-get update \
         tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
+# Decks declare Microsoft JhengHei so they look right on Windows. The image has
+# no Microsoft fonts, so every render in the container (the author's previews
+# and the backend's final render) substitutes Noto Sans CJK TC for it.
+RUN printf '%s\n' \
+        '<?xml version="1.0"?>' \
+        '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">' \
+        '<fontconfig>' \
+        '  <alias binding="same"><family>Microsoft JhengHei</family><accept><family>Noto Sans CJK TC</family></accept></alias>' \
+        '  <alias binding="same"><family>微軟正黑體</family><accept><family>Noto Sans CJK TC</family></accept></alias>' \
+        '</fontconfig>' \
+        > /etc/fonts/conf.d/60-delivery-font.conf \
+    && fc-cache -f
+
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PYTHONDONTWRITEBYTECODE=1 \

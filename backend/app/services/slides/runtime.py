@@ -17,7 +17,7 @@ from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox, SkillIn
 
 from app.models.slides import DEFAULT_TIMEOUT_MINUTES, SlideOutline, SlidesTaskPayload
 
-from .artifacts import BACKEND_ROOT, PPTX_SKILL, SOURCE_SKILL
+from .artifacts import BACKEND_ROOT, DELIVERY_CJK_FONT, PPTX_SKILL, SOURCE_SKILL
 from .contracts import JobError, ProgressCallback
 
 DEFAULT_PROGRESS_HEARTBEAT_SECONDS = 60.0
@@ -77,9 +77,15 @@ def build_prompt(
     ``outline`` is the human-approved planning proposal (Stage 5); it is
     ``None`` for every workflow run that never declares a planner, so the
     prompt this function returns is completely unchanged for those runs.
+    ``font_family`` is accepted for backward compatibility with older callers but no
+    longer used: the delivered deck always declares ``DELIVERY_CJK_FONT`` (Microsoft
+    JhengHei) rather than whichever CJK font this container's preflight happened to
+    detect, because that container font is not installed on the Windows machines that
+    actually open these decks. Rendering here still works: the per-job fontconfig
+    aliases the delivery font back to the detected font (see ``create_job_fontconfig``).
     """
 
-    del staged_names
+    del staged_names, font_family
     prompt = f"""# Presentation job
 
 Create a polished, editable, source-grounded presentation from the frozen
@@ -91,13 +97,26 @@ EvidenceStore at `work/evidence.json`. This JSON file and assets under
 - Tone: {request.tone}
 - Length: Exactly {request.slides_count} content slides, followed by one final references
   slide titled exactly `參考資料` ({request.slides_count + 1} slides total).
-- Font: Use {font_family or "a detected Traditional-Chinese/CJK-safe font"} consistently for slide text and charts.
+- Font: Use {DELIVERY_CJK_FONT}（微軟正黑體）consistently for slide text and charts.
 - Additional guidance: {request.guidance}
 
 Read the attached `$pptx-nhi-tw` skill completely. Synthesize the frozen evidence into one
 narrative, resolve conflicts explicitly using the evidence blocks, and never invent facts or
 data. Do not open or reinterpret files under `input/`, and do not modify `work/evidence.json`
 or `work/extracted/`.
+
+## How to communicate
+Every content slide's title must state its takeaway as a sentence, not a topic label --
+write what changed and why it matters, not what the slide is about. Use at most 3 content
+blocks per slide; cut or merge rather than shrink text to fit a fourth. Every number must
+carry its label, its unit, and a comparison or context (change, share, rank) in the same
+text line or immediately adjacent -- never a bare figure with the unit split onto another
+line. Use the unit a reader would say aloud (約0.9億點, not 89.76百萬點), while keeping the
+underlying value exactly as the evidence states it. Prefer a chart over a card grid whenever
+you are comparing a series. Use colour only when it encodes meaning (a category, a
+threshold, a direction); never as decoration, and never add decorative badges or icons.
+Body text must be at least 14pt and labels, captions, and axis text at least 12pt --
+the citation footer and slide number are the only exceptions.
 
 After building the deck, write `work/slide_citations.json` as
 `{{"slides":{{"3":["<evidence block id>"],"6":["<id>","<id>"]}}}}`.

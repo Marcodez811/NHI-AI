@@ -186,6 +186,8 @@ async def test_source_manifest_grants_and_prompts_are_exact(tmp_path: Path) -> N
     assert "work/author_src/build.js" in author_prompt
     assert "Every chart must carry a descriptive title" in author_prompt
     assert "units on the relevant\naxis label" in author_prompt
+    assert "Microsoft JhengHei" in author_prompt
+    assert "How to communicate" in author_prompt
 
 
 def test_pptx_nhi_tw_skill_matches_backend_citation_contract() -> None:

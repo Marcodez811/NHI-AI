@@ -188,6 +188,38 @@ def test_build_prompt_is_unchanged_without_an_outline():
     assert "{{REFERENCES}}" in without_kwarg
 
 
+def test_build_prompt_always_declares_the_windows_delivery_font() -> None:
+    """Windows machines -- where these decks are opened -- have Microsoft JhengHei, not
+    whichever CJK font this container's preflight happened to detect. The prompt's Font
+    line must declare the delivery font regardless of what ``font_family`` is passed.
+    """
+
+    from app.models.slides import SlidesTaskPayload as Payload
+
+    request = Payload(job_id=uuid4(), title="Q3", document_ids=[uuid4()], slides_count=8, guidance="g", tone="formal")
+
+    detected_container_font = build_prompt(request, [], font_family="Noto Sans TC")
+    no_detected_font = build_prompt(request, [], font_family=None)
+
+    assert detected_container_font == no_detected_font
+    assert "Microsoft JhengHei" in detected_container_font
+    assert "Noto Sans TC" not in detected_container_font
+
+
+def test_build_prompt_instructs_how_to_communicate() -> None:
+    from app.models.slides import SlidesTaskPayload as Payload
+
+    request = Payload(job_id=uuid4(), title="Q3", document_ids=[uuid4()], slides_count=8, guidance="g", tone="formal")
+
+    prompt = build_prompt(request, [], font_family="Noto Sans TC")
+
+    assert "## How to communicate" in prompt
+    assert "takeaway as a sentence" in prompt
+    assert "at most 3 content\nblocks per slide" in prompt
+    assert "at least 14pt" in prompt
+    assert "at least 12pt" in prompt
+
+
 def test_planner_keeps_references_slide_outside_content_outline() -> None:
     from app.models.slides import SlidesTaskPayload as Payload
 

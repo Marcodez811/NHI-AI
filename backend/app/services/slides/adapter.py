@@ -271,6 +271,10 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
             validated,
             environment=build_job_environment(fontconfig_file=fontconfig),
         )
+        # Rewrite the fontconfig now that the real CJK font is known, so the delivery
+        # font declared in the prompt (Microsoft JhengHei) aliases to it for rendering
+        # here. See create_job_fontconfig.
+        fontconfig = await asyncio.to_thread(create_job_fontconfig, workspace, cjk_font=font)
         if sources_exist:
             try:
                 existing_sources = await asyncio.to_thread(load_source_manifest, sources_path)
