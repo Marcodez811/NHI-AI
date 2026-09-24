@@ -105,6 +105,16 @@ async def list_qa_modes() -> list[QaModeInfo]:
     ]
 
 
+# Every hop between the backend and the browser must pass each event on at once.
+# ``no-transform`` is what stops compressing proxies from buffering the stream:
+# the frontend's Next.js rewrite gzips responses by default and only skips a
+# response marked ``no-transform``, so without it the small ``: heartbeat`` writes
+# sat in the compression buffer and the browser's 45-second inactivity timeout
+# fired while the backend was still working. ``X-Accel-Buffering`` does the same
+# for nginx, which ignores ``Cache-Control`` for this purpose.
+SSE_RESPONSE_HEADERS = {"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"}
+
+
 async def _stream_with_heartbeat(
     source: AsyncGenerator[str, None],
     *,
@@ -200,5 +210,5 @@ async def stream_chat(
     return StreamingResponse(
         _generate(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=SSE_RESPONSE_HEADERS,
     )

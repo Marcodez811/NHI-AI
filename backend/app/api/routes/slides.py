@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from taskiq.depends.progress_tracker import TaskProgress
 from taskiq_redis.exceptions import ResultIsMissingError
 
-from app.api.routes.chat import _stream_with_heartbeat
+from app.api.routes.chat import SSE_RESPONSE_HEADERS, _stream_with_heartbeat
 from app.broker import result_backend
 from app.config import settings
 from app.models.slides import (
@@ -602,7 +602,7 @@ async def send_slide_job_outline_message(
     return StreamingResponse(
         _generate(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=SSE_RESPONSE_HEADERS,
     )
 
 

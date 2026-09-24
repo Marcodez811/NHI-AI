@@ -337,6 +337,27 @@ async def test_send_outline_message_streams_and_persists_the_next_revision():
 
 
 @pytest.mark.asyncio
+async def test_outline_message_stream_forbids_proxy_buffering():
+    # An outline revision can take over a minute, during which the stream carries
+    # only heartbeats. Without ``no-transform``, the frontend's compressing proxy
+    # buffered them and the browser timed out at 45 seconds with nothing received.
+    outline_repository = InMemorySlideOutlineRepository()
+    job_id = uuid4()
+    await outline_repository.create_next_revision(job_id, _outline("First draft"), session_id="session-1")
+
+    response = await send_slide_job_outline_message(
+        job_id,
+        OutlineMessageRequest(message="Tighten the introduction."),
+        outline_repository,
+        _FakePlanner(_outline("Tighter")),
+    )
+    await _collect_sse(response)
+
+    assert "no-transform" in response.headers["cache-control"]
+    assert response.headers["x-accel-buffering"] == "no"
+
+
+@pytest.mark.asyncio
 async def test_send_outline_message_404_when_no_outline_exists():
     with pytest.raises(HTTPException) as caught:
         await send_slide_job_outline_message(
