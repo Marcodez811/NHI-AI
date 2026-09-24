@@ -369,6 +369,10 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
                 workspace / "work" / "images",
                 workspace / "work" / "outline_mapping.json",
                 workspace / "work" / "slide_citations.json",
+                # Persistent build script source so correction attempts can
+                # edit and re-run the deck instead of rebuilding from memory
+                # (never exposed to the reviewer, never published).
+                workspace / "work" / "author_src",
             )
         return ()
 
@@ -565,6 +569,14 @@ rather than presenting both sides unreconciled.
                 f"title exactly as `{value.title}`, the requested {value.slides_count} content slides, "
                 "and the final `參考資料` slide; "
                 "do not redesign or rewrite unaffected slides.\n"
+                "If `work/author_src/build.js` exists, apply the fix by making minimal, targeted edits "
+                "to that script and re-running it to regenerate output/presentation.pptx; do not rebuild "
+                "slides that do not need changes, and never edit the .pptx file directly. The deck in "
+                "output/ already has backend-written citations replacing the "
+                "`{{CITATION}}`/`{{REFERENCES}}` placeholders -- that is expected, keep writing the "
+                "placeholders in build.js, not rendered citations. Keep the facts and numbers on every "
+                "slide you do not touch unchanged. If work/author_src/build.js is missing, rebuild the "
+                "script and deck from scratch as usual.\n"
                 "Address every blocking finding below. After changes, regenerate affected preview renders, "
                 "then stop; the backend validator owns content_check.json and deck_snapshot.json. "
                 "The frozen evidence.json and work/extracted/ tree are read-only and authoritative. "

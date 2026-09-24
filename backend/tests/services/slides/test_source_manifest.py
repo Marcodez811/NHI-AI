@@ -183,6 +183,7 @@ async def test_source_manifest_grants_and_prompts_are_exact(tmp_path: Path) -> N
     assert "{{CITATION}}" in author_prompt
     assert "{{REFERENCES}}" in author_prompt
     assert "Never type citation" in author_prompt
+    assert "work/author_src/build.js" in author_prompt
     assert "Every chart must carry a descriptive title" in author_prompt
     assert "units on the relevant\naxis label" in author_prompt
 

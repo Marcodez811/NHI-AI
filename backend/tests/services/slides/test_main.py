@@ -247,6 +247,10 @@ class SlidesServiceTests(unittest.TestCase):
         self.assertIn("remove any speaker notes", prompt)
         self.assertIn("work/sources.json", prompt)
         self.assertIn("collision suffixes", prompt)
+        self.assertIn("work/author_src/build.js", prompt)
+        self.assertIn("minimal, targeted edits", prompt)
+        self.assertIn("never edit the .pptx file directly", prompt)
+        self.assertIn("backend-written citations", prompt)
 
     def test_correction_prompt_preserves_prior_validator_and_reviewer_findings(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -297,7 +301,15 @@ class SlidesServiceTests(unittest.TestCase):
             self.assertNotIn(workspace / "work" / "rendered" / "final", writable)
             self.assertIn(workspace / "work" / "outline_mapping.json", writable)
             self.assertIn(workspace / "work" / "slide_citations.json", writable)
+            self.assertIn(workspace / "work" / "author_src", writable)
             self.assertNotIn(workspace / "work", writable)
+
+    def test_author_src_hidden_from_reviewer_and_never_published(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = slides.create_job_workspace("job", Path(temporary))
+            reviewer_read_only = slides_adapter.stage_read_only_paths("reviewer", workspace)
+            self.assertNotIn(workspace / "work" / "author_src", reviewer_read_only)
+            self.assertFalse(any("author_src" in str(path) for path in reviewer_read_only))
 
     def test_validator_candidate_findings_are_structured_retry_feedback(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -125,6 +125,13 @@ with `ElementTree` or any tool that invents its own namespace prefixes, and neve
 backend runs deterministic package cleanup after every attempt, so you never need to touch
 package internals yourself.
 
+Build the deck by writing a single PptxGenJS script that generates it, and keep that
+complete script at `work/author_src/build.js` (plus any helper data files it needs, in the
+same directory) so it persists across correction attempts. Keep the literal
+`{{{{CITATION}}}}`/`{{{{REFERENCES}}}}` placeholder text in `build.js` itself -- never the
+rendered citations -- and always produce `output/presentation.pptx` by running that script,
+never by hand-editing the PPTX.
+
 If template/ contains a PPTX, use it as the visual basis.
 Assume network access and package installation are unavailable.
 
@@ -132,6 +139,7 @@ Render and inspect every slide, revising layout or visual issues in the candidat
 The backend validator owns deterministic content checks and the deck snapshot. Required
 author artifacts:
 - output/presentation.pptx
+- work/author_src/build.js
 - work/slide_citations.json
 - work/rendered/preview/*.png for the author's visual inspection only
 

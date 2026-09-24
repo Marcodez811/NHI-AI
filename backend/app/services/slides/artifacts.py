@@ -217,6 +217,7 @@ def create_job_workspace(job_id: str, jobs_root: Path) -> Path:
         "work/rendered/preview",
         "work/rendered/preview-pdf",
         "work/rendered/final",
+        "work/author_src",
         "output",
     ):
         (job_dir / relative_path).mkdir(parents=True, exist_ok=True)
