@@ -1202,6 +1202,7 @@ _FOOTER_SHAPE_RE = re.compile(r"^(?:\[\s*\d+\s*\]\s*)*資料來源")
 _CITATION_NUMBER_RE = re.compile(r"\[\s*\d+\s*\]")
 _CITATION_MARKER = "資料來源"
 _REFERENCES_SLIDE_TITLE = "參考資料"
+_CITATION_PLACEHOLDERS = ("{{CITATION}}", "{{REFERENCES}}")
 _SHA256_TOKEN_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 _INTERNAL_ARTIFACT_RE = re.compile(
     r"(?<!\w)(?:work[/\\][\w./\\-]+\.json|(?:ppt|word|xl)[/\\][\w./\\-]+\.xml|[\w.-]+\.(?:json|xml))\b",
@@ -1373,6 +1374,53 @@ def _citation_source_name_findings(
                 )
             )
     return findings
+
+
+def _citation_writer_findings(path: Path) -> list[ValidationFinding]:
+    """Expose author-side declaration errors through the normal revision gate."""
+
+    if not path.is_file():
+        return []
+    try:
+        problems = json.loads(path.read_text(encoding="utf-8"))["problems"]
+        if not isinstance(problems, list):
+            raise ValueError("problems must be an array")
+        return [
+            ValidationFinding(
+                code=problem["code"],
+                message=problem["message"],
+                slide_number=problem.get("slide_number"),
+                details=problem.get("details", {}),
+                origin="candidate",
+            )
+            for problem in problems
+        ]
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return [
+            ValidationFinding(
+                "citation_writer_report_invalid",
+                "backend citation writer report is unavailable or malformed",
+                details={"error": str(exc)},
+                origin="infrastructure",
+            )
+        ]
+
+
+def _citation_placeholder_findings(package: _PptxPackage) -> list[ValidationFinding]:
+    """Do not publish a deck still showing backend replacement tokens."""
+
+    return [
+        ValidationFinding(
+            "citation_placeholder_remaining",
+            f"slide still contains {token}; supply its citation declaration and placeholder",
+            slide_number=slide_number,
+            details={"placeholder": token},
+            origin="candidate",
+        )
+        for slide_number, root in enumerate(package.slide_roots, start=1)
+        for token in _CITATION_PLACEHOLDERS
+        if any(token in paragraph for paragraph in _paragraph_texts(root))
+    ]
 
 
 def _is_slide_number_field_paragraph(paragraph_element: ET.Element) -> bool:
@@ -1974,6 +2022,7 @@ def _validate_candidate_deck_in_render_root(
     _clear_final_renders(job_dir / "work" / "rendered" / "final")
     _clear_validator_artifacts(content_path, snapshot_path)
     findings: list[ValidationFinding] = []
+    findings.extend(_citation_writer_findings(artifact_dir / "citation_writer.json"))
     sources: tuple[SlideSource, ...] | None = None
     try:
         sources = load_source_manifest(sources_file)
@@ -2022,6 +2071,7 @@ def _validate_candidate_deck_in_render_root(
         findings.extend(package_rewrite_findings)
         slide_count = len(package.ordered_slides)
         content_slide_count = slide_count - 1
+        findings.extend(_citation_placeholder_findings(package))
         if sources is not None:
             findings.extend(_citation_source_name_findings(package, sources))
             findings.extend(_references_slide_findings(package, sources))
