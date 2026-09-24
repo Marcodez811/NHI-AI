@@ -65,6 +65,25 @@ theirs; **successful jobs are cleaned up**.
 
 Read a file: `docker compose exec tasks-worker cat <path>`
 
+**Why did the reviewer block?** One line per open blocking finding, per review round.
+`persistent` = findings the author failed to fix; `new` = fresh ones.
+
+```bash
+JOB=<job-id>
+docker compose exec -T tasks-worker python -c "
+import json,sys
+h=json.load(open(f'/data/jobs/{sys.argv[1]}/work/intermediate/semantic_review_history.json'))
+for r in h:
+    e=r['evaluation']
+    print(f\"== review {r['attempt']}: {e['decision']} | blocking {e['blocking_count']} (new {e['new_count']}, persistent {e['persistent_count']}, resolved {e['resolved_count']})\")
+    for f in r['review']['findings']:
+        if f['severity']=='blocking' and f['status']=='open':
+            print(f\"  - slide {f.get('slide_number')} [{f['category']}] {f.get('claim','')[:90]}\")
+            print(f\"      why: {f.get('reason','')[:220]}\")
+            print(f\"      fix: {f.get('correction','')[:160]}\")
+" $JOB
+```
+
 Copy one out: `docker compose cp tasks-worker:<path> ./somewhere.pptx`
 
 Read the volume **while the stack is stopped**, without starting anything:
