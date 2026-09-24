@@ -385,3 +385,66 @@ async def test_expire_awaiting_outline_task_never_touches_a_running_job(tmp_path
         job = session.get(SlideJob, running_id)
     assert job.status == JobStatus.RUNNING.value
     assert workspace.exists()
+
+
+@pytest.mark.asyncio
+async def test_worker_forwards_model_and_reasoning_effort_to_telemetry(tmp_path, monkeypatch):
+    """The dashboard showed "—" for reasoning on every node.
+
+    The pipeline sends ``reasoning_effort`` with each node event, but the worker's
+    telemetry forwarder dropped it. Assert both identity fields reach telemetry.
+    """
+
+    import app.tasks.agents as agents_module
+
+    engine = _migrated_engine(tmp_path)
+    monkeypatch.setattr(agents_module, "engine", engine)
+    monkeypatch.setattr(agents_module, "_build_runner_registry", lambda: (object(), 60.0))
+    job_id = uuid4()
+    with Session(engine) as session:
+        session.add(SlideJob(
+            id=job_id,
+            title="Q3 policy briefing",
+            document_ids=[str(uuid4())],
+            slides_count=8,
+            guidance="Focus on reform impact.",
+            tone="formal",
+        ))
+        session.commit()
+
+    async def fake_execute_workflow(payload, **kwargs):
+        await kwargs["event_callback"]({
+            "event_type": "node_started",
+            "node_id": "planning",
+            "runner": "agents",
+            "model": "litellm/gemini/gemini-3.8-flash",
+            "reasoning_effort": "high",
+            "attempt": 1,
+            "status": "running",
+        })
+        started = datetime.now(timezone.utc)
+        return AgentTaskResult(
+            job_id=payload.job_id,
+            workflow=payload.workflow,
+            status=WorkflowStatus.RUNNING,
+            phase=AgentPhase.AWAITING_OUTLINE,
+            output=None,
+            started_at=started,
+            finished_at=started,
+            error=None,
+        )
+
+    monkeypatch.setattr(agents_module, "execute_workflow", fake_execute_workflow)
+    forwarded: list[dict] = []
+
+    async def fake_emit_telemetry(run_id, event_type, **fields):
+        if event_type is AgentEventType.NODE_STARTED:
+            forwarded.append(fields)
+
+    monkeypatch.setattr(agents_module, "_emit_telemetry", fake_emit_telemetry)
+
+    await agents_module.run(AgentTaskPayload(job_id=job_id, workflow="slides", input={}))
+
+    assert forwarded, "the node_started event should reach telemetry"
+    assert forwarded[0]["reasoning_effort"] == "high"
+    assert forwarded[0]["model"] == "litellm/gemini/gemini-3.8-flash"

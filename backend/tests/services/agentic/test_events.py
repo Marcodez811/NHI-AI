@@ -343,3 +343,16 @@ async def test_two_stores_retry_stale_transaction_without_regressing_snapshot():
     assert snapshot.nodes[0].updated_at == earlier_event.occurred_at
     assert redis.sorted_sets[first_store.RUNS_KEY]["run-3"] == snapshot.updated_at.timestamp()
     assert [event.sequence for event in events] == [1, 2, 3, 4]
+
+
+def test_event_model_keeps_provider_prefixed_model_names_but_rejects_paths():
+    # Provider-prefixed names (the Agents SDK's litellm/ routing) must reach the
+    # dashboard; anything that reads as a file path must still be dropped.
+    def model_of(value):
+        return AgentEvent(run_id="run-1", event_type="node_started", model=value).model
+
+    assert model_of("litellm/gemini/gemini-3.8-flash") == "litellm/gemini/gemini-3.8-flash"
+    assert model_of("gpt-6-luna") == "gpt-6-luna"
+    assert model_of("/data/jobs/run-1/output.pptx") is None
+    assert model_of("litellm/../secrets") is None
+    assert model_of("litellm//gemini") is None

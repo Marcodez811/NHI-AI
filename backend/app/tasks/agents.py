@@ -295,6 +295,7 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
             role=event.get("role"),
             runner=event.get("runner"),
             model=event.get("model"),
+            reasoning_effort=event.get("reasoning_effort"),
             attempt=event.get("attempt"),
             status=event.get("status"),
             provider_run_id=event.get("provider_run_id"),

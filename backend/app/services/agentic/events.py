@@ -78,6 +78,30 @@ def _decode(value: Any) -> Any:
     return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
 
 
+_MODEL_NAME_SEGMENT = re.compile(r"^[A-Za-z0-9_.:@-]+$")
+
+
+def _safe_model_name(value: Any) -> str | None:
+    """Accept provider-prefixed model names such as ``litellm/gemini/<model>``.
+
+    ``_safe_identifier`` rejects ``/`` so that file paths never reach telemetry,
+    which silently blanked every provider-prefixed model on the dashboard. Model
+    names get their own rule: slash-separated segments of identifier characters,
+    so a leading ``/``, an empty segment, or a ``.``/``..`` segment -- anything that
+    reads as a path -- is still rejected.
+    """
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or len(text) > 160:
+        return None
+    segments = text.split("/")
+    if any(segment in {"", ".", ".."} or not _MODEL_NAME_SEGMENT.fullmatch(segment) for segment in segments):
+        return None
+    return text
+
+
 def _safe_identifier(value: Any, *, required: bool = False) -> str | None:
     if value is None:
         if required:
@@ -160,7 +184,6 @@ class AgentEvent(BaseModel):
         "node_id",
         "agent_role",
         "runner",
-        "model",
         "reasoning_effort",
         "task_id",
         "worker_id",
@@ -170,6 +193,11 @@ class AgentEvent(BaseModel):
     @classmethod
     def validate_optional_identifiers(cls, value: Any) -> str | None:
         return _safe_identifier(value)
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def validate_model_name(cls, value: Any) -> str | None:
+        return _safe_model_name(value)
 
     @field_validator("message", mode="before")
     @classmethod
