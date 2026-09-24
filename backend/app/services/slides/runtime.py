@@ -99,36 +99,18 @@ narrative, resolve conflicts explicitly using the evidence blocks, and never inv
 data. Do not open or reinterpret files under `input/`, and do not modify `work/evidence.json`
 or `work/extracted/`.
 
-`work/sources.json` is the authoritative mapping from each staged evidence filename to the
-knowledge-base `display_name` the user recognizes. Every visible source name must use that
-`display_name`, even when an evidence block's `citation.source_name`, `citation.display_text`,
-or a parsed document title disagrees. Keep available section, PDF-page, or text-line locator
-detail from the evidence block, but never show a staged filename or collision suffix.
-`EvidenceStore`, evidence IDs, hashes, JSON filenames, and extraction-process language are
-internal workflow details. Never show them in slide text, citations, or the cover. Cite slides
-that contain factual claims, figures, or charts. Each factual content-slide footer must use
-`[N] 資料來源：<allowlisted display_name>，<locator>`, retaining every available
-evidence-backed section, PDF-page, or text-line locator. Assign one number per source and
-reuse that same number everywhere the source appears. When a slide draws on more than one
-source, give each source its own footer paragraph; never combine sources on one line, whether
-by repeating the `資料來源` marker or by stacking `[N]` numbers before a single marker. End the deck with the required
-`參考資料` slide. List each source cited by the content slides exactly once, numbered `[1]`,
-`[2]`, and so on with numbers that agree with the content footers, using its allowlisted
-`display_name` from `work/sources.json` followed by every available evidence-backed section
-path and page or line locator. Put exactly one entry in each paragraph, in the form
-`[N] <allowlisted display_name>，<evidence-backed detail>`; omit the comma and detail only
-when no reliable locator or section exists. However long an entry's locator detail runs, keep
-that whole entry as a single paragraph that wraps within itself; never split one entry across
-multiple paragraphs or continuation lines, and never start a paragraph without its own `[N]`.
-The references slide contains only its
-`參考資料` title and these numbered entries: add no captions, notes, summaries, or
-explanatory sentences. For a retained block without `citation`, use
-`provenance.source` only to select the matching staged filename in `work/sources.json`, then
-use that entry's `display_name` plus any reliable provenance locator; use the allowlisted
-name alone only when no reliable locator exists. The required references slide must be
-derived from the frozen evidence: never fabricate a bibliography entry or add a pipeline
-explanation to the cover. Never expose an XML path or invent a page, section, publisher,
-date, or office.
+After building the deck, write `work/slide_citations.json` as
+`{{"slides":{{"3":["<evidence block id>"],"6":["<id>","<id>"]}}}}`.
+Keys are one-based content-slide numbers, and values are evidence block IDs from
+`work/evidence.json` in the order they support the slide. List at least one ID for every
+content slide with factual claims, figures, or charts; omit the cover and section dividers
+without factual claims. Put one text box whose entire text is exactly `{{{{CITATION}}}}`
+on every cited slide, positioned and styled as the citation footer. End with the final
+slide titled exactly `參考資料`, containing only that title and one text box whose entire
+text is exactly `{{{{REFERENCES}}}}`, styled as the reference entries. The backend replaces
+these placeholders with citations from the declared evidence IDs. Never type citation
+text, source names, locators, or `[N]` markers anywhere. Never expose `EvidenceStore`,
+block IDs, hashes, JSON filenames, or extraction-process language in the delivered deck.
 
 Every chart must carry a descriptive title naming what it shows, with units on the relevant
 axis label. The title belongs on the chart object itself, not on a slide heading placed above
@@ -150,6 +132,7 @@ Render and inspect every slide, revising layout or visual issues in the candidat
 The backend validator owns deterministic content checks and the deck snapshot. Required
 author artifacts:
 - output/presentation.pptx
+- work/slide_citations.json
 - work/rendered/preview/*.png for the author's visual inspection only
 
 The backend independently generates work/rendered/final/*.png for validation and semantic review.
