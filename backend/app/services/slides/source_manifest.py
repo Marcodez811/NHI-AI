@@ -24,6 +24,33 @@ class SourceManifestError(ValueError):
     """The backend-owned source-name sidecar is missing or malformed."""
 
 
+def duplicate_display_names(display_names: Sequence[str]) -> list[str]:
+    """Return the knowledge-base names that more than one selected document shares.
+
+    A citation identifies its source to the reader only by display name, so two
+    different documents with the same name cannot be cited distinguishably: the
+    references slide would list the same name twice. Names are compared after
+    collapsing whitespace, which is exactly how the deck validator compares
+    visible citation text, so anything accepted here cites unambiguously there.
+    """
+
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for name in display_names:
+        normalized = " ".join(name.split())
+        if normalized in seen and normalized not in duplicates:
+            duplicates.append(normalized)
+        seen.add(normalized)
+    return duplicates
+
+
+def duplicate_display_names_message(duplicates: Sequence[str]) -> str:
+    """User-facing explanation; the user is the only one who can resolve it."""
+
+    names = "、".join(duplicates)
+    return f"所選文件中有同名文件：{names}。請先重新命名其中一份，再建立簡報。"
+
+
 @dataclass(frozen=True)
 class SlideSource:
     """One staged extraction filename and its user-facing catalog name."""

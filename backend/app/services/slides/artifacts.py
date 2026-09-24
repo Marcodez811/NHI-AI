@@ -59,6 +59,10 @@ FONT_SUFFIXES = {".ttf", ".otf", ".ttc"}
 WINDOWS_JHENGHEI_FILES = ("msjh.ttc", "msjhbd.ttc", "msjhl.ttc")
 
 
+class CandidateDeckCleanupError(ValueError):
+    """A candidate package is malformed, so cleanup cannot safely run."""
+
+
 def _run_checked_tool(command: Sequence[str], label: str, runner: Callable[..., subprocess.CompletedProcess[str]], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     try:
         result = runner(list(command), cwd=cwd, capture_output=True, text=True, timeout=120, env=env)
@@ -216,13 +220,13 @@ def create_job_workspace(job_id: str, jobs_root: Path) -> Path:
         "output",
     ):
         (job_dir / relative_path).mkdir(parents=True, exist_ok=True)
-    # Bubblewrap grants resolve existing paths before entering the sandbox.
-    # Seed only the exact author-owned sidecar file; the author replaces this
-    # placeholder after laying out an approved outline.
-    outline_mapping = job_dir / "work" / "outline_mapping.json"
-    if outline_mapping.is_symlink() or (outline_mapping.exists() and not outline_mapping.is_file()):
-        raise JobError("workspace", "outline mapping path is invalid")
-    outline_mapping.touch(exist_ok=True)
+    # Bubblewrap's single-file grants require an existing inode for each
+    # author-owned declaration; empty seeds become retryable missing inputs.
+    for name in ("outline_mapping.json", "slide_citations.json"):
+        sidecar = job_dir / "work" / name
+        if sidecar.is_symlink() or (sidecar.exists() and not sidecar.is_file()):
+            raise JobError("workspace", f"{name} path is invalid")
+        sidecar.touch(exist_ok=True)
     return job_dir
 
 
@@ -620,10 +624,21 @@ def clean_candidate_deck(workspace: Path, *, cleaner: Callable[[Path], list[str]
     deck = workspace / "output" / "presentation.pptx"
     if not deck.is_file() or deck.is_symlink():
         return []
-    if _package_xml_looks_rewritten(deck):
-        return []
+    try:
+        if _package_xml_looks_rewritten(deck):
+            return []
+    except zipfile.BadZipFile as exc:
+        raise CandidateDeckCleanupError("presentation is not a valid PPTX/ZIP") from exc
     clean = cleaner if cleaner is not None else _load_trusted_cleaner()
-    return clean(deck)
+    try:
+        return clean(deck)
+    except Exception as exc:
+        # The trusted cleaner is dynamically loaded; its exception class lives
+        # in that function's globals rather than an importable backend module.
+        refusal = getattr(clean, "__globals__", {}).get("RefusedToClean")
+        if isinstance(refusal, type) and isinstance(exc, refusal):
+            raise CandidateDeckCleanupError(str(exc)) from exc
+        raise
 
 
 def cleanup_job(job_dir: Path) -> None:

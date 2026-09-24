@@ -182,6 +182,82 @@ async def test_create_job_rejects_missing_or_unready_or_unsupported_sources():
         assert str(document_id) not in backend.progress
 
 
+def _ready_document(display_name: str, checksum: str) -> Document:
+    return Document(
+        original_filename=display_name,
+        display_name=display_name,
+        mime_type="application/pdf",
+        extension=".pdf",
+        size_bytes=1,
+        checksum=checksum,
+        category=DocumentCategory.BEI_CAN.value,
+        storage_key="ignored",
+        status=DocumentStatus.READY.value,
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_job_rejects_two_different_documents_with_the_same_name():
+    # A citation identifies its source only by name, so two different documents
+    # named alike would appear twice on the references slide, indistinguishably.
+    # Only the user can resolve that, so it is rejected before any job exists.
+    first = _ready_document("年度報告.pdf", "checksum-a")
+    second = _ready_document("年度報告.pdf", "checksum-b")
+    backend = FakeBackend()
+    task = FakeTask()
+
+    with pytest.raises(HTTPException) as caught:
+        await create_slides_job(
+            GenerateSlidesRequest(
+                title="Duplicate names",
+                document_ids=[first.id, second.id],
+                slides_count=8,
+                guidance="Summarize the sources.",
+                tone="formal",
+            ),
+            backend,
+            task,
+            FakeDocumentRepository(first, second),
+        )
+
+    assert caught.value.status_code == 422
+    assert "年度報告.pdf" in caught.value.detail
+    assert task.payload is None
+
+
+@pytest.mark.asyncio
+async def test_create_job_accepts_differently_named_documents():
+    first = _ready_document("年度報告.pdf", "checksum-a")
+    second = _ready_document("季度報告.pdf", "checksum-b")
+    task = FakeTask()
+
+    response = await create_slides_job(
+        GenerateSlidesRequest(
+            title="Distinct names",
+            document_ids=[first.id, second.id],
+            slides_count=8,
+            guidance="Summarize the sources.",
+            tone="formal",
+        ),
+        FakeBackend(),
+        task,
+        FakeDocumentRepository(first, second),
+    )
+
+    assert response.status == "queued"
+
+
+def test_duplicate_display_names_compare_like_the_deck_validator():
+    from app.services.slides.source_manifest import duplicate_display_names
+
+    # Whitespace is collapsed, exactly as the validator compares visible citations.
+    assert duplicate_display_names(["年度報告.pdf", " 年度報告.pdf "]) == ["年度報告.pdf"]
+    assert duplicate_display_names(["a  b.pdf", "a b.pdf"]) == ["a b.pdf"]
+    # Case is not folded: the validator treats these as different visible names.
+    assert duplicate_display_names(["Report.pdf", "report.pdf"]) == []
+    assert duplicate_display_names(["年度報告.pdf", "季度報告.pdf"]) == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("filename", ["NHI update.pptx", "中央癌症防治會報第21次會議.pptx", "健保政策.pptx"])
 async def test_completed_status_and_download_are_safe(tmp_path, monkeypatch, filename):

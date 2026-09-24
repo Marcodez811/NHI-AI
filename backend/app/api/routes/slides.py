@@ -45,6 +45,7 @@ from app.services.slides.outline_repository import (
 from app.services.slides.approval_outbox import dispatch_approval_outbox
 from app.services.slides.planner import PlannerConversationService
 from app.services.slides.repository import InMemorySlideJobRepository, SlideJobRepository
+from app.services.slides.source_manifest import duplicate_display_names, duplicate_display_names_message
 from app.models.documents import DocumentStatus
 from app.api.routes.documents import get_document_repository
 from app.tasks.agents import run as agents_run
@@ -312,6 +313,7 @@ async def _validate_slide_documents(
 
     if repository is None:
         return
+    display_names: list[str] = []
     for document_id in document_ids:
         document = await repository.get_document(document_id)
         if document is None:
@@ -332,6 +334,15 @@ async def _validate_slide_documents(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"Document source type is not supported for slide generation. Supported extensions: {supported}.",
             )
+        display_names.append(document.display_name)
+    # Rejected here, before any job exists or any tokens are spent: citations
+    # identify sources by name alone, so this is something only the user can fix.
+    duplicates = duplicate_display_names(display_names)
+    if duplicates:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=duplicate_display_names_message(duplicates),
+        )
 
 
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED, response_model=CreateSlidesJobResponse)
