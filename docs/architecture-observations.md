@@ -191,3 +191,32 @@ The honest sequence: finish the migration, see what the layer looks like once th
 runtime is gone, *then* decide what the architecture should be. The measurements above
 should be retaken at that point — the 57/44/14/20 figures will have moved, and the gap
 that remains is the real target.
+
+---
+
+## Deferred: template-rendered slides (2026-09-24)
+
+**Idea.** The author stops writing PptxGenJS code and stops inspecting renders. One
+structured model call returns the deck as data (a layout type per slide: title, bullets,
+key numbers, comparison, chart, process, table), and deterministic backend code renders it
+into a PPTX from an NHI template. This is the planner pattern extended to the author.
+
+**Why it is attractive.**
+- **Cost:** planner-sized (the Gemini planner run was about 43k tokens) instead of
+  millions of tokens per author attempt.
+- **Visual failures fixed once, in the renderer:** stretched logos, missing chart titles,
+  clipped text, fonts.
+- **The author becomes a reasoning node:** no shell and no sandbox, so it becomes
+  provider-neutral. This removes the reason the author is tied to Codex/OpenAI.
+
+**Why deferred.** General assistants (Claude, ChatGPT) build slides by writing code,
+because they must handle any design; dedicated slide products tend to render from
+templates. This product is the second kind, but the trade-off is real: fixed layouts
+instead of free design, plus upfront renderer work and rules for long Chinese text in
+fixed boxes. **Decision:** revisit once the product is usable end to end and cost becomes
+the priority. The cheap first experiment is one layout (key numbers) rendered from JSON,
+compared side by side with the current author's output.
+
+**Step already taken toward it:** backend-written citations
+(`9_24_backend_citations_brief.md`). That citation code carries over unchanged if this
+redesign happens.
