@@ -43,7 +43,13 @@ from .artifacts import (
 )
 from .contracts import JobError
 from .runtime import build_job_environment, build_prompt
-from .source_manifest import SourceManifestError, load_source_manifest, write_source_manifest
+from .source_manifest import (
+    SourceManifestError,
+    duplicate_display_names,
+    duplicate_display_names_message,
+    load_source_manifest,
+    write_source_manifest,
+)
 
 
 _VALIDATION_ORIGINS = frozenset({"candidate", "infrastructure"})
@@ -220,6 +226,11 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
         context_text = await asyncio.to_thread(context_path.read_text, encoding="utf-8") if context_exists else None
         context = json.loads(context_text) if context_text else {}
         display_names = await _document_display_names(value.document_ids)
+        # The API rejects this at job creation; checked again here because a
+        # document can be renamed between creation and the worker picking it up.
+        duplicates = duplicate_display_names(display_names)
+        if duplicates:
+            raise JobError("inputs", duplicate_display_names_message(duplicates))
         sources_path = workspace / "work" / "sources.json"
         evidence_exists = await asyncio.to_thread((workspace / "work" / "evidence.json").is_file)
         sources_exist = await asyncio.to_thread(sources_path.exists)
