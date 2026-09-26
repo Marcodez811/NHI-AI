@@ -24,7 +24,8 @@ from uuid import UUID
 
 from app.config import settings
 from app.models.slides import SlideOutline
-from app.services.agentic.contracts import AgentExecutionRequest, AgentRunner
+from app.services.agentic.contracts import AgentExecutionRequest, AgentReasoningEffort, AgentRunner
+from app.services.agentic.model_settings import load_snapshot
 from app.services.agentic.runner import CodexAgentRunner, CodexRunner, WorkflowExecutionError, safe_error
 from app.services.agentic.sdk_runner import AgentsSdkRunner
 from app.services.slides.adapter import slides_adapter
@@ -91,35 +92,38 @@ class PlannerConversationService:
 
     @property
     def runner(self) -> AgentRunner:
-        if self._runner is None:
-            if slides_adapter.planner_runner == "agents":
-                self._runner = AgentsSdkRunner(
-                    model=slides_adapter.planner_model,
-                    reasoning_effort=slides_adapter.planner_reasoning_effort,
+        return self._runner or self._build_runner(
+            slides_adapter.planner_runner,
+            slides_adapter.planner_model,
+            slides_adapter.planner_reasoning_effort,
+        )
+
+    @staticmethod
+    def _build_runner(name: str, model: str, effort: AgentReasoningEffort) -> AgentRunner:
+        if name == "agents":
+            return AgentsSdkRunner(
+                model=model,
+                reasoning_effort=effort,
+                timeout_seconds=float(settings.agent_timeout_minutes) * 60,
+                heartbeat_seconds=settings.agent_heartbeat_seconds,
+                litellm_api_keys={
+                    "gemini": settings.gemini_api_key,
+                    "anthropic": settings.anthropic_api_key,
+                    "openai": settings.openai_api_key,
+                },
+            )
+        if name == "codex":
+            return CodexAgentRunner(
+                CodexRunner(
+                    model=model,
+                    reasoning_effort=effort,
+                    api_key=settings.openai_api_key,
                     timeout_seconds=float(settings.agent_timeout_minutes) * 60,
                     heartbeat_seconds=settings.agent_heartbeat_seconds,
-                    litellm_api_keys={
-                        "gemini": settings.gemini_api_key,
-                        "anthropic": settings.anthropic_api_key,
-                        "openai": settings.openai_api_key,
-                    },
+                    require_process_isolation=settings.agent_require_process_isolation,
                 )
-            elif slides_adapter.planner_runner == "codex":
-                self._runner = CodexAgentRunner(
-                    CodexRunner(
-                        model=settings.agent_planner_model or settings.agent_default_model,
-                        reasoning_effort=(
-                            settings.agent_planner_reasoning_effort or settings.agent_default_reasoning_effort
-                        ),
-                        api_key=settings.openai_api_key,
-                        timeout_seconds=float(settings.agent_timeout_minutes) * 60,
-                        heartbeat_seconds=settings.agent_heartbeat_seconds,
-                        require_process_isolation=settings.agent_require_process_isolation,
-                    )
-                )
-            else:
-                raise WorkflowExecutionError("Unknown planner runner")
-        return self._runner
+            )
+        raise WorkflowExecutionError("Unknown planner runner")
 
     async def continue_conversation(
         self,
@@ -139,7 +143,11 @@ class PlannerConversationService:
         yield _sse("status", {"phase": "planning"})
         workspace = (self.jobs_root / str(job_id)).resolve()
         evidence_path = workspace / "work" / "evidence.json"
-        runner_name = slides_adapter.planner_runner
+        snapshot = load_snapshot(workspace, slides_adapter.model_setting_stages)
+        planner = snapshot["planner"] if snapshot is not None else None
+        runner_name = planner.runner if planner else slides_adapter.planner_runner
+        model = planner.model if planner else slides_adapter.planner_model
+        effort = planner.reasoning_effort if planner else slides_adapter.planner_reasoning_effort
         instructions = _conversation_prompt(latest, message, runner_name=runner_name)
         if runner_name == "agents":
             # Same "no grants -> no sandbox" shape as the worker's first-revision
@@ -161,8 +169,8 @@ class PlannerConversationService:
                 run_id=f"{job_id}-outline-{latest.revision + 1}",
                 node_id="planning",
                 role=slides_adapter.planner_role or "presentation_planner",
-                model=slides_adapter.planner_model,
-                reasoning_effort=slides_adapter.planner_reasoning_effort,
+                model=model,
+                reasoning_effort=effort,
                 workspace=workspace,
                 prompt=evidence_block,
                 instructions=instructions,
@@ -173,8 +181,8 @@ class PlannerConversationService:
                 run_id=f"{job_id}-outline-{latest.revision + 1}",
                 node_id="planning",
                 role=slides_adapter.planner_role or "presentation_planner",
-                model=slides_adapter.planner_model,
-                reasoning_effort=slides_adapter.planner_reasoning_effort,
+                model=model,
+                reasoning_effort=effort,
                 workspace=workspace,
                 prompt=instructions,
                 output_type=SlideOutline,
@@ -182,7 +190,8 @@ class PlannerConversationService:
                 restrict_workspace=True,
             )
         try:
-            result = await self.runner.run(request)
+            selected_runner = self._runner or self._build_runner(runner_name, model, effort)
+            result = await selected_runner.run(request)
         except Exception as exc:
             yield _sse(
                 "error",

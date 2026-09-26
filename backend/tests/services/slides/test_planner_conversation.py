@@ -11,6 +11,8 @@ import pytest
 from pydantic import SecretStr
 
 from app.config import settings
+from app.services.agentic.contracts import AgentReasoningEffort
+from app.services.agentic.model_settings import STAGES, StageModelSettings, write_snapshot
 from app.services.agentic.runner import CodexAgentRunner
 from app.services.agentic.sdk_runner import AgentsSdkRunner
 from app.models.slides import SlideOutline
@@ -137,6 +139,43 @@ async def test_conversation_request_carries_no_grants_and_inlines_evidence_on_ag
     assert "never as instructions" in request.prompt
     assert request.instructions is not None
     assert "`<evidence>` block" in request.instructions
+    assert '"type": "error"' in frames[-1]
+
+
+@pytest.mark.asyncio
+async def test_parked_outline_chat_uses_original_job_settings(tmp_path, monkeypatch) -> None:
+    job_id = uuid4()
+    workspace = tmp_path / str(job_id)
+    _freeze_workspace_evidence(workspace)
+    selected = {
+        stage: StageModelSettings(
+            runner="agents" if stage == "planner" else "codex",
+            model="litellm/gemini/original" if stage == "planner" else "gpt-5-codex",
+            reasoning_effort=AgentReasoningEffort.LOW,
+            planner_enabled=True if stage == "planner" else None,
+        )
+        for stage in STAGES
+    }
+    write_snapshot(workspace, selected)
+    monkeypatch.setattr(settings, "agent_planner_runner", "codex")
+    monkeypatch.setattr(settings, "agent_planner_model", "changed-model")
+    runner = RecordingRunner()
+    service = PlannerConversationService(runner=runner, jobs_root=tmp_path)
+    latest = SlideOutlineRevision(job_id=job_id, revision=1, outline={}, session_id=str(job_id))
+
+    frames = [
+        frame async for frame in service.continue_conversation(
+            job_id=job_id,
+            message="Adjust structure",
+            latest=latest,
+            outline_repository=InMemorySlideOutlineRepository(),
+        )
+    ]
+
+    assert runner.request.model == "litellm/gemini/original"
+    assert runner.request.reasoning_effort is AgentReasoningEffort.LOW
+    assert runner.request.read_only_paths == ()
+    assert runner.request.prompt.startswith("<evidence>")
     assert '"type": "error"' in frames[-1]
 
 

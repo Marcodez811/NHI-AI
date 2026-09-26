@@ -37,6 +37,7 @@ import { SlideGenerationStatus } from "./SlideGenerationStatus";
 import { SlideCompletedResult } from "./SlideCompletedResult";
 import { OutlineReview } from "./OutlineReview";
 import { RecentSlideJobs } from "./RecentSlideJobs";
+import { WorkflowModelSettings } from "./WorkflowModelSettings";
 
 export function SlidesView({
     docs,
@@ -103,12 +104,19 @@ export function SlidesView({
     const pathname = usePathname();
     const searchParams = useSearchParams();
     // Unknown or missing ?tab means the new-presentation form, per the "no state-dependent default" rule.
-    const activeTab: "new" | "recent" = searchParams.get("tab") === "recent" ? "recent" : "new";
+    const tabParam = searchParams.get("tab");
+    const activeTab: "new" | "recent" | "settings" =
+        tabParam === "recent" ? "recent" : tabParam === "settings" ? "settings" : "new";
     const pageHeader =
         activeTab === "recent"
             ? {
                   title: "最近的簡報工作",
                   subtitle: "從這裡返回待審核的大綱，或開啟已完成的簡報。",
+              }
+            : activeTab === "settings"
+            ? {
+                  title: "模型設定",
+                  subtitle: "設定簡報生成各階段使用的模型。",
               }
             : {
                   title: "生成簡報",
@@ -123,9 +131,9 @@ export function SlidesView({
         [recentJobs],
     );
     const selectTab = useCallback(
-        (next: "new" | "recent") => {
+        (next: "new" | "recent" | "settings") => {
             const params = new URLSearchParams(searchParams.toString());
-            if (next === "recent") params.set("tab", "recent");
+            if (next !== "new") params.set("tab", next);
             else params.delete("tab");
             const query = params.toString();
             // A pushed entry (not replace) is what lets the back button step between tabs.
@@ -167,12 +175,16 @@ export function SlidesView({
             <div className="mx-auto max-w-[720px]">
                 <div className="mb-7">
                     <Link href="/workflows" className="mb-5 inline-flex items-center text-xs text-info hover:text-info/80">← 返回 AI 工作流</Link>
-                    <h1 className="text-[24px] font-semibold tracking-tight">
-                        {pageHeader.title}
-                    </h1>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                        {pageHeader.subtitle}
-                    </p>
+                    {activeTab !== "settings" && (
+                        <>
+                            <h1 className="text-[24px] font-semibold tracking-tight">
+                                {pageHeader.title}
+                            </h1>
+                            <p className="mt-1 text-sm text-muted-foreground">
+                                {pageHeader.subtitle}
+                            </p>
+                        </>
+                    )}
                 </div>
 
                 <div role="tablist" aria-label="簡報作業" className="mb-7 flex gap-6 border-b border-border">
@@ -210,6 +222,22 @@ export function SlidesView({
                         {awaitingReviewCount > 0 && (
                             <span className="text-amber-700 dark:text-amber-300"> · {awaitingReviewCount} 待審核</span>
                         )}
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        id="slides-tab-settings"
+                        aria-selected={activeTab === "settings"}
+                        aria-controls="slides-panel-settings"
+                        tabIndex={activeTab === "settings" ? 0 : -1}
+                        onClick={() => selectTab("settings")}
+                        className={`-mb-px border-b-2 px-1 pb-3 text-sm font-medium transition-colors ${
+                            activeTab === "settings"
+                                ? "border-primary text-foreground"
+                                : "border-transparent text-muted-foreground hover:text-foreground"
+                        }`}
+                    >
+                        模型設定
                     </button>
                 </div>
 
@@ -544,6 +572,15 @@ export function SlidesView({
                     hidden={activeTab !== "recent"}
                 >
                     <RecentSlideJobs onJobsChange={setRecentJobs} />
+                </div>
+
+                <div
+                    id="slides-panel-settings"
+                    role="tabpanel"
+                    aria-labelledby="slides-tab-settings"
+                    hidden={activeTab !== "settings"}
+                >
+                    {activeTab === "settings" && <WorkflowModelSettings workflow="slides" />}
                 </div>
             </div>
         </section>

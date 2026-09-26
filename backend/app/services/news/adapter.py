@@ -9,7 +9,8 @@ from pathlib import Path
 
 from app.config import settings
 from app.models.news import NewsTaskPayload, NewsTaskResult
-from app.services.agentic.contracts import BaseWorkflowAdapter
+from app.services.agentic.contracts import AgentReasoningEffort, BaseWorkflowAdapter
+from app.services.agentic.job_model_context import stage_settings
 from app.services.slides.artifacts import stage_uploads, validate_source_paths
 from app.services.slides.evidence import EvidenceError, consolidate_evidence
 from app.services.virtual_fs import SharedVolumeDocumentResolver
@@ -17,6 +18,8 @@ from app.services.virtual_fs import SharedVolumeDocumentResolver
 
 class NewsWorkflowAdapter(BaseWorkflowAdapter[NewsTaskPayload, NewsTaskResult]):
     name = "news"
+    uses_model_settings_snapshot = True
+    model_setting_stages = ("extraction", "author")
     declared_skills = ("source-document-extraction", "nhi-news-writing")
     extraction_skills = ("source-document-extraction",)
     author_skills = ("nhi-news-writing",)
@@ -27,19 +30,33 @@ class NewsWorkflowAdapter(BaseWorkflowAdapter[NewsTaskPayload, NewsTaskResult]):
 
     @property
     def author_model(self) -> str:
-        return settings.agent_author_model or settings.agent_default_model
+        selected = stage_settings("author")
+        return selected.model if selected else settings.agent_author_model or settings.agent_default_model
 
     @property
     def extraction_model(self) -> str:
-        return settings.agent_extraction_model or settings.agent_default_model
+        selected = stage_settings("extraction")
+        return selected.model if selected else settings.agent_extraction_model or settings.agent_default_model
 
     @property
-    def author_reasoning_effort(self):
-        return settings.agent_author_reasoning_effort or settings.agent_default_reasoning_effort
+    def author_reasoning_effort(self) -> AgentReasoningEffort:
+        selected = stage_settings("author")
+        return selected.reasoning_effort if selected else settings.agent_author_reasoning_effort or settings.agent_default_reasoning_effort
 
     @property
-    def extraction_reasoning_effort(self):
-        return settings.agent_extraction_reasoning_effort or settings.agent_default_reasoning_effort
+    def extraction_reasoning_effort(self) -> AgentReasoningEffort:
+        selected = stage_settings("extraction")
+        return selected.reasoning_effort if selected else settings.agent_extraction_reasoning_effort or settings.agent_default_reasoning_effort
+
+    @property
+    def author_runner(self) -> str:
+        selected = stage_settings("author")
+        return selected.runner if selected else settings.agent_author_runner
+
+    @property
+    def extraction_runner(self) -> str:
+        selected = stage_settings("extraction")
+        return selected.runner if selected else settings.agent_extraction_runner
 
     async def prepare_workspace(self, value: NewsTaskPayload, workspace: Path) -> None:
         for name in ("input", "work", "output"):

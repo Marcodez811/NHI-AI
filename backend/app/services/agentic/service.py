@@ -27,6 +27,7 @@ from .contracts import (
     TurnRequest,
     WorkflowStatus,
 )
+from .job_model_context import active_stage_settings
 from .registry import WorkflowRegistry, workflow_registry
 from .runner import (
     CodexAgentRunner,
@@ -48,6 +49,24 @@ async def _call(value: Any, *args: Any, **kwargs: Any) -> Any:
     if inspect.iscoroutinefunction(value) or inspect.iscoroutinefunction(callable_value):
         return await value(*args, **kwargs)
     return await asyncio.to_thread(value, *args, **kwargs)
+
+
+def _job_model_snapshot(workspace: Path, workflow: str, stages: Sequence[str]) -> dict[str, StageModelSettings]:
+    """Reuse a job's first selection across retries and parked outline resumes."""
+
+    from .model_settings import load_snapshot, resolve_all_stage_settings, write_snapshot
+
+    existing = load_snapshot(workspace, stages)
+    if existing is not None:
+        return existing
+    from sqlmodel import Session
+
+    from app.db import engine
+
+    with Session(engine) as session:
+        resolved = resolve_all_stage_settings(session, workflow, stages)
+    write_snapshot(workspace, resolved)
+    return resolved
 
 
 _PHASE_MESSAGES = {
@@ -1068,6 +1087,7 @@ async def _execute_workflow(
     # eventual ``resume_from="author"`` re-entry, so the ordinary success/failure
     # cleanup in ``finally`` below must not run for it.
     paused = False
+    settings_token = None
     try:
         payload = payload if isinstance(payload, AgentTaskPayload) else AgentTaskPayload.model_validate(payload)
         await _emit_phase(progress_callback, AgentPhase.PREPARING)
@@ -1091,6 +1111,12 @@ async def _execute_workflow(
         if deterministic is not None:
             await _call(deterministic, value, workspace)
         await _call(adapter.prepare_workspace, value, workspace)
+        if getattr(adapter, "uses_model_settings_snapshot", False):
+            stages = tuple(getattr(adapter, "model_setting_stages", ()))
+            snapshot = await asyncio.to_thread(
+                _job_model_snapshot, workspace, getattr(adapter, "name", payload.workflow), stages
+            )
+            settings_token = active_stage_settings.set(snapshot)
         await _call(adapter.prepare_input, value, workspace)
         staged = await asyncio.to_thread(
             stage_declared_skills,
@@ -1492,6 +1518,8 @@ async def _execute_workflow(
             error="Workflow execution failed.",
         )
     finally:
+        if settings_token is not None:
+            active_stage_settings.reset(settings_token)
         if adapter is not None and workspace is not None and not paused:
             try:
                 await _call(adapter.cleanup, value, workspace, success=success)

@@ -14,11 +14,8 @@ import sqlalchemy as sa
 from sqlalchemy import create_engine, text
 
 
-def _run_migrations(db_path: str) -> None:
-    """Run alembic upgrade head against the given SQLite file."""
-
+def _alembic_config(db_path: str):
     from alembic.config import Config
-    from alembic import command
     from pathlib import Path
 
     # test file is at tests/infrastructure/test_migrations.py;
@@ -27,7 +24,15 @@ def _run_migrations(db_path: str) -> None:
     alembic_cfg = Config(str(backend_root / "alembic.ini"))
     alembic_cfg.set_main_option("script_location", str(backend_root / "alembic"))
     alembic_cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
-    command.upgrade(alembic_cfg, "head")
+    return alembic_cfg
+
+
+def _run_migrations(db_path: str) -> None:
+    """Run alembic upgrade head against the given SQLite file."""
+
+    from alembic import command
+
+    command.upgrade(_alembic_config(db_path), "head")
 
 
 @pytest.fixture()
@@ -337,3 +342,42 @@ def test_duplicate_preflight_aborts_migration(tmp_path):
 
     with pytest.raises(RuntimeError, match="duplicate .checksum, category. pairs"):
         _run_migrations(db_path)
+
+
+def test_agent_stage_settings_migration_assigns_existing_rows_to_slides(tmp_path):
+    """Rows written before workflow-scoping existed must become slides rows."""
+
+    from alembic import command
+
+    db_path = str(tmp_path / "test_agent_stage_settings.db")
+    url = f"sqlite:///{db_path}"
+    cfg = _alembic_config(db_path)
+
+    # Stop at the stage-only schema and insert a legacy row, then continue
+    # to head so the new revision's backfill runs against it.
+    command.upgrade(cfg, "4e2f8b1a7c90")
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO agent_stage_settings "
+                "(stage, runner, model, reasoning_effort, planner_enabled, updated_at) "
+                "VALUES ('author', 'codex', 'legacy-model', 'low', NULL, '2026-01-01T00:00:00')"
+            )
+        )
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+    inspector = sa.inspect(engine)
+    columns = {col["name"] for col in inspector.get_columns("agent_stage_settings")}
+    assert "workflow" in columns
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT workflow, stage, model FROM agent_stage_settings WHERE stage = 'author'")
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "slides"
+    assert row[2] == "legacy-model"
+    engine.dispose()

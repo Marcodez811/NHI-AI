@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { FileText, Newspaper } from "lucide-react";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
@@ -9,6 +10,7 @@ import { MessageResponse } from "../ai-elements/message";
 import { MAX_DOCUMENTS, supportsSlideGeneration, type DocumentRead } from "../../lib/api";
 import { useNewsJob } from "../../lib/hooks/useNewsJob";
 import { documentDisplayName } from "./WorkspaceViewUtils";
+import { WorkflowModelSettings } from "./WorkflowModelSettings";
 
 const phaseLabels: Record<string, string> = {
     queued: "排隊中", preparing: "準備來源", extracting: "擷取來源內容",
@@ -23,6 +25,22 @@ export function NewsView({ docs, onBrowseSources }: { docs: DocumentRead[]; onBr
     const available = docs.filter((doc) => doc.status === "ready" && supportsSlideGeneration(doc));
     const busy = job.phase === "submitting" || job.phase === "polling";
     const article = job.job?.status === "completed" ? job.job.article : null;
+    const router = useRouter();
+    const pathname = usePathname();
+    const searchParams = useSearchParams();
+    // Unknown or missing ?tab means the new-article form, per the "no state-dependent default" rule.
+    const activeTab: "new" | "settings" = searchParams.get("tab") === "settings" ? "settings" : "new";
+    const selectTab = useCallback(
+        (next: "new" | "settings") => {
+            const params = new URLSearchParams(searchParams.toString());
+            if (next === "settings") params.set("tab", "settings");
+            else params.delete("tab");
+            const query = params.toString();
+            // A pushed entry (not replace) is what lets the back button step between tabs.
+            router.push(query ? `${pathname}?${query}` : pathname);
+        },
+        [pathname, router, searchParams],
+    );
 
     const download = () => {
         if (!article) return;
@@ -38,11 +56,49 @@ export function NewsView({ docs, onBrowseSources }: { docs: DocumentRead[]; onBr
         <section className="px-5 py-8 lg:px-10 lg:py-10">
             <div className="mx-auto max-w-[720px]">
                 <Link href="/workflows" className="mb-5 inline-flex items-center text-xs text-info hover:text-info/80">← 返回 AI 工作流</Link>
-                <div className="mb-7 flex items-start gap-3">
-                    <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Newspaper size={20} /></span>
-                    <div><h1 className="text-[24px] font-semibold tracking-tight">生成新聞稿</h1><p className="mt-1 text-sm text-muted-foreground">從來源文件擷取事實，撰寫健保署風格的新聞稿。</p></div>
+                {activeTab === "new" && (
+                    <div className="mb-7 flex items-start gap-3">
+                        <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Newspaper size={20} /></span>
+                        <div><h1 className="text-[24px] font-semibold tracking-tight">生成新聞稿</h1><p className="mt-1 text-sm text-muted-foreground">從來源文件擷取事實，撰寫健保署風格的新聞稿。</p></div>
+                    </div>
+                )}
+
+                <div role="tablist" aria-label="新聞稿作業" className="mb-7 flex gap-6 border-b border-border">
+                    <button
+                        type="button"
+                        role="tab"
+                        id="news-tab-new"
+                        aria-selected={activeTab === "new"}
+                        aria-controls="news-panel-new"
+                        tabIndex={activeTab === "new" ? 0 : -1}
+                        onClick={() => selectTab("new")}
+                        className={`-mb-px border-b-2 px-1 pb-3 text-sm font-medium transition-colors ${
+                            activeTab === "new"
+                                ? "border-primary text-foreground"
+                                : "border-transparent text-muted-foreground hover:text-foreground"
+                        }`}
+                    >
+                        生成新聞稿
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        id="news-tab-settings"
+                        aria-selected={activeTab === "settings"}
+                        aria-controls="news-panel-settings"
+                        tabIndex={activeTab === "settings" ? 0 : -1}
+                        onClick={() => selectTab("settings")}
+                        className={`-mb-px border-b-2 px-1 pb-3 text-sm font-medium transition-colors ${
+                            activeTab === "settings"
+                                ? "border-primary text-foreground"
+                                : "border-transparent text-muted-foreground hover:text-foreground"
+                        }`}
+                    >
+                        模型設定
+                    </button>
                 </div>
 
+                <div id="news-panel-new" role="tabpanel" aria-labelledby="news-tab-new" hidden={activeTab !== "new"}>
                 {article ? (
                     <div>
                         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -69,6 +125,11 @@ export function NewsView({ docs, onBrowseSources }: { docs: DocumentRead[]; onBr
                         <Button className="mt-6" disabled={!selected.length || busy} onClick={() => { void job.start({ document_ids: selected, guidance }).catch(() => undefined); }}>{busy ? "生成中…" : "生成新聞稿"}</Button>
                     </>
                 )}
+                </div>
+
+                <div id="news-panel-settings" role="tabpanel" aria-labelledby="news-tab-settings" hidden={activeTab !== "settings"}>
+                    {activeTab === "settings" && <WorkflowModelSettings workflow="news" />}
+                </div>
             </div>
         </section>
     );

@@ -27,6 +27,7 @@ from app.services.agentic.contracts import (
     ReviewOutcome,
     ReviewSeverity,
 )
+from app.services.agentic.job_model_context import stage_settings
 from app.services.virtual_fs import SharedVolumeDocumentResolver
 
 from .artifacts import (
@@ -110,6 +111,8 @@ def _validation_finding_origin(finding: Any, payload: dict[str, Any]) -> str:
 
 class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskResult]):
     name = "slides"
+    uses_model_settings_snapshot = True
+    model_setting_stages = ("extraction", "planner", "author", "reviewer")
     # Skills are staged once, but each fresh activation receives only the
     # bundle required for its responsibility.
     declared_skills = ("source-document-extraction", "pptx-nhi-tw", "semantic-slide-review")
@@ -124,71 +127,73 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
 
     @property
     def author_model(self) -> str:
-        return settings.agent_author_model or settings.agent_default_model
+        selected = stage_settings("author")
+        return selected.model if selected else settings.agent_author_model or settings.agent_default_model
 
     @property
     def reviewer_model(self) -> str:
-        return settings.agent_reviewer_model or settings.agent_default_model
+        selected = stage_settings("reviewer")
+        return selected.model if selected else settings.agent_reviewer_model or settings.agent_default_model
 
     @property
     def author_reasoning_effort(self) -> AgentReasoningEffort:
-        return settings.agent_author_reasoning_effort or settings.agent_default_reasoning_effort
+        selected = stage_settings("author")
+        return selected.reasoning_effort if selected else settings.agent_author_reasoning_effort or settings.agent_default_reasoning_effort
 
     @property
     def reviewer_reasoning_effort(self) -> AgentReasoningEffort:
-        return settings.agent_reviewer_reasoning_effort or settings.agent_default_reasoning_effort
+        selected = stage_settings("reviewer")
+        return selected.reasoning_effort if selected else settings.agent_reviewer_reasoning_effort or settings.agent_default_reasoning_effort
 
     @property
     def extraction_model(self) -> str:
-        return settings.agent_extraction_model or settings.agent_default_model
+        selected = stage_settings("extraction")
+        return selected.model if selected else settings.agent_extraction_model or settings.agent_default_model
 
     @property
     def extraction_reasoning_effort(self) -> AgentReasoningEffort:
-        return settings.agent_extraction_reasoning_effort or settings.agent_default_reasoning_effort
+        selected = stage_settings("extraction")
+        return selected.reasoning_effort if selected else settings.agent_extraction_reasoning_effort or settings.agent_default_reasoning_effort
+
+    @property
+    def author_runner(self) -> str:
+        selected = stage_settings("author")
+        return selected.runner if selected else settings.agent_author_runner
 
     @property
     def extraction_runner(self) -> str:
-        # docs/agents-sdk-migration-plan.md Stage 1: the extraction node's
-        # runner is a per-node configuration choice, not a deploy. Defaults to
-        # "codex" through the setting itself.
-        return settings.agent_extraction_runner
+        selected = stage_settings("extraction")
+        return selected.runner if selected else settings.agent_extraction_runner
 
     @property
     def reviewer_runner(self) -> str:
-        # Stage 2: same seam as ``extraction_runner``, for the reviewer node.
-        # The reviewer requests ``output_type=ReviewOutcome`` regardless of
-        # which runner this resolves to (app/services/agentic/service.py);
-        # both runners hand the coordinator an already-validated outcome.
-        return settings.agent_reviewer_runner
+        selected = stage_settings("reviewer")
+        return selected.runner if selected else settings.agent_reviewer_runner
 
-    # Stage 5 (docs/agents-sdk-migration-plan.md): declaring a non-empty
-    # ``planner_role`` is what opts this workflow into the planning phase --
-    # ``_execute_workflow`` gates on it exactly the way it gates extraction on
-    # ``extraction_skills``. Unlike extraction/reviewer runner selection, this
-    # gate guards a whole new pause in the pipeline, not just which provider
-    # runs an existing one, so it defaults *off*: ``settings.agent_planner_enabled``
-    # keeps every existing slides job completing exactly as it does today until an
-    # operator opts in by configuration, matching this migration's "flip by
-    # config, not by deploy" pattern (Stage 0).
+    # The planner gate is resolved from the same job snapshot as its runner.
+    # Without a stored override, the existing default-off env policy remains.
     planner_output_type = SlideOutline
 
     @property
     def planner_role(self) -> str | None:
-        return "presentation_planner" if settings.agent_planner_enabled else None
+        selected = stage_settings("planner")
+        enabled = selected.planner_enabled if selected else settings.agent_planner_enabled
+        return "presentation_planner" if enabled else None
 
     @property
     def planner_model(self) -> str:
-        return settings.agent_planner_model or settings.agent_default_model
+        selected = stage_settings("planner")
+        return selected.model if selected else settings.agent_planner_model or settings.agent_default_model
 
     @property
     def planner_reasoning_effort(self) -> AgentReasoningEffort:
-        return settings.agent_planner_reasoning_effort or settings.agent_default_reasoning_effort
+        selected = stage_settings("planner")
+        return selected.reasoning_effort if selected else settings.agent_planner_reasoning_effort or settings.agent_default_reasoning_effort
 
     @property
     def planner_runner(self) -> str:
-        # Same per-node runner seam as extraction/reviewer; defaults to
-        # "codex" through the setting itself.
-        return settings.agent_planner_runner
+        selected = stage_settings("planner")
+        return selected.runner if selected else settings.agent_planner_runner
 
     @property
     def max_author_attempts(self) -> int:

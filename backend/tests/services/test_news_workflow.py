@@ -3,6 +3,9 @@ from uuid import uuid4
 
 import pytest
 from openai_codex import Sandbox
+from sqlmodel import SQLModel, create_engine
+
+import app.db as database
 
 from app.models.news import NewsTaskPayload
 from app.services.agentic.contracts import AgentExecutionResult, AgentTaskPayload, WorkflowStatus
@@ -30,7 +33,10 @@ class Runner:
 
 
 @pytest.mark.asyncio
-async def test_news_runs_extraction_then_one_isolated_draft(tmp_path: Path):
+async def test_news_runs_extraction_then_one_isolated_draft(tmp_path: Path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'settings.sqlite'}")
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(database, "engine", engine)
     job_id = uuid4()
     value = NewsTaskPayload(job_id=job_id, document_ids=[uuid4()], guidance="")
     runner = Runner()

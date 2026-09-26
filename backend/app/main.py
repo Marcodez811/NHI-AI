@@ -21,6 +21,7 @@ from app.api.routes.slides import (
     router as slides_router,
 )
 from app.api.routes.news import router as news_router
+from app.api.routes.agent_settings import router as agent_settings_router
 from app.broker import documents_broker, tasks_broker
 from app.config import settings
 from app.db import engine, get_session, init_db
@@ -167,6 +168,7 @@ app.include_router(documents_router, prefix="/api/v1")
 app.include_router(retrieval_router, prefix="/api/v1")
 app.include_router(slides_router, prefix="/api/v1")
 app.include_router(news_router, prefix="/api/v1")
+app.include_router(agent_settings_router, prefix="/api/v1")
 if settings.enable_agent_dev_routes:
     # This console has no authentication of its own; only enable it on a
     # trusted development network through explicit configuration.

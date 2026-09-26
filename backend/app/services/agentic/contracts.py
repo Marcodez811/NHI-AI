@@ -595,6 +595,7 @@ class WorkflowAdapter(Protocol, Generic[InputT, OutputT]):
 
     name: str
     declared_skills: Sequence[str]
+    model_setting_stages: Sequence[str]
     input_type: type[InputT] | None
     output_type: type[OutputT] | None
     author_model: str | None
@@ -657,6 +658,10 @@ class BaseWorkflowAdapter(Generic[InputT, OutputT]):
 
     name = ""
     declared_skills: Sequence[str] = ()
+    # Which of the global stage names (see app.services.agentic.model_settings.STAGES)
+    # this workflow exposes model settings for. Empty by default: only
+    # adapters that opt into ``uses_model_settings_snapshot`` need to set this.
+    model_setting_stages: Sequence[str] = ()
     input_type: type[InputT] | None = None
     output_type: type[OutputT] | None = None
     # Provider and role selection belongs to the server-side adapter.  These
