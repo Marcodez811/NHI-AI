@@ -1,11 +1,9 @@
-import { StrictMode, useState } from "react";
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { resolveWorkspaceView, WorkspaceRoute } from "../components/workspace/WorkspaceRoute";
 
 const navigation = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }));
-const resetChat = vi.hoisted(() => vi.fn());
-const routePath = vi.hoisted(() => ({ current: "/chat" }));
+const routePath = vi.hoisted(() => ({ current: "/slides" }));
 const renderedView = vi.hoisted(() => vi.fn());
 const renderedContent = vi.hoisted(() => vi.fn());
 const startSlides = vi.hoisted(() => vi.fn());
@@ -23,27 +21,17 @@ vi.mock("../components/workspace/WorkspaceContent", () => ({
     },
 }));
 vi.mock("../components/workspace/WorkspaceProvider", () => ({
-    useWorkspace: () => {
-        const [chat, setChat] = useState<unknown[]>([]);
-        return {
-            chat,
-            view: "chat",
-            setView: vi.fn(),
-            startSlides,
-            startNewChat: () => {
-                resetChat();
-                // Bound the broken case so the regression fails without hanging.
-                if (resetChat.mock.calls.length > 8) throw new Error("New-chat render loop");
-                setChat([]);
-            },
-        };
-    },
+    useWorkspace: () => ({
+        view: "files",
+        setView: vi.fn(),
+        startSlides,
+    }),
 }));
 
 afterEach(() => {
     cleanup();
-    window.history.replaceState({}, "", "/chat");
-    routePath.current = "/chat";
+    window.history.replaceState({}, "", "/slides");
+    routePath.current = "/slides";
     vi.clearAllMocks();
 });
 
@@ -59,7 +47,7 @@ it("resolves the slides index to the slides view when a tab query string is pres
 it("resolves a job URL to the slides view without accepting unrelated nested routes", () => {
     expect(resolveWorkspaceView("/slides/job-123")).toBe("slides");
     expect(resolveWorkspaceView("/slides/job-123/")).toBe("slides");
-    expect(resolveWorkspaceView("/slides/job-123/extra")).toBe("chat");
+    expect(resolveWorkspaceView("/slides/job-123/extra")).toBe("files");
     routePath.current = "/slides/job-123";
     render(<WorkspaceRoute />);
     expect(renderedView).toHaveBeenLastCalledWith("slides");
@@ -77,17 +65,4 @@ it("navigates to the new job URL only after a successful create response", async
 
     await act(async () => { await onSlideStart(); });
     expect(navigation.push).toHaveBeenCalledTimes(1);
-});
-
-it("consumes a new-chat request once while router replacement is pending, including Strict Mode", () => {
-    window.history.replaceState({}, "", "/chat?new=1");
-    const result = render(<StrictMode><WorkspaceRoute /></StrictMode>);
-    expect(resetChat).toHaveBeenCalledTimes(1);
-    expect(navigation.replace).toHaveBeenCalledTimes(1);
-
-    window.history.replaceState({}, "", "/chat");
-    result.rerender(<StrictMode><WorkspaceRoute /></StrictMode>);
-    window.history.replaceState({}, "", "/chat?new=1");
-    result.rerender(<StrictMode><WorkspaceRoute /></StrictMode>);
-    expect(resetChat).toHaveBeenCalledTimes(2);
 });

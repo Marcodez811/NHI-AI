@@ -226,8 +226,16 @@ class _KeyedLitellmProvider(ModelProvider):
         return LitellmModel(model_name, api_key=self.api_key)
 
 
-def _litellm_run_config(model: str | None, api_keys: Mapping[str, SecretStr | None]) -> RunConfig | None:
-    """Use the SDK's prefix routing while supplying a key to its LiteLLM adapter."""
+def build_litellm_run_config(model: str | None, api_keys: Mapping[str, SecretStr | None]) -> RunConfig | None:
+    """Use the SDK's prefix routing while supplying a key to its LiteLLM adapter.
+
+    Returns ``None`` for a non-``litellm/...`` model, so callers fall back to
+    a plain ``RunConfig()`` (the OpenAI provider reads its key from process
+    configuration the same way it already does elsewhere). Public so other
+    callers that build an ``agents.Agent`` directly -- ``app.services.chat.engine``
+    is the first -- can reuse this exact key-wiring instead of duplicating it;
+    ``AgentsSdkRunner.run`` below is just its first caller.
+    """
 
     if model is None or not model.startswith("litellm/"):
         return None
@@ -455,7 +463,7 @@ class AgentsSdkRunner:
         started = asyncio.get_running_loop().time()
 
         async def execute() -> AgentExecutionResult:
-            run_config = _litellm_run_config(effective_model, self.litellm_api_keys) or RunConfig()
+            run_config = build_litellm_run_config(effective_model, self.litellm_api_keys) or RunConfig()
             # "No grants -> no sandbox" (module docstring): a request that asks for
             # neither read-only nor writable paths never touches the workspace, so it
             # runs as a plain agent with no capabilities and no SandboxRunConfig at
@@ -555,4 +563,4 @@ class AgentsSdkRunner:
             await heartbeat
 
 
-__all__ = ["AgentsSdkRunner"]
+__all__ = ["AgentsSdkRunner", "build_litellm_run_config"]

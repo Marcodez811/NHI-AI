@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from taskiq.depends.progress_tracker import TaskProgress
 from taskiq_redis.exceptions import ResultIsMissingError
 
-from app.api.routes.chat import SSE_RESPONSE_HEADERS, _stream_with_heartbeat
+from app.services.streaming import SSE_RESPONSE_HEADERS, _stream_with_heartbeat
 from app.broker import result_backend
 from app.config import settings
 from app.models.slides import (

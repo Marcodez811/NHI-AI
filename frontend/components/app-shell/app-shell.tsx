@@ -8,6 +8,7 @@ import { useEffect, useState } from "react"
 import { cn } from "@/lib/utils"
 import { NhiBrand } from "./nhi-brand"
 import { ThemeMenu } from "./theme-menu"
+import { ChatSidebarSessions } from "@/components/chat/ChatSidebarSessions"
 
 const navigation = [
   { href: "/chat", label: "對話", icon: MessageCircle },
@@ -57,23 +58,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </div>
         <div className="px-3 pt-4">
-          <Link href="/chat?new=1" aria-label="新對話" className={cn("flex h-9 items-center gap-2 rounded-md text-sm text-sidebar-foreground transition-colors hover:bg-sidebar-accent", collapsed ? "justify-center px-0" : "px-3")}>
+          <Link href="/chat" aria-label="新對話" className={cn("flex h-9 items-center gap-2 rounded-md text-sm text-sidebar-foreground transition-colors hover:bg-sidebar-accent", collapsed ? "justify-center px-0" : "px-3")}>
             <Plus className="size-4" aria-hidden="true" />
             {!collapsed && "新對話"}
           </Link>
         </div>
-        <nav className="flex flex-col gap-1 px-3 pt-5" aria-label="主要導覽">
+        <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-3 pt-5 pb-3" aria-label="主要導覽">
           {navigation.map(({ href, label, icon: Icon }) => {
             const current = isCurrentPath(pathname, href)
             return (
-              <Link key={href} href={href} aria-label={collapsed ? label : undefined} title={collapsed ? label : undefined} aria-current={current ? "page" : undefined} className={cn(
-                "flex h-10 items-center gap-3 rounded-md text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                collapsed ? "justify-center px-0" : "px-3",
-                current ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-              )}>
-                <Icon className="size-4" aria-hidden="true" />
-                {!collapsed && label}
-              </Link>
+              <div key={href}>
+                <Link href={href} aria-label={collapsed ? label : undefined} title={collapsed ? label : undefined} aria-current={current ? "page" : undefined} className={cn(
+                  "flex h-10 items-center gap-3 rounded-md text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  collapsed ? "justify-center px-0" : "px-3",
+                  current ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                )}>
+                  <Icon className="size-4" aria-hidden="true" />
+                  {!collapsed && label}
+                </Link>
+                {href === "/chat" && !collapsed && <ChatSidebarSessions />}
+              </div>
             )
           })}
         </nav>

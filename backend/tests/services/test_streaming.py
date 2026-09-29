@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.api.routes.chat import _stream_with_heartbeat
+from app.services.streaming import _stream_with_heartbeat
 
 
 @pytest.mark.asyncio

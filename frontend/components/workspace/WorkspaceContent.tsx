@@ -1,6 +1,5 @@
 "use client";
 
-import { ChatView } from "./ChatView";
 import { FilesView } from "./FilesView";
 import { SlidesView } from "./SlidesView";
 import { SlideJobView } from "./SlideJobView";
@@ -14,14 +13,12 @@ export function WorkspaceContent({
     workspace,
     view,
     onBrowseSources,
-    onUploadSources,
     slideJobId,
     onSlideStart,
 }: {
     workspace: WorkspaceController;
     view: View;
     onBrowseSources?: () => void;
-    onUploadSources?: () => void;
     slideJobId?: string | null;
     onSlideStart?: () => Promise<void>;
 }) {
@@ -36,42 +33,6 @@ export function WorkspaceContent({
                 >
                     {workspace.actionError}
                 </div>
-            )}
-            {view === "chat" && (
-                <ChatView
-                    chat={workspace.chat}
-                    draft={workspace.draft}
-                    setDraft={workspace.setDraft}
-                    send={workspace.send}
-                    scope={workspace.scope}
-                    setScope={workspace.changeScope}
-                    docs={workspace.catalog.documents}
-                    selected={workspace.chatSelected}
-                    setSelected={workspace.setChatSelected}
-                    modes={workspace.modes}
-                    modesError={workspace.qaError}
-                    retryModes={() => void workspace.loadModes()}
-                    busy={workspace.chatBusy}
-                    error={workspace.chatError}
-                    eligibilityError={workspace.eligibilityError}
-                    retrievalStatus={workspace.retrievalStatus}
-                    retrievalLoading={workspace.retrievalLoading}
-                    retrievalError={workspace.retrievalError}
-                    retryRetrieval={() => void workspace.reloadRetrieval()}
-                    catalogLoading={workspace.catalogLoading}
-                    hasPendingDocuments={workspace.hasPendingDocuments}
-                    hasAnyReadyDocuments={workspace.hasAnyReadyDocuments}
-                    hasCategoryReadyDocuments={
-                        workspace.hasCategoryReadyDocuments
-                    }
-                    onUploadSources={
-                        onUploadSources ??
-                        (() => {
-                            workspace.openUpload();
-                            workspace.setView("files");
-                        })
-                    }
-                />
             )}
             {view === "files" && (
                 <FilesView

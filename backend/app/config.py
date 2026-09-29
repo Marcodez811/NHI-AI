@@ -67,6 +67,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_PLANNER_REASONING_EFFORT"),
     )
     openai_chat_model: str = "gpt-5.6-luna"
+    # Comma-separated override for the chat model picker (app/services/chat/models.py).
+    # Unset means "use the built-in catalog".
+    chat_model_options: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CHAT_MODEL_OPTIONS"),
+    )
+    chat_default_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CHAT_DEFAULT_MODEL"),
+    )
     openai_vector_store_id: str | None = None
     openai_vector_store_name: str = "NHI-AI Knowledge Base"
     openai_vector_store_bootstrap_timeout_seconds: float = Field(default=10.0, gt=0)

@@ -1,5 +1,5 @@
-import { WorkspaceRoute } from "../../../components/workspace/WorkspaceRoute";
+import { ChatPage } from "../../../components/chat/ChatPage";
 
-export default function ChatPage() {
-  return <WorkspaceRoute />;
+export default function ChatIndexPage() {
+  return <ChatPage />;
 }

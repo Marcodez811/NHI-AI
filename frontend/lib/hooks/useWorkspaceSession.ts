@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { Category } from "../api/documents";
-import type { ChatMessage, Tone, View } from "../workspace/types";
+import type { Tone, View } from "../workspace/types";
 
 /**
  * UI-only workspace state. Keeping this separate from transport effects makes
@@ -10,18 +10,14 @@ import type { ChatMessage, Tone, View } from "../workspace/types";
  * sibling workflow routes.
  */
 export function useWorkspaceSession() {
-  const [view, setView] = useState<View>("chat");
+  const [view, setView] = useState<View>("files");
   const [selected, setSelected] = useState<string[]>([]);
-  const [chatSelected, setChatSelected] = useState<string[]>([]);
   const [folderId, setFolderId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
   const [pending, setPending] = useState<File[]>([]);
   const [uploadCategory, setUploadCategory] = useState<Category>("bei_can");
   const [uploadFolderId, setUploadFolderId] = useState<string | null>(null);
-  const [scope, setScope] = useState<Category>("legislative_qa");
-  const [chat, setChat] = useState<ChatMessage[]>([]);
-  const [draft, setDraft] = useState("");
   const [slideTitle, setSlideTitle] = useState("2026 健保政策重點整理");
   const [slideCount, setSlideCount] = useState(10);
   const [guidance, setGuidance] = useState("");
@@ -32,8 +28,6 @@ export function useWorkspaceSession() {
     setView,
     selected,
     setSelected,
-    chatSelected,
-    setChatSelected,
     folderId,
     setFolderId,
     query,
@@ -46,12 +40,6 @@ export function useWorkspaceSession() {
     setUploadCategory,
     uploadFolderId,
     setUploadFolderId,
-    scope,
-    setScope,
-    chat,
-    setChat,
-    draft,
-    setDraft,
     slideTitle,
     setSlideTitle,
     slideCount,

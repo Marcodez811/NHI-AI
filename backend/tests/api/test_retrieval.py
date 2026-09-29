@@ -1,8 +1,5 @@
 import pytest
-from fastapi import HTTPException
 
-from app.api.routes.chat import _resolve_document_scope as _validate_document_scope
-from app.models.chat import ChatRequest, QaMode
 from app.api.routes.retrieval import retrieval_status
 from app.models.documents import Document, DocumentCategory, DocumentStatus
 from app.services.documents.repository import InMemoryDocumentRepository
@@ -82,17 +79,3 @@ async def test_retrieval_status_counts_only_ready_enabled_documents():
     assert response.state == "provisioning"
     assert response.can_retrieve is False
     assert response.ready_document_count == 1
-
-
-@pytest.mark.asyncio
-async def test_empty_chat_scope_returns_stable_knowledge_base_error():
-    repository = InMemoryDocumentRepository()
-
-    with pytest.raises(HTTPException) as error:
-        await _validate_document_scope(
-            ChatRequest(question="問題", mode=QaMode.BEI_CAN),
-            repository,
-        )
-
-    assert error.value.status_code == 409
-    assert error.value.detail["code"] == "knowledge_base_empty"

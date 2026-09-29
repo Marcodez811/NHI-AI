@@ -9,13 +9,12 @@ import {
     DocumentRead,
     MAX_DOCUMENTS,
     QaModeInfo,
+    fetchQaModes,
     getDocumentDownloadUrl,
 } from "../api/documents";
-import { fetchQaModes } from "../api/chat";
 import { createSlideJob, supportsSlideGeneration } from "../api/slides";
 import type { CreateSlidesJobResponse } from "../api/slides";
 import { useDocuments } from "./useDocuments";
-import { useChatRequest } from "./useChatRequest";
 import { useRetrievalStatus } from "./useRetrievalStatus";
 import { useWorkspaceSession } from "./useWorkspaceSession";
 
@@ -40,6 +39,10 @@ function errorText(error: unknown): string {
  * Owns the cross-view workspace state and actions. Views stay presentational;
  * this controller is the single place where navigation, selection, transport
  * calls, and asynchronous workflow state are coordinated.
+ *
+ * Chat lives outside this controller: it owns its own sessions against the
+ * `/chat/*` API (see `useChatSession`), so it stays a sibling route rather
+ * than another view of this shared workspace state.
  */
 export function useWorkspaceController() {
     const catalog = useDocuments();
@@ -51,8 +54,6 @@ export function useWorkspaceController() {
         setView,
         selected,
         setSelected,
-        chatSelected,
-        setChatSelected,
         folderId,
         setFolderId,
         query,
@@ -65,12 +66,6 @@ export function useWorkspaceController() {
         setUploadCategory,
         uploadFolderId,
         setUploadFolderId,
-        scope,
-        setScope,
-        chat,
-        setChat,
-        draft,
-        setDraft,
         slideTitle,
         setSlideTitle,
         slideCount,
@@ -84,7 +79,6 @@ export function useWorkspaceController() {
     const [uploading, setUploading] = useState(false);
     const [qaModes, setQaModes] = useState<QaModeInfo[]>([]);
     const [qaError, setQaError] = useState<string | null>(null);
-    const [eligibilityError, setEligibilityError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
 
     const loadModes = async () => {
@@ -101,12 +95,6 @@ export function useWorkspaceController() {
     }, []);
 
     useEffect(() => {
-        if (qaModes.length && !qaModes.some((mode) => mode.mode === scope)) {
-            setScope(qaModes[0].mode);
-        }
-    }, [qaModes, scope]);
-
-    useEffect(() => {
         if (!catalog.documents.some((doc) => ["queued", "indexing", "deleting"].includes(doc.status))) return;
         const timer = window.setTimeout(() => void catalog.reloadDocuments(), 2500);
         return () => window.clearTimeout(timer);
@@ -120,25 +108,9 @@ export function useWorkspaceController() {
         () => catalog.documents.filter((doc) => selected.includes(doc.id)),
         [catalog.documents, selected],
     );
-    const chatEligible = useMemo(
-        () => catalog.documents.filter((doc) => chatSelected.includes(doc.id) && doc.category === scope && doc.status === "ready" && doc.retrieval_enabled),
-        [catalog.documents, chatSelected, scope],
-    );
-    const chatSelectedDocs = useMemo(
-        () => catalog.documents.filter((doc) => chatSelected.includes(doc.id)),
-        [catalog.documents, chatSelected],
-    );
-    const blockedDocuments = useMemo(
-        () => chatSelectedDocs.filter((doc) => !chatEligible.some((eligible) => eligible.id === doc.id)),
-        [chatEligible, chatSelectedDocs],
-    );
     const readyDocuments = useMemo(
         () => catalog.documents.filter((doc) => doc.status === "ready" && doc.retrieval_enabled),
         [catalog.documents],
-    );
-    const categoryReadyDocuments = useMemo(
-        () => readyDocuments.filter((doc) => doc.category === scope),
-        [readyDocuments, scope],
     );
     const hasPendingDocuments = useMemo(
         () => catalog.documents.some((doc) => ["queued", "indexing"].includes(doc.status)),
@@ -147,11 +119,8 @@ export function useWorkspaceController() {
     const hasAnyReadyDocuments =
         readyDocuments.length > 0 ||
         (retrieval.status?.ready_document_count ?? 0) > 0;
-    const hasCategoryReadyDocuments = categoryReadyDocuments.length > 0;
-    const chatRequest = useChatRequest({ draft, setDraft, setChat });
 
     const toggleSelected = (id: string) => {
-        setEligibilityError(null);
         setSelected((items) => {
             if (items.includes(id)) return items.filter((item) => item !== id);
             if (items.length >= MAX_DOCUMENTS) {
@@ -162,44 +131,8 @@ export function useWorkspaceController() {
         });
     };
 
-    const changeScope = (value: Category) => {
-        setScope(value);
-        setChatSelected([]);
-        setEligibilityError(null);
-    };
-
     const openUpload = () => {
-        setUploadCategory(scope);
         setUploadOpen(true);
-    };
-
-    const send = async () => {
-        const question = draft.trim();
-        if (!question || chatRequest.busy || question.length > 20_000) return;
-        if (!retrieval.status?.can_retrieve) {
-            setEligibilityError(
-                retrieval.error?.message ||
-                    "知識庫正在準備中，完成後才能提問。",
-            );
-            return;
-        }
-        if (!hasCategoryReadyDocuments) {
-            setEligibilityError("目前搜尋範圍尚無可用文件，請先上傳文件或切換分類。");
-            return;
-        }
-        if (chatSelectedDocs.length && blockedDocuments.length) {
-            const names = blockedDocuments.map((doc) => doc.display_name).join("、");
-            setEligibilityError("請先處理未符合目前搜尋條件的選取文件：" + names);
-            return;
-        }
-        setEligibilityError(null);
-        await chatRequest.send({
-            question,
-            mode: scope,
-            document_ids: chatSelectedDocs.length
-                ? chatEligible.map((doc) => doc.id)
-                : [],
-        });
     };
 
     const mutateDocument = async (id: string, changes: DocumentMutation) => {
@@ -222,7 +155,6 @@ export function useWorkspaceController() {
             try {
                 await catalog.deleteDocument(document.id);
                 setSelected((items) => items.filter((id) => id !== document.id));
-                setChatSelected((items) => items.filter((id) => id !== document.id));
             } catch (error) {
                 setActionError(errorText(error));
             }
@@ -288,14 +220,6 @@ export function useWorkspaceController() {
         }
     };
 
-    const startNewChat = () => {
-        if (chatRequest.busy) return;
-        setChat([]);
-        setDraft("");
-        chatRequest.clearError();
-        setEligibilityError(null);
-    };
-
     return {
         catalog,
         slideSubmitting,
@@ -303,9 +227,6 @@ export function useWorkspaceController() {
         setView,
         selected,
         setSelected,
-        chatSelected,
-        setChatSelected,
-        chatSelectedDocs,
         selectedDocs,
         folderId,
         setFolderId,
@@ -325,15 +246,6 @@ export function useWorkspaceController() {
         modes,
         qaError,
         loadModes,
-        scope,
-        changeScope,
-        chat,
-        draft,
-        setDraft,
-        send,
-        chatBusy: chatRequest.busy,
-        chatError: chatRequest.error,
-        eligibilityError,
         actionError,
         retrievalStatus: retrieval.status,
         retrievalLoading: retrieval.loading,
@@ -342,7 +254,6 @@ export function useWorkspaceController() {
         catalogLoading: catalog.loadingDocuments,
         hasPendingDocuments,
         hasAnyReadyDocuments,
-        hasCategoryReadyDocuments,
         toggleSelected,
         mutateDocument,
         deleteDocument,
@@ -360,7 +271,6 @@ export function useWorkspaceController() {
         tone,
         setTone,
         startSlides,
-        startNewChat,
     };
 }
 

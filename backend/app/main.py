@@ -1,13 +1,18 @@
 from contextlib import asynccontextmanager
 import asyncio
-from typing import Any
 
 import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, status
 from sqlalchemy import text
-from sqlmodel import Session, select
+from sqlmodel import Session
 
-from app.api.routes.chat import get_chat_document_repository, get_chat_service, router as chat_router
+from app.api.routes.chat import (
+    get_chat_attachment_storage,
+    get_chat_document_repository,
+    get_chat_engine,
+    get_chat_repository,
+    router as chat_router,
+)
 from app.api.routes.documents import get_document_repository, router as documents_router
 from app.api.routes.dev_agents import router as dev_agents_router
 from app.api.routes.retrieval import (
@@ -25,18 +30,17 @@ from app.api.routes.agent_settings import router as agent_settings_router
 from app.broker import documents_broker, tasks_broker
 from app.config import settings
 from app.db import engine, get_session, init_db
-from app.models.documents import Document
 from app.services.documents.repository import SQLModelDocumentRepository
 from app.services.slides.outline_repository import SQLModelSlideOutlineRepository
 from app.services.slides.repository import SQLModelSlideJobRepository
-from app.services.chat.responder import ResponseService
+from app.services.chat.engine import AgentsSdkChatEngine, ChatEngine
+from app.services.chat.repository import SQLModelChatRepository
 from app.services.retrieval.registry import RetrievalIndexRegistry
 from app.tasks.documents import set_retrieval_index_registry
 
 redis_client = redis.from_url(settings.redis_url)
 retrieval_registry = RetrievalIndexRegistry()
 set_retrieval_index_registry(retrieval_registry)
-_chat_client: Any | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -69,11 +73,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         try:
-            try:
-                await redis_client.aclose()
-            finally:
-                if _chat_client is not None:
-                    await _chat_client.close()
+            await redis_client.aclose()
         finally:
             for broker in reversed(started):
                 try:
@@ -110,12 +110,6 @@ app.dependency_overrides[get_retrieval_document_repository] = _document_reposito
 app.dependency_overrides[get_retrieval_registry] = lambda: retrieval_registry
 
 
-def _document_id_for_remote_file(file_id: str):
-    with Session(engine) as session:
-        document = session.exec(select(Document).where(Document.remote_file_id == file_id)).first()
-    return document.id if document else None
-
-
 def _runtime_vector_store_id() -> str | None:
     """Resolve the store from durable state, with a legacy env fallback.
 
@@ -135,33 +129,31 @@ def _runtime_vector_store_id() -> str | None:
         return settings.openai_vector_store_id
 
 
-def _make_chat_service() -> ResponseService:
-    from openai import AsyncOpenAI
+def _chat_repository_from_database():
+    yield from (SQLModelChatRepository(session) for session in get_session())
 
-    global _chat_client
-    if _chat_client is None:
-        api_key = settings.openai_api_key.get_secret_value()
-        if not api_key:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={"code": "chat_unavailable", "message": "對話服務尚未完成設定。"},
-            )
-        try:
-            _chat_client = AsyncOpenAI(api_key=api_key)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={"code": "chat_unavailable", "message": "對話服務暫時無法使用，請稍後再試。"},
-            ) from exc
-    return ResponseService(
-        client=_chat_client,
-        vector_store_id_provider=_runtime_vector_store_id,
-        model=settings.openai_chat_model,
-        document_id_for_file=_document_id_for_remote_file,
+
+app.dependency_overrides[get_chat_repository] = _chat_repository_from_database
+
+
+def _chat_engine_from_database():
+    yield from (
+        AgentsSdkChatEngine(
+            document_repository=SQLModelDocumentRepository(session),
+            vector_store_id_provider=_runtime_vector_store_id,
+            attachment_storage=get_chat_attachment_storage(),
+            openai_api_key=settings.openai_api_key,
+            litellm_api_keys={
+                "gemini": settings.gemini_api_key,
+                "anthropic": settings.anthropic_api_key,
+                "openai": settings.openai_api_key,
+            },
+        )
+        for session in get_session()
     )
 
 
-app.dependency_overrides[get_chat_service] = _make_chat_service
+app.dependency_overrides[get_chat_engine] = _chat_engine_from_database
 
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")

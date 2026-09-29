@@ -5,6 +5,7 @@ export {
   MAX_DOCUMENTS,
   documentDisplayName,
   fetchDocuments,
+  fetchQaModes,
   getDocument,
   uploadDocument,
   fetchFolders,

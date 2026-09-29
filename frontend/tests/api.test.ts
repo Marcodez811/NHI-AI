@@ -5,7 +5,7 @@ import {
     fetchDocumentList,
     getApiErrorMessage,
     parseSseEventBlock,
-    streamChat,
+    streamSlideJobOutlineMessage,
 } from "../lib/api";
 
 describe("API error contracts", () => {
@@ -66,7 +66,11 @@ describe("API error contracts", () => {
     });
 });
 
-describe("SSE contract", () => {
+// The planner (slides outline chat) shares the legacy retrieval-chat SSE vocabulary and the
+// generic framing engine in lib/api.ts (`consumeSseStream`). These cases exercise that shared
+// engine through the one legacy caller still in use; the chat v2 vocabulary has its own tests
+// in tests/chatStreamApi.test.ts.
+describe("SSE contract (shared legacy framing engine)", () => {
     it("parses data fields and citations from a complete event block", () => {
         expect(
             parseSseEventBlock(
@@ -107,15 +111,15 @@ describe("SSE contract", () => {
         const deltas: string[] = [];
         const done = vi.fn();
 
-        await streamChat(
-            { question: "問題", mode: "legislative_qa", document_ids: [] },
-            { onDelta: (text) => deltas.push(text), onDone: done },
-        );
+        await streamSlideJobOutlineMessage("job-1", "請調整語氣", {
+            onDelta: (text) => deltas.push(text),
+            onDone: done,
+        });
 
         expect(deltas).toEqual(["早安"]);
         expect(done).toHaveBeenCalledTimes(1);
         expect(fetchMock).toHaveBeenCalledWith(
-            "/api/v1/chat/stream",
+            "/api/v1/slides/jobs/job-1/outline/messages",
             expect.any(Object),
         );
     });
@@ -127,10 +131,7 @@ describe("SSE contract", () => {
         )));
         const onStatus = vi.fn();
 
-        await streamChat(
-            { question: "問題", mode: "legislative_qa", document_ids: [] },
-            { onDelta: vi.fn(), onStatus },
-        );
+        await streamSlideJobOutlineMessage("job-1", "請調整語氣", { onDelta: vi.fn(), onStatus });
 
         expect(onStatus).toHaveBeenCalledWith("searching");
     });
@@ -140,10 +141,8 @@ describe("SSE contract", () => {
             'data: {"type":"text_delta","text":"部分回答"}\n\n',
         )));
 
-        await expect(streamChat(
-            { question: "問題", mode: "legislative_qa", document_ids: [] },
-            { onDelta: vi.fn() },
-        )).rejects.toMatchObject({ code: "chat_stream_interrupted" });
+        await expect(streamSlideJobOutlineMessage("job-1", "請調整語氣", { onDelta: vi.fn() }))
+            .rejects.toMatchObject({ code: "chat_stream_interrupted" });
     });
 
     it("rejects malformed recognized event payloads", async () => {
@@ -154,10 +153,8 @@ describe("SSE contract", () => {
     it("does not treat a provider DONE sentinel as application success", async () => {
         vi.stubGlobal("fetch", vi.fn(async () => new Response("data: [DONE]\n\n")));
 
-        await expect(streamChat(
-            { question: "問題", mode: "legislative_qa", document_ids: [] },
-            { onDelta: vi.fn() },
-        )).rejects.toMatchObject({ code: "chat_stream_interrupted" });
+        await expect(streamSlideJobOutlineMessage("job-1", "請調整語氣", { onDelta: vi.fn() }))
+            .rejects.toMatchObject({ code: "chat_stream_interrupted" });
     });
 
     it("times out when no response bytes arrive", async () => {
@@ -168,10 +165,7 @@ describe("SSE contract", () => {
                     reject(new DOMException("Aborted", "AbortError"));
                 });
             })));
-            const request = streamChat(
-                { question: "問題", mode: "legislative_qa", document_ids: [] },
-                { onDelta: vi.fn() },
-            );
+            const request = streamSlideJobOutlineMessage("job-1", "請調整語氣", { onDelta: vi.fn() });
             const rejection = expect(request).rejects.toMatchObject({
                 code: "chat_timeout",
             });

@@ -20,7 +20,6 @@ export const CATEGORY_LABELS: Record<Category, string> = {
 };
 
 export const MAX_DOCUMENTS = 20;
-export const MAX_QUESTION_LENGTH = 20_000;
 
 /** Mirrors the source formats currently usable by the slide worker. */
 export const SUPPORTED_SLIDE_EXTENSIONS = [
@@ -191,14 +190,6 @@ export interface Citation {
     start_index: number | null;
     end_index: number | null;
     page: number | null;
-}
-
-export interface ChatRequest {
-    question: string;
-    mode: Category;
-    document_ids?: string[];
-    max_num_results?: number;
-    include_search_results?: boolean;
 }
 
 /** Stable, workflow-facing lifecycle phases. Details stay server-side. */
@@ -780,10 +771,19 @@ export function parseSseEventBlock(block: string): ChatStreamEvent | null {
     return null;
 }
 
-async function streamSse(
+/**
+ * Reads an SSE POST response and forwards each complete event block to
+ * `onBlock`, handling chunk buffering, the 45s inactivity timeout, and abort
+ * wiring. Event parsing and per-type dispatch belong to the caller, which
+ * reports completion through `isFinished`. Shared by the legacy
+ * retrieval/slides vocabulary (`streamSse`) and the chat v2 vocabulary
+ * (`sendChatMessage`).
+ */
+async function consumeSseStream(
     path: string,
     payload: unknown,
-    handlers: StreamHandlers,
+    onBlock: (block: string) => void,
+    isFinished: () => boolean,
     options: { signal?: AbortSignal } = {},
 ): Promise<void> {
     const inactivityTimeoutMs = 45_000;
@@ -840,36 +840,22 @@ async function streamSse(
         reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        let finished = false;
 
-        const consume = (block: string) => {
-            const event = parseSseEventBlock(block);
-            if (!event) return;
-            if (event.type === "status") handlers.onStatus?.(event.phase);
-            else if (event.type === "text_delta") handlers.onDelta(event.text);
-            else if (event.type === "done") {
-                finished = true;
-                handlers.onDone?.(event.citations);
-            } else {
-                throw new ApiError(503, event.message, { code: event.code });
-            }
-        };
-
-        while (!finished) {
+        while (!isFinished()) {
             const { value, done } = await reader.read();
             if (value?.byteLength) resetInactivityTimer();
             buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
             let boundary: RegExpExecArray | null;
             while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
-                consume(buffer.slice(0, boundary.index));
+                onBlock(buffer.slice(0, boundary.index));
                 buffer = buffer.slice(boundary.index + boundary[0].length);
-                if (finished) break;
+                if (isFinished()) break;
             }
             if (done) break;
         }
         buffer += decoder.decode();
-        if (!finished && buffer.trim()) consume(buffer);
-        if (!finished) {
+        if (!isFinished() && buffer.trim()) onBlock(buffer);
+        if (!isFinished()) {
             throw new ApiError(502, "對話串流意外中斷，請重新送出問題。", {
                 code: "chat_stream_interrupted",
             });
@@ -890,13 +876,303 @@ async function streamSse(
     }
 }
 
-/** Stream a retrieval chat response through the shared application SSE parser. */
-export async function streamChat(
-    payload: ChatRequest,
+async function streamSse(
+    path: string,
+    payload: unknown,
     handlers: StreamHandlers,
     options: { signal?: AbortSignal } = {},
 ): Promise<void> {
-    return streamSse("/chat/stream", payload, handlers, options);
+    let finished = false;
+    await consumeSseStream(
+        path,
+        payload,
+        (block) => {
+            const event = parseSseEventBlock(block);
+            if (!event) return;
+            if (event.type === "status") handlers.onStatus?.(event.phase);
+            else if (event.type === "text_delta") handlers.onDelta(event.text);
+            else if (event.type === "done") {
+                finished = true;
+                handlers.onDone?.(event.citations);
+            } else {
+                throw new ApiError(503, event.message, { code: event.code });
+            }
+        },
+        () => finished,
+        options,
+    );
+}
+
+/* ---------- Chat (agentic) ---------- */
+
+export type ChatAttachmentKind = "document" | "image";
+export type ChatAttachmentStatus = "ready" | "failed";
+export type ChatMessageStatus = "complete" | "interrupted" | "error";
+
+export interface ChatAttachment {
+    id: string;
+    display_name: string;
+    mime_type: string;
+    kind: ChatAttachmentKind;
+    size_bytes: number;
+    status: ChatAttachmentStatus;
+    error: string | null;
+    text_chars: number | null;
+    created_at: string;
+}
+
+export interface ChatSourceRef {
+    name: string;
+    snippet: string;
+}
+
+export interface ChatMessageRecord {
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    attachment_ids?: string[] | null;
+    sources?: ChatSourceRef[] | null;
+    status: ChatMessageStatus;
+    model?: string | null;
+    created_at: string;
+}
+
+export interface ChatSessionSummary {
+    id: string;
+    title: string;
+    updated_at: string;
+}
+
+export interface ChatSessionDetail extends ChatSessionSummary {
+    model: string;
+    created_at: string;
+    messages: ChatMessageRecord[];
+    attachments: ChatAttachment[];
+}
+
+export interface ChatModelOption {
+    id: string;
+    label: string;
+    provider: string;
+    available: boolean;
+}
+
+export interface ChatModelListResponse {
+    models: ChatModelOption[];
+    default: string;
+}
+
+export interface ChatSendMessagePayload {
+    content: string;
+    attachment_ids: string[];
+    model: string;
+}
+
+/** Kinds accepted by the chat attachment picker; enforced again server-side. */
+export const CHAT_DOCUMENT_EXTENSIONS = [".pdf", ".docx", ".txt", ".md"] as const;
+export const CHAT_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
+export const CHAT_MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
+/** PDFs go to the model as files, so they must fit the providers' inline limits. */
+export const CHAT_MAX_PDF_BYTES = 20 * 1024 * 1024;
+export const CHAT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const CHAT_MAX_ATTACHMENTS = 10;
+
+/** Classifies a picked file the way the server will, for instant client-side feedback. */
+export function classifyChatAttachment(file: File): ChatAttachmentKind | null {
+    if ((CHAT_IMAGE_MIME_TYPES as readonly string[]).includes(file.type)) return "image";
+    const name = file.name.toLowerCase();
+    if (CHAT_DOCUMENT_EXTENSIONS.some((extension) => name.endsWith(extension))) return "document";
+    return null;
+}
+
+export async function fetchChatModels(
+    options: { signal?: AbortSignal } = {},
+): Promise<ChatModelListResponse> {
+    return request<ChatModelListResponse>("/chat/models", options);
+}
+
+export async function fetchChatSessions(
+    options: { signal?: AbortSignal } = {},
+): Promise<ChatSessionSummary[]> {
+    return request<ChatSessionSummary[]>("/chat/sessions", options);
+}
+
+export async function createChatSession(model?: string): Promise<ChatSessionDetail> {
+    return request<ChatSessionDetail>("/chat/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(model ? { model } : {}),
+    });
+}
+
+export async function fetchChatSession(
+    id: string,
+    options: { signal?: AbortSignal } = {},
+): Promise<ChatSessionDetail> {
+    return request<ChatSessionDetail>(`/chat/sessions/${encodeURIComponent(id)}`, options);
+}
+
+export async function renameChatSession(id: string, title: string): Promise<ChatSessionSummary> {
+    return request<ChatSessionSummary>(`/chat/sessions/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+    });
+}
+
+export async function deleteChatSession(id: string): Promise<void> {
+    await request<void>(`/chat/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function uploadChatAttachment(
+    sessionId: string,
+    file: File,
+    options: { signal?: AbortSignal } = {},
+): Promise<ChatAttachment> {
+    const form = new FormData();
+    form.set("file", file);
+    return request<ChatAttachment>(
+        `/chat/sessions/${encodeURIComponent(sessionId)}/attachments`,
+        { method: "POST", body: form, signal: options.signal },
+    );
+}
+
+/** Source for image thumbnails and opening a document; never shown to users. */
+export function chatAttachmentContentUrl(sessionId: string, attachmentId: string): string {
+    return `${API_ROOT}/chat/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}/content`;
+}
+
+export async function deleteChatAttachment(sessionId: string, attachmentId: string): Promise<void> {
+    await request<void>(
+        `/chat/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`,
+        { method: "DELETE" },
+    );
+}
+
+/** The chat v2 SSE vocabulary; see `docs/9_29_chat_core_and_attachments_plan.md`. */
+export type ChatEvent =
+    | { type: "message_start"; message_id: string }
+    | { type: "text_delta"; text: string }
+    | { type: "tool_started"; tool: string; label: string }
+    | { type: "tool_finished"; tool: string; label: string }
+    | { type: "sources"; sources: ChatSourceRef[] }
+    | { type: "done"; message_id: string; title: string }
+    | { type: "error"; message: string; code?: string };
+
+function chatSourceRef(value: unknown): ChatSourceRef | null {
+    if (!isRecord(value)) return null;
+    const name = stringValue(value.name);
+    if (!name) return null;
+    return { name, snippet: rawStringValue(value.snippet) ?? "" };
+}
+
+function invalidChatStreamError(): ApiError {
+    return new ApiError(502, "對話串流格式無效。", { code: "chat_stream_invalid" });
+}
+
+/**
+ * Parses one complete SSE event in the chat v2 vocabulary. Exported so
+ * stream behavior can be tested without constructing a ReadableStream.
+ */
+export function parseChatEventBlock(block: string): ChatEvent | null {
+    let eventName = "message";
+    const dataLines: string[] = [];
+    for (const line of block.split(/\r?\n/)) {
+        if (!line || line.startsWith(":")) continue;
+        const separator = line.indexOf(":");
+        const field = separator >= 0 ? line.slice(0, separator) : line;
+        const value = separator >= 0 ? line.slice(separator + 1).replace(/^ /, "") : "";
+        if (field === "event") eventName = value.trim();
+        if (field === "data") dataLines.push(value);
+    }
+    const rawData = dataLines.join("\n").trim();
+    if (!rawData) return null;
+    // A provider-style sentinel is not our application completion contract.
+    if (rawData === "[DONE]") return null;
+
+    let payload: unknown;
+    try {
+        payload = JSON.parse(rawData) as unknown;
+    } catch {
+        throw invalidChatStreamError();
+    }
+    if (!isRecord(payload)) throw invalidChatStreamError();
+
+    const type = stringValue(payload.type) ?? eventName;
+    if (type === "message_start") {
+        const messageId = stringValue(payload.message_id);
+        if (!messageId) throw invalidChatStreamError();
+        return { type: "message_start", message_id: messageId };
+    }
+    if (type === "text_delta") {
+        const text = rawStringValue(payload.text);
+        if (text === undefined) throw invalidChatStreamError();
+        return { type: "text_delta", text };
+    }
+    if (type === "tool_started" || type === "tool_finished") {
+        const tool = stringValue(payload.tool);
+        if (!tool) throw invalidChatStreamError();
+        return { type, tool, label: stringValue(payload.label) ?? "" };
+    }
+    if (type === "sources") {
+        const sources = Array.isArray(payload.sources)
+            ? payload.sources.map(chatSourceRef).filter((item): item is ChatSourceRef => item !== null)
+            : [];
+        return { type: "sources", sources };
+    }
+    if (type === "done") {
+        return {
+            type: "done",
+            message_id: stringValue(payload.message_id) ?? "",
+            title: stringValue(payload.title) ?? "",
+        };
+    }
+    if (type === "error") {
+        const message = stringValue(payload.message) ?? getApiErrorMessage(payload, "對話服務發生錯誤。");
+        return { type: "error", message, code: stringValue(payload.code) };
+    }
+    // Unrecognized events (e.g. heartbeats surfaced as data) are ignored.
+    return null;
+}
+
+export interface ChatStreamHandlers {
+    onDelta: (text: string) => void;
+    onMessageStart?: (messageId: string) => void;
+    onToolStarted?: (tool: string, label: string) => void;
+    onToolFinished?: (tool: string, label: string) => void;
+    onSources?: (sources: ChatSourceRef[]) => void;
+    onDone?: (messageId: string, title: string) => void;
+}
+
+/** Sends one chat turn and streams the assistant's reply through the chat v2 SSE vocabulary. */
+export async function sendChatMessage(
+    sessionId: string,
+    payload: ChatSendMessagePayload,
+    handlers: ChatStreamHandlers,
+    options: { signal?: AbortSignal } = {},
+): Promise<void> {
+    let finished = false;
+    await consumeSseStream(
+        `/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+        payload,
+        (block) => {
+            const event = parseChatEventBlock(block);
+            if (!event) return;
+            if (event.type === "message_start") handlers.onMessageStart?.(event.message_id);
+            else if (event.type === "text_delta") handlers.onDelta(event.text);
+            else if (event.type === "tool_started") handlers.onToolStarted?.(event.tool, event.label);
+            else if (event.type === "tool_finished") handlers.onToolFinished?.(event.tool, event.label);
+            else if (event.type === "sources") handlers.onSources?.(event.sources);
+            else if (event.type === "done") {
+                finished = true;
+                handlers.onDone?.(event.message_id, event.title);
+            } else {
+                throw new ApiError(503, event.message, { code: event.code });
+            }
+        },
+        () => finished,
+        options,
+    );
 }
 
 export async function createSlideJob(
