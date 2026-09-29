@@ -1,7 +1,7 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { RunDetail } from "../components/dev/agent/RunDetail";
-import type { AgentRunSnapshot } from "../lib/api";
+import type { AgentRunSnapshot } from "../lib/api/agents";
 
 const snapshot: AgentRunSnapshot = {
     run_id: "run-1",

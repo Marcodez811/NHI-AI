@@ -1,4 +1,4 @@
-import type { AgentJobPhase } from "../api/types";
+import type { AgentJobPhase } from "../api/agents";
 
 const VALID_PHASES: readonly AgentJobPhase[] = [
     "queued",

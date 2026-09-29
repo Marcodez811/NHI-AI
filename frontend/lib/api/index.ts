@@ -1,0 +1,8 @@
+/** Public surface of the API layer; import from a specific module where possible. */
+export { ApiError, getApiErrorMessage } from "./client";
+export * from "./agents";
+export * from "./chat";
+export * from "./documents";
+export * from "./retrieval";
+export * from "./settings";
+export * from "./slides";

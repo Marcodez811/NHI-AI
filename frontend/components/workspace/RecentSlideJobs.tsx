@@ -5,7 +5,8 @@ import Link from "next/link";
 import { ArrowUpRight, CircleAlert } from "lucide-react";
 
 import { listSlideJobs } from "../../lib/api/slides";
-import type { AgentJobPhase, SlideJobSummary } from "../../lib/api/slides";
+import type { AgentJobPhase } from "../../lib/api/agents";
+import type { SlideJobSummary } from "../../lib/api/slides";
 import { formatDateTime } from "./WorkspaceViewUtils";
 
 const PHASE_LABELS: Record<AgentJobPhase, string> = {

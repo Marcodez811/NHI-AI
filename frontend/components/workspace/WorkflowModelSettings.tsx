@@ -3,14 +3,14 @@
 import { useEffect, useState } from "react";
 import {
     fetchAgentSettings,
-    ApiError,
     updateAgentStageSettings,
     type AgentReasoningEffort,
     type AgentSettingStage,
     type AgentSettingsResponse,
     type AgentSettingWorkflow,
     type StoredAgentStageSettings,
-} from "../../lib/api";
+} from "../../lib/api/settings";
+import { ApiError } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 

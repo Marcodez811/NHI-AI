@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentJobPhase } from "../api/types";
+import type { AgentJobPhase } from "../api/agents";
 import { ApiError } from "../api/client";
 import { asApiError } from "../api-error";
 import {

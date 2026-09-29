@@ -1,4 +1,4 @@
-import type { DocumentRead } from "../../lib/api/slides";
+import type { DocumentRead } from "../../lib/api/documents";
 import { SUPPORTED_SLIDE_EXTENSIONS } from "../../lib/api/slides";
 import type { AgentJobClientPhase } from "../../lib/hooks/useAgentJob";
 import { extensionOf } from "./WorkspaceViewUtils";

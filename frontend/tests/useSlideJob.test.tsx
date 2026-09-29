@@ -1,15 +1,12 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import {
-    ApiError,
-    type CreateSlidePayload,
-    type SlideJob,
-} from "../lib/api";
-import * as api from "../lib/api";
+import { ApiError } from "../lib/api/client";
+import type { CreateSlidePayload, SlideJob } from "../lib/api/slides";
+import * as api from "../lib/api/slides";
 import { useSlideJob } from "../lib/hooks/useSlideJob";
 
-vi.mock("../lib/api", async () => {
-    const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+vi.mock("../lib/api/slides", async () => {
+    const actual = await vi.importActual<typeof import("../lib/api/slides")>("../lib/api/slides");
     return {
         ...actual,
         createSlideJob: vi.fn(),

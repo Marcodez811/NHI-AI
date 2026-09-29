@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchRetrievalStatus, type RetrievalStatus } from "../lib/api";
+import type { RetrievalStatus } from "../lib/api/retrieval";
 import { useRetrievalStatus } from "../lib/hooks/useRetrievalStatus";
 
 vi.mock("../lib/api/retrieval", () => ({
@@ -33,6 +33,9 @@ describe("API error contracts", () => {
         );
         vi.stubGlobal("fetch", fetchMock);
 
+        const { fetchRetrievalStatus } = await vi.importActual<typeof import("../lib/api/retrieval")>(
+            "../lib/api/retrieval",
+        );
         await expect(fetchRetrievalStatus()).resolves.toEqual(payload);
         expect(fetchMock).toHaveBeenCalledWith(
             "/api/v1/retrieval/status",

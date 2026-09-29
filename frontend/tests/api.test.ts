@@ -1,12 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-    ApiError,
-    deleteFolder,
-    fetchDocumentList,
-    getApiErrorMessage,
-    parseSseEventBlock,
-    streamSlideJobOutlineMessage,
-} from "../lib/api";
+import { ApiError, getApiErrorMessage } from "../lib/api/client";
+import { deleteFolder, fetchDocumentList } from "../lib/api/documents";
+import { parseSseEventBlock, streamSlideJobOutlineMessage } from "../lib/api/slides";
 
 describe("API error contracts", () => {
     it("extracts string, object, and FastAPI validation details", () => {
@@ -67,7 +62,7 @@ describe("API error contracts", () => {
 });
 
 // The planner (slides outline chat) shares the legacy retrieval-chat SSE vocabulary and the
-// generic framing engine in lib/api.ts (`consumeSseStream`). These cases exercise that shared
+// generic framing engine in lib/api/sse.ts (`consumeSseStream`). These cases exercise that shared
 // engine through the one legacy caller still in use; the chat v2 vocabulary has its own tests
 // in tests/chatStreamApi.test.ts.
 describe("SSE contract (shared legacy framing engine)", () => {

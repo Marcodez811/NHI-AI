@@ -2,7 +2,8 @@
 
 import { CheckCircle2, CircleAlert, Sparkles } from "lucide-react";
 
-import type { AgentJobPhase, SlideJob } from "../../lib/api/slides";
+import type { AgentJobPhase } from "../../lib/api/agents";
+import type { SlideJob } from "../../lib/api/slides";
 import type { AgentJobClientPhase } from "../../lib/hooks/useAgentJob";
 import { Button } from "../ui/button";
 import { AgentJobActivity } from "./AgentJobActivity";

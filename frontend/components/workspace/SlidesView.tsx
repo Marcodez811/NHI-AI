@@ -15,16 +15,10 @@ import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import type { AgentJobClientPhase } from "../../lib/hooks/useAgentJob";
-import type {
-    AgentJobPhase,
-    DocumentRead,
-    SlideJob,
-    SlideJobSummary,
-} from "../../lib/api/slides";
-import {
-    MAX_DOCUMENTS,
-    slideDownloadUrl,
-} from "../../lib/api/slides";
+import type { AgentJobPhase } from "../../lib/api/agents";
+import { MAX_DOCUMENTS, type DocumentRead } from "../../lib/api/documents";
+import type { SlideJob, SlideJobSummary } from "../../lib/api/slides";
+import { slideDownloadUrl } from "../../lib/api/slides";
 import type { Tone } from "../../lib/workspace/types";
 import {
     documentDisplayName,

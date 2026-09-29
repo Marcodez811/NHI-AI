@@ -1,6 +1,6 @@
 "use client";
 
-import { createNewsJob, getNewsJob, type CreateNewsJobResponse, type CreateNewsPayload, type NewsJob } from "../api";
+import { createNewsJob, getNewsJob, type CreateNewsJobResponse, type CreateNewsPayload, type NewsJob } from "../api/slides";
 import { useAgentJob } from "./useAgentJob";
 
 export function useNewsJob() {

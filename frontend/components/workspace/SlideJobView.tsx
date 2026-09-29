@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { CircleAlert, LoaderCircle } from "lucide-react";
 
-import type { DocumentRead } from "../../lib/api/slides";
+import type { DocumentRead } from "../../lib/api/documents";
 import { slideDownloadUrl } from "../../lib/api/slides";
 import { useSlideJob } from "../../lib/hooks/useSlideJob";
 import { Button, buttonVariants } from "../ui/button";

@@ -8,7 +8,7 @@ import {
     RefreshCw,
 } from "lucide-react";
 import { Button } from "../ui/button";
-import type { AgentJobPhase } from "../../lib/api/slides";
+import type { AgentJobPhase } from "../../lib/api/agents";
 import type {
     AgentJobClientPhase,
     AgentJobRecord,

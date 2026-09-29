@@ -2,7 +2,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DocumentRead } from "../lib/api";
+import type { DocumentRead } from "../lib/api/documents";
 import type { SlideJobSummary } from "../lib/api/slides";
 import { listSlideJobs } from "../lib/api/slides";
 import { SlidesView } from "../components/workspace/SlidesView";

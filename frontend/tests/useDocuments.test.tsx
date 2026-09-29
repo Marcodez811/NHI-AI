@@ -1,15 +1,12 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-    ApiError,
-    type DocumentRead,
-    type FolderRead,
-} from "../lib/api";
-import * as api from "../lib/api";
+import { ApiError } from "../lib/api/client";
+import type { DocumentRead, FolderRead } from "../lib/api/documents";
+import * as api from "../lib/api/documents";
 import { useDocuments } from "../lib/hooks/useDocuments";
 
-vi.mock("../lib/api", async () => {
-    const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+vi.mock("../lib/api/documents", async () => {
+    const actual = await vi.importActual<typeof import("../lib/api/documents")>("../lib/api/documents");
     return {
         ...actual,
         fetchDocuments: vi.fn(),

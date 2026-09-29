@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { analyzeSlideReadiness } from "../components/workspace/slide-readiness";
-import type { DocumentRead } from "../lib/api";
+import type { DocumentRead } from "../lib/api/documents";
 
 const document = (overrides: Partial<DocumentRead> = {}): DocumentRead => ({
     id: "doc-1",

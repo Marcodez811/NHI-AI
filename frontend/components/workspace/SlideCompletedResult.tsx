@@ -2,7 +2,8 @@
 
 import { CheckCircle2, Download } from "lucide-react";
 
-import type { DocumentRead, SlideJob } from "../../lib/api/slides";
+import type { DocumentRead } from "../../lib/api/documents";
+import type { SlideJob } from "../../lib/api/slides";
 import { Button } from "../ui/button";
 import { documentDisplayName, formatDateTime } from "./WorkspaceViewUtils";
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AgentEvent, AgentNodeSnapshot } from "../lib/api";
+import type { AgentEvent, AgentNodeSnapshot } from "../lib/api/agents";
 import { deriveAgentAttempts } from "../components/dev/agent/attempts";
 import { nodeLabel } from "../components/dev/agent/format";
 

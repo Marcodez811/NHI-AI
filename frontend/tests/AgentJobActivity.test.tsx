@@ -1,7 +1,7 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentJobActivity } from "../components/workspace/AgentJobActivity";
-import type { SlideJob } from "../lib/api";
+import type { SlideJob } from "../lib/api/slides";
 
 const RAW_BACKEND_MESSAGE = "Codex completed a workflow work step";
 

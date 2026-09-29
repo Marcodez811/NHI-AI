@@ -1,15 +1,12 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-    ApiError,
-    type AgentEvent,
-    type AgentRunSnapshot,
-} from "../lib/api";
-import * as api from "../lib/api";
+import { ApiError } from "../lib/api/client";
+import type { AgentEvent, AgentRunSnapshot } from "../lib/api/agents";
+import * as api from "../lib/api/agents";
 import { useAgentDevRuns } from "../lib/hooks/useAgentDevRuns";
 
-vi.mock("../lib/api", async () => {
-    const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+vi.mock("../lib/api/agents", async () => {
+    const actual = await vi.importActual<typeof import("../lib/api/agents")>("../lib/api/agents");
     return {
         ...actual,
         fetchAgentRuns: vi.fn(),

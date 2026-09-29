@@ -7,8 +7,8 @@ const api = vi.hoisted(() => ({
     update: vi.fn(),
 }));
 
-vi.mock("../lib/api", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("../lib/api")>();
+vi.mock("../lib/api/settings", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("../lib/api/settings")>();
     return {
         ...actual,
         fetchAgentSettings: api.fetch,
