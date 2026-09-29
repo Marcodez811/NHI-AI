@@ -95,16 +95,16 @@ export function ChatMessageList({ messages, compactedThroughMessageId }: {
     compactedThroughMessageId?: string | null;
 }) {
     return (
-        <div className="flex w-full min-w-0 flex-col gap-7">
+        <div className="flex w-full min-w-0 flex-col gap-10">
             {messages.map((message) => (
                 <Fragment key={message.localKey}>
                     <div className={`chat-arrival flex min-w-0 ${message.role === "user" ? "justify-end" : "justify-start"}`}>
                         {message.role === "user" ? (
-                            <div className="min-w-0 max-w-[85%] rounded-2xl bg-primary px-4 py-2.5 text-sm leading-7 text-primary-foreground sm:max-w-[72%]">
+                            <div className="min-w-0 max-w-[85%] rounded-3xl bg-primary/10 px-4 py-2.5 text-base leading-relaxed text-foreground sm:max-w-[70%]">
                                 <div className="whitespace-pre-wrap break-words">{message.content}</div>
                             </div>
                         ) : (
-                            <div className="w-full min-w-0 text-sm leading-7 text-foreground">
+                            <div className="w-full min-w-0 text-base leading-relaxed text-foreground">
                                 {message.compacting && (
                                     <div role="status" className="mb-3 text-xs text-muted-foreground chat-shimmer">整理先前對話中…</div>
                                 )}

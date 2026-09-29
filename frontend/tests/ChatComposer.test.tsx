@@ -98,4 +98,27 @@ describe("ChatComposer", () => {
 
         expect(screen.queryByText("附件僅供此對話使用，不會加入知識庫。")).not.toBeInTheDocument();
     });
+
+    it("offers a plus attach button that explains attachments stay out of the knowledge base", () => {
+        renderComposer();
+        expect(screen.getByRole("button", { name: "附加檔案" })).toHaveAttribute(
+            "title",
+            "附件僅供此對話使用，不會加入知識庫",
+        );
+    });
+
+    it("puts the model picker in the right-hand group, before the send button", () => {
+        renderComposer();
+
+        const sendButton = screen.getByRole("button", { name: "送出" });
+        const group = sendButton.closest('[data-slot="chat-composer-send-group"]');
+        expect(group).not.toBeNull();
+
+        const picker = screen.getByRole("button", { name: "選擇模型" });
+        expect(group).toContainElement(picker);
+
+        // DOM order: the picker comes before the send button within that group.
+        const position = picker.compareDocumentPosition(sendButton);
+        expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
 });

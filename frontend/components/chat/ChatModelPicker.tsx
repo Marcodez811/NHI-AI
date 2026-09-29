@@ -1,13 +1,16 @@
 "use client";
 
+import { ChevronDown } from "lucide-react";
 import type { ChatModelOption } from "../../lib/api/chat";
+import { ProviderIcon } from "./ProviderIcon";
 import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from "../ui/select";
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuLabel,
+    DropdownMenuRadioGroup,
+    DropdownMenuRadioItem,
+    DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 
 /** Model picker for the chat box; unavailable models stay visible but disabled. */
 export function ChatModelPicker({
@@ -23,31 +26,40 @@ export function ChatModelPicker({
 }) {
     const selected = models.find((model) => model.id === value);
     return (
-        <Select
-            items={models.map((model) => ({ value: model.id, label: model.label }))}
-            value={value ?? ""}
-            onValueChange={(next) => {
-                if (next) onValueChange(next);
-            }}
-            disabled={disabled || !models.length}
-        >
-            <SelectTrigger
-                size="sm"
+        <DropdownMenu>
+            <DropdownMenuTrigger
                 aria-label="選擇模型"
-                className="max-w-[11rem] gap-1 border-transparent bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-muted hover:text-foreground dark:bg-transparent dark:hover:bg-muted/50"
+                disabled={disabled || !models.length}
+                className="inline-flex h-8 max-w-[12rem] items-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-popup-open:bg-muted data-popup-open:text-foreground dark:hover:bg-muted/50"
             >
-                <SelectValue>{selected?.label ?? "選擇模型"}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-                {models.map((model) => (
-                    <SelectItem key={model.id} value={model.id} disabled={!model.available}>
-                        {model.label}
-                        {!model.available && (
-                            <span className="text-muted-foreground">（未設定金鑰）</span>
-                        )}
-                    </SelectItem>
-                ))}
-            </SelectContent>
-        </Select>
+                {selected && <ProviderIcon provider={selected.provider} disabled={!selected.available} />}
+                <span className="truncate">{selected?.label ?? "選擇模型"}</span>
+                <ChevronDown className="size-3.5 shrink-0 opacity-60" aria-hidden="true" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" side="top" sideOffset={8} className="w-60">
+                <DropdownMenuRadioGroup
+                    value={value ?? ""}
+                    onValueChange={(next) => {
+                        if (next) onValueChange(String(next));
+                    }}
+                >
+                    <DropdownMenuLabel>選擇模型</DropdownMenuLabel>
+                    {models.map((model) => (
+                        <DropdownMenuRadioItem
+                            key={model.id}
+                            value={model.id}
+                            disabled={!model.available}
+                            className="gap-2"
+                        >
+                            <ProviderIcon provider={model.provider} disabled={!model.available} />
+                            <span className="truncate">{model.label}</span>
+                            {!model.available && (
+                                <span className="ml-auto pr-5 text-xs text-muted-foreground">未設定金鑰</span>
+                            )}
+                        </DropdownMenuRadioItem>
+                    ))}
+                </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+        </DropdownMenu>
     );
 }

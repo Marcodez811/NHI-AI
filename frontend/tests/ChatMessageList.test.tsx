@@ -10,8 +10,22 @@ function assistant(overrides: Partial<ChatTurn> = {}): ChatTurn {
     };
 }
 
+function user(overrides: Partial<ChatTurn> = {}): ChatTurn {
+    return {
+        id: "user-id", localKey: "user-local", role: "user", content: "你好",
+        status: "complete", created_at: "2026-09-29T00:00:00Z", ...overrides,
+    };
+}
+
 describe("ChatMessageList", () => {
     afterEach(() => cleanup());
+
+    it("renders the user bubble as a light, neutral tint rather than the solid primary color", () => {
+        render(<ChatMessageList messages={[user()]} />);
+        const bubble = screen.getByText("你好").parentElement!;
+        expect(bubble.className).not.toMatch(/(^|\s)bg-primary(?!\/)/);
+        expect(bubble.className).not.toMatch(/text-primary-foreground/);
+    });
 
     it("shows thinking before the reply, compaction while summarizing, then a live answer caret", () => {
         const view = render(<ChatMessageList messages={[assistant({ pending: true })]} />);

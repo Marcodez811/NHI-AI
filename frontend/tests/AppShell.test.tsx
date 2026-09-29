@@ -39,4 +39,18 @@ describe("AppShell sidebar preference", () => {
             expect(screen.getByRole("button", { name: "收合側邊欄" })).toBeInTheDocument(),
         );
     });
+
+    it("shows a 最近對話 section and no separate 對話 nav item", async () => {
+        render(<AppShell><div>內容</div></AppShell>);
+        await waitFor(() =>
+            expect(screen.getByRole("button", { name: "收合側邊欄" })).toBeInTheDocument(),
+        );
+
+        expect(screen.getByText("最近對話")).toBeInTheDocument();
+        expect(screen.queryByRole("link", { name: "對話" })).not.toBeInTheDocument();
+
+        // /chat is still reachable through 新對話, which replaces the old entry.
+        const newChatLinks = screen.getAllByRole("link", { name: "新對話" });
+        expect(newChatLinks.some((link) => link.getAttribute("href") === "/chat")).toBe(true);
+    });
 });

@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { useChatSessions } from "@/lib/hooks/useChatSessions"
 
-/** The recent-conversation list nested under the sidebar's 「對話」 entry. */
+/** The recent-conversation list shown under the sidebar's 「最近對話」 section header. */
 export function ChatSidebarSessions() {
   const pathname = usePathname() ?? ""
   const { sessions, rename, remove } = useChatSessions()
@@ -60,10 +60,10 @@ export function ChatSidebarSessions() {
               href={href}
               aria-current={current ? "page" : undefined}
               className={cn(
-                "flex h-8 min-w-0 flex-1 items-center rounded-md px-3 text-sm transition-colors",
+                "flex h-8 min-w-0 flex-1 items-center rounded-lg px-3 text-sm transition-colors",
                 current
-                  ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
-                  : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                  ? "bg-accent text-foreground"
+                  : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
               )}
             >
               <span className="truncate">{session.title}</span>

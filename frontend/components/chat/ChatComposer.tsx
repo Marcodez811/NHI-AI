@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import type { ClipboardEvent, DragEvent } from "react";
-import { ArrowUp, Paperclip, Square } from "lucide-react";
+import { ArrowUp, Plus, Square } from "lucide-react";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
@@ -63,7 +63,7 @@ export function ChatComposer({
     return (
         <div
             data-slot="chat-composer"
-            className={`flex flex-col gap-2 rounded-3xl border bg-card px-3 pb-3 pt-4 shadow-sm transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 ${dragActive ? "border-primary bg-primary/5" : "border-border"}`}
+            className={`flex flex-col gap-2 rounded-3xl border bg-card px-3 pb-2.5 pt-3 shadow-sm transition-colors focus-within:border-ring/50 ${dragActive ? "border-primary bg-primary/5" : "border-border/60"}`}
             onDragOver={(event) => {
                 event.preventDefault();
                 setDragActive(true);
@@ -97,7 +97,7 @@ export function ChatComposer({
                 // The outer container owns the border and focus ring. Clear every
                 // textarea style that would draw a second box inside it,
                 // including the global focus ring offset from globals.css.
-                className="min-h-[4.5rem] max-h-64 w-full resize-none overflow-y-auto rounded-none border-0 bg-transparent px-1.5 py-0 text-sm shadow-none outline-none focus-visible:border-0 focus-visible:ring-0 focus-visible:ring-offset-0 dark:bg-transparent"
+                className="min-h-[1.75rem] max-h-64 w-full resize-none overflow-y-auto rounded-none border-0 bg-transparent px-1.5 py-0 text-base leading-7 shadow-none outline-none focus-visible:border-0 focus-visible:ring-0 focus-visible:ring-offset-0 dark:bg-transparent"
             />
             <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-1">
@@ -109,7 +109,7 @@ export function ChatComposer({
                         aria-label="附加檔案"
                         title={ATTACHMENT_HINT}
                     >
-                        <Paperclip size={16} />
+                        <Plus size={16} />
                     </Button>
                     <input
                         ref={fileInputRef}
@@ -123,19 +123,21 @@ export function ChatComposer({
                             event.target.value = "";
                         }}
                     />
-                    <ChatModelPicker models={models} value={model} onValueChange={setModel} disabled={modelsLoading} />
                 </div>
-                <Button
-                    type="button"
-                    onClick={busy ? onStop : onSend}
-                    disabled={!busy && sendBlocked}
-                    variant="default"
-                    size="icon"
-                    className="rounded-full"
-                    aria-label={busy ? "停止" : "送出"}
-                >
-                    {busy ? <Square size={14} /> : <ArrowUp size={16} />}
-                </Button>
+                <div data-slot="chat-composer-send-group" className="flex shrink-0 items-center gap-1.5">
+                    <ChatModelPicker models={models} value={model} onValueChange={setModel} disabled={modelsLoading} />
+                    <Button
+                        type="button"
+                        onClick={busy ? onStop : onSend}
+                        disabled={!busy && sendBlocked}
+                        variant="default"
+                        size="icon"
+                        className="rounded-full"
+                        aria-label={busy ? "停止" : "送出"}
+                    >
+                        {busy ? <Square size={14} /> : <ArrowUp size={16} />}
+                    </Button>
+                </div>
             </div>
         </div>
     );
