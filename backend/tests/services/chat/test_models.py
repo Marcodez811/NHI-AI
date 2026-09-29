@@ -1,4 +1,5 @@
-from pydantic import SecretStr
+import pytest
+from pydantic import SecretStr, ValidationError
 
 from app.config import Settings
 from app.services.chat.models import default_model_id, find_available_model, list_models
@@ -39,8 +40,21 @@ def test_blank_secret_is_treated_as_not_configured():
 
 def test_chat_model_options_overrides_the_default_catalog():
     settings = _settings(chat_model_options="gpt-6-luna, litellm/gemini/gemini-3.8-flash")
-    ids = [model.id for model in list_models(settings)]
-    assert ids == ["gpt-6-luna", "litellm/gemini/gemini-3.8-flash"]
+    models = list_models(settings)
+    assert [model.id for model in models] == ["gpt-6-luna", "litellm/gemini/gemini-3.8-flash"]
+    assert all(model.context_window == 128_000 for model in models)
+
+
+def test_all_default_models_have_a_conservative_context_window():
+    assert all(model.context_window == 128_000 for model in list_models(_settings()))
+
+
+def test_compaction_threshold_accepts_a_fraction_of_context_only():
+    assert _settings().chat_compaction_threshold == 0.6
+    assert _settings(chat_compaction_threshold=0.75).chat_compaction_threshold == 0.75
+    for threshold in (0, -0.1, 1, 1.1):
+        with pytest.raises(ValidationError):
+            _settings(chat_compaction_threshold=threshold)
 
 
 def test_default_model_id_falls_back_to_agent_default_model():

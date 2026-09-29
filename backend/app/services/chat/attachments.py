@@ -169,6 +169,40 @@ class ChatAttachmentStorage:
         end = total if max_chars is None else min(total, start + max_chars)
         return full_text[start:end], total
 
+    async def delete_attachment(self, session_id: UUID, storage_key: str) -> None:
+        """Remove one session's saved attachment and any extracted-text sidecar."""
+
+        key = Path(storage_key)
+        if len(key.parts) != 2 or key.parts[0] != str(session_id):
+            raise AttachmentError("附件儲存位置無效。")
+        filename = key.parts[1]
+        if filename in (".", "..") or key.suffix not in DOCUMENT_EXTENSIONS | {".png", ".jpg", ".jpeg"}:
+            raise AttachmentError("附件儲存位置無效。")
+        try:
+            attachment_id = UUID(key.stem)
+        except ValueError as exc:
+            raise AttachmentError("附件儲存位置無效。") from exc
+        if str(attachment_id) != key.stem:
+            raise AttachmentError("附件儲存位置無效。")
+
+        directory = self._root() / str(session_id)
+        if directory.is_symlink():
+            raise AttachmentError("附件儲存空間目前無法使用。")
+        if not directory.exists():
+            return
+        if not directory.is_dir():
+            raise AttachmentError("附件儲存空間目前無法使用。")
+        content_path = directory / filename
+
+        def _delete() -> None:
+            content_path.unlink(missing_ok=True)
+            self.text_path(content_path).unlink(missing_ok=True)
+
+        try:
+            await asyncio.to_thread(_delete)
+        except OSError as exc:
+            raise AttachmentError("附件無法刪除，請稍後再試。") from exc
+
     async def delete_session(self, session_id: UUID) -> None:
         root = self._root()
         directory = root / str(session_id)

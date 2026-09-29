@@ -16,6 +16,18 @@ describe("chat v2 SSE event parser", () => {
         });
     });
 
+    it("parses reasoning and compaction events", () => {
+        expect(parseChatEventBlock('data: {"type":"reasoning_delta","text":"先核對資料"}')).toEqual({
+            type: "reasoning_delta", text: "先核對資料",
+        });
+        expect(parseChatEventBlock('data: {"type":"compacting"}')).toEqual({ type: "compacting" });
+        expect(parseChatEventBlock('data: {"type":"compacted","ok":true}')).toEqual({ type: "compacted", ok: true });
+        expect(parseChatEventBlock('data: {"type":"compacted","ok":false}')).toEqual({ type: "compacted", ok: false });
+        expect(() => parseChatEventBlock('data: {"type":"compacted","ok":"false"}')).toThrowError(
+            expect.objectContaining({ code: "chat_stream_invalid" }),
+        );
+    });
+
     it("parses tool_started and tool_finished", () => {
         expect(
             parseChatEventBlock(
@@ -52,6 +64,7 @@ describe("chat v2 SSE event parser", () => {
     it("ignores heartbeats and other unrecognized events", () => {
         expect(parseChatEventBlock(": heartbeat")).toBeNull();
         expect(parseChatEventBlock('data: {"type":"heartbeat"}')).toBeNull();
+        expect(parseChatEventBlock('data: {"type":"future_event","payload":42}')).toBeNull();
         expect(parseChatEventBlock("")).toBeNull();
     });
 
@@ -78,6 +91,10 @@ describe("sendChatMessage", () => {
     it("dispatches every event type in order and resolves once done arrives", async () => {
         const events = [
             { type: "message_start", message_id: "m1" },
+            { type: "compacting" },
+            { type: "compacted", ok: false },
+            { type: "reasoning_delta", text: "先核對資料" },
+            { type: "future_event" },
             { type: "tool_started", tool: "search_knowledge_base", label: "搜尋知識庫：健保藥費" },
             { type: "text_delta", text: "健保" },
             { type: "text_delta", text: "藥費" },
@@ -92,6 +109,9 @@ describe("sendChatMessage", () => {
         const calls: string[] = [];
         const handlers = {
             onMessageStart: vi.fn((id: string) => calls.push(`start:${id}`)),
+            onCompacting: vi.fn(() => calls.push("compacting")),
+            onCompacted: vi.fn((ok: boolean) => calls.push(`compacted:${ok}`)),
+            onReasoningDelta: vi.fn((text: string) => calls.push(`reasoning:${text}`)),
             onDelta: vi.fn((text: string) => calls.push(`delta:${text}`)),
             onToolStarted: vi.fn((tool: string) => calls.push(`tool_started:${tool}`)),
             onToolFinished: vi.fn((tool: string) => calls.push(`tool_finished:${tool}`)),
@@ -107,6 +127,9 @@ describe("sendChatMessage", () => {
 
         expect(calls).toEqual([
             "start:m1",
+            "compacting",
+            "compacted:false",
+            "reasoning:先核對資料",
             "tool_started:search_knowledge_base",
             "delta:健保",
             "delta:藥費",

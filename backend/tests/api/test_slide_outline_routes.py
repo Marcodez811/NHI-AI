@@ -358,6 +358,33 @@ async def test_outline_message_stream_forbids_proxy_buffering():
 
 
 @pytest.mark.asyncio
+async def test_outline_message_disconnect_closes_planner_stream():
+    outline_repository = InMemorySlideOutlineRepository()
+    job_id = uuid4()
+    await outline_repository.create_next_revision(job_id, _outline(), session_id="session-1")
+    closed = []
+
+    class PausedPlanner:
+        async def continue_conversation(self, **kwargs):
+            try:
+                yield 'data: {"type":"status","phase":"planning"}\n\n'
+            finally:
+                closed.append(True)
+
+    response = await send_slide_job_outline_message(
+        job_id,
+        OutlineMessageRequest(message="Adjust the outline."),
+        outline_repository,
+        PausedPlanner(),
+    )
+    assert '"type":"status"' in await response.body_iterator.__anext__()
+
+    await response.body_iterator.aclose()
+
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
 async def test_send_outline_message_404_when_no_outline_exists():
     with pytest.raises(HTTPException) as caught:
         await send_slide_job_outline_message(

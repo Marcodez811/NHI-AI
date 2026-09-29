@@ -19,9 +19,15 @@ from app.models.chat import (
 from app.models.documents import Document, DocumentCategory, DocumentStatus
 from app.services.chat.attachments import ChatAttachmentStorage
 from app.services.chat.engine import (
+    BASE_INSTRUCTIONS,
+    EXPIRED_ATTACHMENT_NOTE,
+    TURN_CONTEXT_CLOSE,
+    TURN_CONTEXT_OPEN,
+    INLINE_USER_MESSAGE_WINDOW,
     READ_ATTACHMENT_TOOL_NAME,
     SEARCH_TOOL_NAME,
     AgentsSdkChatEngine,
+    _SafeStream,
     _message_to_input_item,
 )
 from app.services.documents.repository import InMemoryDocumentRepository
@@ -231,6 +237,27 @@ async def test_read_attachment_cannot_see_attachments_outside_the_session(tmp_pa
     assert "找不到" in output
 
 
+@pytest.mark.asyncio
+async def test_read_attachment_pdf_requests_a_new_name_mention_and_failed_pdf_is_unavailable(tmp_path):
+    storage = ChatAttachmentStorage(tmp_path)
+    attachment = ChatAttachment(
+        session_id=uuid4(), display_name="舊公文.pdf", mime_type="application/pdf",
+        kind=ChatAttachmentKind.DOCUMENT.value, size_bytes=1, storage_key="unused",
+        status=ChatAttachmentStatus.READY.value,
+    )
+    engine = _engine(document_repository=InMemoryDocumentRepository(), storage=storage)
+    tool = engine._read_attachment_tool({attachment.id: attachment}, {})
+    ctx = _tool_context(READ_ATTACHMENT_TOOL_NAME, {"name": attachment.display_name})
+    output = await tool.on_invoke_tool(ctx, json.dumps({"name": attachment.display_name}))
+    assert "新訊息提及附件名稱" in output
+    assert "已直接附" not in output
+
+    attachment.status = ChatAttachmentStatus.FAILED.value
+    failed_tool = engine._read_attachment_tool({attachment.id: attachment}, {})
+    failed = await failed_tool.on_invoke_tool(ctx, json.dumps({"name": attachment.display_name}))
+    assert failed == "這個附件目前無法讀取。"
+
+
 # ── History rebuild: only final text replayed, images re-attached ──────────
 
 
@@ -320,8 +347,10 @@ class FakeStreamResult:
 class FakeRunner:
     def __init__(self, events) -> None:
         self._events = events
+        self.calls = []
 
     def run_streamed(self, agent, input, **kwargs):
+        self.calls.append((agent, input))
         return FakeStreamResult(self._events)
 
 
@@ -377,3 +406,206 @@ async def test_run_turn_yields_an_error_event_when_the_model_run_fails(tmp_path)
 
     assert len(collected) == 1
     assert collected[0].type == "error"
+
+
+@pytest.mark.asyncio
+async def test_attachment_expires_after_three_user_messages_and_reopens_by_name_this_turn(tmp_path):
+    storage = ChatAttachmentStorage(tmp_path)
+    session_id, attachment_id = uuid4(), uuid4()
+    _, storage_key = await storage.save(session_id, attachment_id, ".pdf", b"%PDF-1.4 fake")
+    attachment = ChatAttachment(
+        id=attachment_id, session_id=session_id, display_name="公文.pdf",
+        mime_type="application/pdf", kind=ChatAttachmentKind.DOCUMENT.value,
+        size_bytes=13, storage_key=storage_key, status=ChatAttachmentStatus.READY.value,
+    )
+    first = ChatMessage(
+        session_id=session_id, role=ChatMessageRole.USER.value, content="請讀附件",
+        attachment_ids=[str(attachment_id)],
+    )
+    runner = FakeRunner([])
+    engine = AgentsSdkChatEngine(
+        document_repository=InMemoryDocumentRepository(),
+        vector_store_id_provider=lambda: None, attachment_storage=storage,
+        client=FakeOpenAIClient([]), runner_factory=runner,
+    )
+    history = [first]
+    for turn in range(1, INLINE_USER_MESSAGE_WINDOW + 1):
+        current = ChatMessage(
+            session_id=session_id, role=ChatMessageRole.USER.value, content=f"追問{turn}",
+        )
+        await anext(engine.run_turn(history=history, user_message=current, attachments=[attachment], model="gpt-6-luna"))
+        old_item = runner.calls[-1][1][0]
+        if turn < INLINE_USER_MESSAGE_WINDOW:
+            assert old_item["content"][1]["type"] == "input_file"
+        else:
+            placeholder = old_item["content"]
+            assert placeholder == (
+                "請讀附件" + EXPIRED_ATTACHMENT_NOTE.format(name="公文.pdf")
+            )
+        history.append(current)
+    mentioned = ChatMessage(
+        session_id=session_id, role=ChatMessageRole.USER.value, content="再看公文.pdf",
+    )
+    await anext(engine.run_turn(history=history, user_message=mentioned, attachments=[attachment], model="gpt-6-luna"))
+    assert runner.calls[-1][1][0]["content"] == placeholder
+    assert runner.calls[-1][1][-1]["content"][1]["type"] == "input_file"
+    assert all(tool.name != "open_attachment" for tool in runner.calls[-1][0].tools)
+    # No reopening tool exists, so the placeholder must not point the model at one.
+    assert "open_attachment" not in EXPIRED_ATTACHMENT_NOTE
+    other_session = ChatMessage(session_id=uuid4(), role=ChatMessageRole.USER.value, content="公文.pdf")
+    await anext(engine.run_turn(history=[], user_message=other_session, attachments=[attachment], model="gpt-6-luna"))
+    last_content = runner.calls[-1][1][-1]["content"]
+    # A plain string means text only: nothing was inlined.
+    assert isinstance(last_content, str) or all(part["type"] != "input_file" for part in last_content)
+
+
+@pytest.mark.asyncio
+async def test_static_instructions_context_last_and_reasoning_summary_delta_only(tmp_path):
+    runner = FakeRunner([
+        RawResponsesStreamEvent(data=SimpleNamespace(
+            type="response.reasoning_summary_text.delta", delta="分析摘要",
+        )),
+        RawResponsesStreamEvent(data=SimpleNamespace(type="response.reasoning_text.delta", delta="私密思路")),
+    ])
+    engine = AgentsSdkChatEngine(
+        document_repository=InMemoryDocumentRepository(),
+        vector_store_id_provider=lambda: None, attachment_storage=ChatAttachmentStorage(tmp_path),
+        client=FakeOpenAIClient([]), runner_factory=runner,
+    )
+    old = ChatMessage(session_id=uuid4(), role=ChatMessageRole.ASSISTANT.value, content="前文")
+    current = ChatMessage(session_id=old.session_id, role=ChatMessageRole.USER.value, content="續問")
+    result = [
+        event async for event in engine.run_turn(
+            history=[old], user_message=current, attachments=[], model="gpt-6-luna", summary="既有摘要",
+        )
+    ]
+    assert [event.data["text"] for event in result if event.type == "reasoning_delta"] == ["分析摘要"]
+    agent, items = runner.calls[0]
+    assert agent.instructions == BASE_INSTRUCTIONS
+    assert agent.model_settings.reasoning.summary == "auto"
+    assert items[0] == {"role": "assistant", "content": "前文"}
+    assert items[-1]["content"] == [
+        {"type": "input_text", "text": "續問"},
+        {"type": "input_text", "text": f"{TURN_CONTEXT_OPEN}\n先前對話摘要：\n既有摘要\n{TURN_CONTEXT_CLOSE}"},
+    ]
+    other_session = ChatMessage(session_id=uuid4(), role=ChatMessageRole.USER.value, content="請問")
+    await anext(engine.run_turn(
+        history=[], user_message=other_session, attachments=[], model="gpt-4o",
+    ))
+    # Nothing to say: no context block, so the model can't mistake it for the user's words.
+    assert runner.calls[-1][1][-1]["content"] == "請問"
+    assert runner.calls[-1][0].instructions == BASE_INSTRUCTIONS
+    assert runner.calls[-1][0].model_settings.reasoning is None
+
+
+@pytest.mark.asyncio
+async def test_turn_context_describes_failed_attachments_without_inlining_them(tmp_path):
+    session_id = uuid4()
+    attachment = ChatAttachment(
+        session_id=session_id, display_name="失敗附件.pdf", mime_type="application/pdf",
+        kind=ChatAttachmentKind.DOCUMENT.value, size_bytes=1, storage_key="not-present",
+        status=ChatAttachmentStatus.FAILED.value,
+    )
+    runner = FakeRunner([])
+    engine = AgentsSdkChatEngine(
+        document_repository=InMemoryDocumentRepository(),
+        vector_store_id_provider=lambda: None, attachment_storage=ChatAttachmentStorage(tmp_path),
+        client=FakeOpenAIClient([]), runner_factory=runner,
+    )
+    message = ChatMessage(
+        session_id=session_id, role=ChatMessageRole.USER.value,
+        content="這份文件如何？", attachment_ids=[str(attachment.id)],
+    )
+    await anext(engine.run_turn(
+        history=[], user_message=message, attachments=[attachment], model="gpt-6-luna",
+    ))
+    parts = runner.calls[-1][1][-1]["content"]
+    assert parts == [
+        {"type": "input_text", "text": "這份文件如何？"},
+        {"type": "input_text", "text": f"{TURN_CONTEXT_OPEN}\n這個對話目前的附件：\n- 失敗附件.pdf（無法讀取；處理失敗）\n{TURN_CONTEXT_CLOSE}"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_summarize_uses_one_tool_free_call_with_previous_summary_and_visible_names(tmp_path):
+    class SummaryRunner:
+        def __init__(self):
+            self.calls = []
+
+        async def run(self, agent, input, **kwargs):
+            self.calls.append((agent, input))
+            return SimpleNamespace(final_output="摘要結果")
+
+    runner = SummaryRunner()
+    engine = AgentsSdkChatEngine(
+        document_repository=InMemoryDocumentRepository(),
+        vector_store_id_provider=lambda: None, attachment_storage=ChatAttachmentStorage(tmp_path),
+        client=FakeOpenAIClient([]), runner_factory=runner,
+    )
+    session_id, attachment_id = uuid4(), uuid4()
+    attachment = ChatAttachment(
+        id=attachment_id, session_id=session_id, display_name="圖表.pdf",
+        mime_type="application/pdf", kind=ChatAttachmentKind.DOCUMENT.value,
+        size_bytes=13, storage_key="hidden", status=ChatAttachmentStatus.READY.value,
+    )
+    message = ChatMessage(
+        session_id=session_id, role=ChatMessageRole.USER.value, content="規範是多少？",
+        attachment_ids=[str(attachment_id)],
+    )
+    assert await engine.summarize(
+        history=[message], previous_summary="先前決定", attachments=[attachment], model="gpt-6-luna",
+    ) == "摘要結果"
+    agent, prompt = runner.calls[0]
+    assert agent.tools == []
+    assert "先前決定" in prompt and "圖表.pdf" in prompt and "規範是多少？" in prompt
+    assert str(attachment_id) not in prompt and attachment.storage_key not in prompt
+
+
+@pytest.mark.asyncio
+async def test_split_internal_identifiers_never_reach_reasoning_or_answer(tmp_path):
+    session_id = uuid4()
+    unknown_id = str(uuid4())
+    user_message = ChatMessage(session_id=session_id, role=ChatMessageRole.USER.value, content="請回答")
+    identifier = str(session_id)
+    runner = FakeRunner([
+        RawResponsesStreamEvent(data=SimpleNamespace(
+            type="response.reasoning_summary_text.delta", delta=f"摘要 {identifier[:11]}",
+        )),
+        RawResponsesStreamEvent(data=SimpleNamespace(
+            type="response.reasoning_summary_text.delta", delta=f"{identifier[11:]} 與資料",
+        )),
+        RawResponsesStreamEvent(data=SimpleNamespace(
+            type="response.output_text.delta", delta="答案 file-6F2ksmvX",
+        )),
+        RawResponsesStreamEvent(data=SimpleNamespace(
+            type="response.output_text.delta", delta="xt4VdoqmHRw6kL 結束",
+        )),
+        RawResponsesStreamEvent(data=SimpleNamespace(
+            type="response.output_text.delta", delta=f" 未知 {unknown_id[:16]}",
+        )),
+        RawResponsesStreamEvent(data=SimpleNamespace(
+            type="response.output_text.delta", delta=unknown_id[16:] + " 收尾",
+        )),
+    ])
+    engine = AgentsSdkChatEngine(
+        document_repository=InMemoryDocumentRepository(),
+        vector_store_id_provider=lambda: None, attachment_storage=ChatAttachmentStorage(tmp_path),
+        client=FakeOpenAIClient([]), runner_factory=runner,
+    )
+    events = [
+        event async for event in engine.run_turn(
+            history=[], user_message=user_message, attachments=[], model="gpt-6-luna",
+        )
+    ]
+    reasoning = "".join(event.data["text"] for event in events if event.type == "reasoning_delta")
+    answer = "".join(event.data["text"] for event in events if event.type == "text_delta")
+    assert reasoning == "摘要 （內部資訊已略） 與資料"
+    assert answer == "答案 （內部資訊已略） 結束 未知 （內部資訊已略） 收尾"
+    assert identifier not in reasoning + answer and unknown_id not in answer
+
+
+def test_ordinary_words_that_look_like_id_prefixes_are_not_redacted():
+    stream = _SafeStream([], [])
+    text = "採用 file-based 儲存，比較 vs_old 方案"
+
+    assert stream.feed(text, final=True) == text

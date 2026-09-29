@@ -77,6 +77,12 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("CHAT_DEFAULT_MODEL"),
     )
+    chat_compaction_threshold: float = Field(
+        default=0.6,
+        gt=0,
+        lt=1,
+        validation_alias=AliasChoices("CHAT_COMPACTION_THRESHOLD"),
+    )
     openai_vector_store_id: str | None = None
     openai_vector_store_name: str = "NHI-AI Knowledge Base"
     openai_vector_store_bootstrap_timeout_seconds: float = Field(default=10.0, gt=0)

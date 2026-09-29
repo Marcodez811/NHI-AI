@@ -279,3 +279,38 @@ async def test_delete_session_removes_its_files(tmp_path):
 
     with pytest.raises(AttachmentError):
         storage.resolve(session_id, processed.storage_key)
+
+
+@pytest.mark.asyncio
+async def test_delete_attachment_removes_content_and_text_but_preserves_siblings(tmp_path):
+    storage = ChatAttachmentStorage(tmp_path)
+    session_id = uuid4()
+    removed = await process_upload(storage, session_id, uuid4(), FakeUpload("old.txt", b"old", "text/plain"))
+    kept = await process_upload(storage, session_id, uuid4(), FakeUpload("keep.txt", b"keep", "text/plain"))
+    removed_path = storage.resolve(session_id, removed.storage_key)
+    removed_text_path = storage.text_path(removed_path)
+    kept_path = storage.resolve(session_id, kept.storage_key)
+    assert removed_text_path.is_file()
+
+    await storage.delete_attachment(session_id, removed.storage_key)
+
+    assert not removed_path.exists()
+    assert not removed_text_path.exists()
+    assert kept_path.read_bytes() == b"keep"
+    assert storage.read_text(kept_path)[0] == "keep"
+
+
+@pytest.mark.asyncio
+async def test_delete_attachment_cannot_remove_another_sessions_file(tmp_path):
+    storage = ChatAttachmentStorage(tmp_path)
+    owner_id = uuid4()
+    processed = await process_upload(storage, owner_id, uuid4(), FakeUpload("private.txt", b"secret", "text/plain"))
+    owned_path = storage.resolve(owner_id, processed.storage_key)
+
+    with pytest.raises(AttachmentError):
+        await storage.delete_attachment(uuid4(), processed.storage_key)
+    with pytest.raises(AttachmentError):
+        await storage.delete_attachment(owner_id, f"{owner_id}/../{owned_path.name}")
+
+    assert owned_path.read_bytes() == b"secret"
+    assert storage.text_path(owned_path).is_file()

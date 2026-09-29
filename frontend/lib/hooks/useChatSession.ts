@@ -39,6 +39,12 @@ export type ChatTurn = ChatMessageRecord & {
     toolSteps?: ToolStep[];
     pending?: boolean;
     errorText?: string;
+    reasoningStartedAt?: number;
+    reasoningDurationSeconds?: number;
+    reasoningStreaming?: boolean;
+    answerStarted?: boolean;
+    compacting?: boolean;
+    receivedEvent?: boolean;
 };
 
 export type ComposerAttachment = {
@@ -79,6 +85,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
     const [loadError, setLoadError] = useState<string | null>(null);
     const [sendError, setSendError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    const [compactedThroughMessageId, setCompactedThroughMessageId] = useState<string | null>(null);
     const controllerRef = useRef<AbortController | null>(null);
     const activeSessionId = useRef<string | null>(sessionId);
     // Sessions created by `ensureSession` below, in this hook instance. When the
@@ -103,6 +110,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         }
         setMessages([]);
         setAttachments([]);
+        setCompactedThroughMessageId(null);
         setLoadError(null);
         if (!sessionId) {
             setLoading(false);
@@ -114,7 +122,13 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
             try {
                 const detail = await fetchChatSession(sessionId);
                 if (cancelled) return;
-                setMessages(detail.messages.map((message) => ({ ...message, localKey: message.id })));
+                setMessages(detail.messages.map((message) => ({
+                    ...message,
+                    localKey: message.id,
+                    reasoningStreaming: false,
+                    answerStarted: Boolean(message.content),
+                })));
+                setCompactedThroughMessageId(detail.compacted_through_message_id ?? null);
                 setModel(detail.model);
             } catch (caught) {
                 if (!cancelled) setLoadError(errorText(caught));
@@ -224,6 +238,14 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
             created_at: new Date().toISOString(),
             toolSteps: [],
             pending: true,
+            // Thinking starts when the message is sent, not when the first
+            // reasoning chunk arrives: summaries often land in one burst just
+            // before the answer, which would otherwise read as 0 seconds.
+            reasoningStartedAt: Date.now(),
+            reasoningStreaming: false,
+            answerStarted: false,
+            compacting: false,
+            receivedEvent: false,
         };
         setMessages((items) => [...items, userTurn, assistantTurn]);
 
@@ -232,32 +254,61 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         const updateAssistant = (update: (turn: ChatTurn) => ChatTurn) => {
             setMessages((items) => items.map((item) => (item.localKey === assistantLocalId ? update(item) : item)));
         };
+        const finishReasoning = (turn: ChatTurn): ChatTurn => ({
+            ...turn,
+            reasoningStreaming: false,
+            reasoningDurationSeconds: turn.reasoningStartedAt !== undefined && turn.reasoningDurationSeconds === undefined
+                ? Math.max(1, Math.round((Date.now() - turn.reasoningStartedAt) / 1000))
+                : turn.reasoningDurationSeconds,
+        });
 
         const controller = new AbortController();
         controllerRef.current = controller;
+        let compacted = false;
 
         try {
             await sendChatMessage(
                 targetId,
                 { content, attachment_ids: attachmentIds, model: model ?? "" },
                 {
-                    onMessageStart: (messageId) => updateAssistant((turn) => ({ ...turn, id: messageId })),
-                    onDelta: (text) => updateAssistant((turn) => ({ ...turn, content: turn.content + text })),
+                    onMessageStart: (messageId) => updateAssistant((turn) => ({ ...turn, id: messageId, receivedEvent: true })),
+                    onReasoningDelta: (text) => updateAssistant((turn) => ({
+                        ...turn,
+                        reasoning: (turn.reasoning ?? "") + text,
+                        reasoningStartedAt: turn.reasoningStartedAt ?? Date.now(),
+                        reasoningStreaming: !turn.answerStarted,
+                        receivedEvent: true,
+                    })),
+                    onCompacting: () => updateAssistant((turn) => ({ ...turn, compacting: true, receivedEvent: true })),
+                    onCompacted: (ok) => {
+                        compacted = ok;
+                        updateAssistant((turn) => ({ ...turn, compacting: false, receivedEvent: true }));
+                    },
+                    onDelta: (text) => updateAssistant((turn) => ({
+                        ...finishReasoning(turn),
+                        content: turn.content + text,
+                        answerStarted: true,
+                        receivedEvent: true,
+                    })),
                     onToolStarted: (tool, label) => updateAssistant((turn) => ({
                         ...turn,
+                        receivedEvent: true,
                         toolSteps: [...(turn.toolSteps ?? []), { tool, label, done: false }],
                     })),
                     onToolFinished: (tool, label) => updateAssistant((turn) => {
                         const steps = turn.toolSteps ?? [];
                         const index = steps.findIndex((step) => step.tool === tool && !step.done);
-                        if (index === -1) return { ...turn, toolSteps: [...steps, { tool, label, done: true }] };
+                        if (index === -1) return { ...turn, receivedEvent: true, toolSteps: [...steps, { tool, label, done: true }] };
                         const next = steps.slice();
                         next[index] = { ...next[index], label, done: true };
-                        return { ...turn, toolSteps: next };
+                        return { ...turn, receivedEvent: true, toolSteps: next };
                     }),
-                    onSources: (sources: ChatSourceRef[]) => updateAssistant((turn) => ({ ...turn, sources })),
+                    onSources: (sources: ChatSourceRef[]) => updateAssistant((turn) => ({ ...turn, sources, receivedEvent: true })),
                     onDone: (messageId, title) => {
-                        updateAssistant((turn) => ({ ...turn, id: messageId, pending: false, status: "complete" }));
+                        updateAssistant((turn) => ({
+                            ...finishReasoning(turn), id: messageId, pending: false,
+                            compacting: false, receivedEvent: true, status: "complete",
+                        }));
                         if (title) void sessionsCtx.refresh();
                     },
                 },
@@ -265,15 +316,36 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
             );
         } catch (caught) {
             if (controller.signal.aborted) {
-                updateAssistant((turn) => ({ ...turn, pending: false, status: "interrupted" }));
+                updateAssistant((turn) => ({
+                    ...finishReasoning(turn), pending: false, compacting: false, status: "interrupted",
+                }));
             } else {
                 const message = errorText(caught);
                 setSendError(message);
-                updateAssistant((turn) => ({ ...turn, pending: false, status: "error", errorText: message }));
+                updateAssistant((turn) => ({
+                    ...finishReasoning(turn), pending: false, compacting: false, status: "error", errorText: message,
+                }));
             }
         } finally {
             controllerRef.current = null;
             setBusy(false);
+        }
+        if (compacted) {
+            try {
+                const detail = await fetchChatSession(targetId);
+                if (activeSessionId.current === targetId) {
+                    setCompactedThroughMessageId(detail.compacted_through_message_id ?? null);
+                    // Earlier locally echoed user turns need their persisted ids so
+                    // the compaction divider can sit beside them without a reload.
+                    setMessages((items) => items.length === detail.messages.length
+                        && items.every((item, index) =>
+                            item.role === detail.messages[index].role && item.content === detail.messages[index].content)
+                        ? items.map((item, index) => ({ ...item, id: detail.messages[index].id }))
+                        : items);
+                }
+            } catch {
+                // The stream has finished; a failed marker refresh must not discard its answer.
+            }
         }
     }, [attachments, busy, draft, ensureSession, model, sessionsCtx, uploadsPending]);
 
@@ -284,6 +356,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
     return {
         sessionId: activeSessionId.current,
         messages,
+        compactedThroughMessageId,
         attachments,
         draft,
         setDraft,

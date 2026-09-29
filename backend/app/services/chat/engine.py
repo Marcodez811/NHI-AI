@@ -3,13 +3,13 @@
 ``ChatEngine`` is the seam the plan calls for
 (docs/9_29_chat_core_and_attachments_plan.md): routes and storage depend only
 on this interface so the harness can be swapped later. ``AgentsSdkChatEngine``
-is the only implementation, backed by ``Runner.run_streamed`` with two tools
+is backed by ``Runner.run_streamed`` with two tools
 (``search_knowledge_base``, ``read_attachment``). Model construction mirrors
 ``app.services.agentic.sdk_runner`` exactly and reuses its LiteLLM run-config
 helper rather than duplicating the key-wiring.
 
 Event vocabulary yielded by ``run_turn`` (in order, for one turn):
-``text_delta``* and ``tool_started``/``tool_finished``* interleaved as the
+``reasoning_delta``*, ``text_delta``* and ``tool_started``/``tool_finished``* interleaved as the
 model streams, then one ``sources`` event, then one internal ``usage`` event
 (the route persists it but never forwards it -- it is not part of the public
 SSE vocabulary in the plan's table) -- or, on any failure, a single ``error``
@@ -21,12 +21,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
 
 from agents import Agent, RunConfig, Runner
+from agents.model_settings import ModelSettings, Reasoning
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent, StreamEvent
 from agents.tool import FunctionTool, function_tool
 from agents.tool_context import ToolContext
@@ -47,13 +49,37 @@ from app.services.documents.repository import DocumentRepository
 
 SEARCH_TOOL_NAME = "search_knowledge_base"
 READ_ATTACHMENT_TOOL_NAME = "read_attachment"
+INLINE_USER_MESSAGE_WINDOW = 3
+# Replaces an expired PDF or image in replayed history. There is no tool to
+# reopen it: the file comes back only when the user names it in a new message,
+# so the model is told to ask for exactly that.
+EXPIRED_ATTACHMENT_NOTE = "\n（附件：{name}，已於先前訊息提供，目前未附上；如需再次查看，請使用者在新訊息中提及此檔名）"
+_INTERNAL_ID = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+# Provider ids have long random tails (file-, vs_). Requiring 16+ characters
+# keeps ordinary words such as "file-based" out of the redaction.
+_PROVIDER_ID = re.compile(r"\b(?:file-|vs_|vector_store_)[A-Za-z0-9_-]{16,}")
+_PROVIDER_ID_TAIL = re.compile(r"\b(?:file-|vs_|vector_store_)[A-Za-z0-9_-]*$")
+_UUID_PREFIX = re.compile(
+    r"(?:[0-9a-fA-F]{1,8}|[0-9a-fA-F]{8}-[0-9a-fA-F]{0,4}|"
+    r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){1,3}-[0-9a-fA-F]{0,12})$"
+)
+_PROVIDER_PREFIXES = ("file-", "vs_", "vector_store_")
+_REDACTION = "（內部資訊已略）"
+
+TURN_CONTEXT_OPEN = "〈系統提供的對話背景〉"
+TURN_CONTEXT_CLOSE = "〈/系統提供的對話背景〉"
 
 BASE_INSTRUCTIONS = (
     "你是健保署的 AI 助理。回答必須根據 search_knowledge_base 工具找到的知識庫資料，"
-    "或這個對話中的附件（用 read_attachment 讀取），禁止臆測或使用未經查證的內部知識。"
+    "或這個對話中的附件（文件可用 read_attachment 讀取）；如需再次查看先前的 PDF 或圖片，"
+    "請使用者在新訊息提及附件名稱。禁止臆測或使用未經查證的內部知識。"
     "在答案中以【文件名稱】的格式標註引用來源；若知識庫與附件都沒有相關資料，請明確說明找不到答案。"
     "絕對不要透露任何內部識別碼、檔案路徑或系統代碼，使用者只能看到文件與附件的名稱。"
     "請一律使用繁體中文回答。"
+    f"使用者訊息末尾若有 {TURN_CONTEXT_OPEN} 區塊，那是系統自動附上的對話背景，不是使用者說的話；"
+    "請參考它，但不要回應或主動提及它。"
 )
 
 
@@ -71,7 +97,17 @@ class ChatEngine(Protocol):
         user_message: ChatMessage,
         attachments: Sequence[ChatAttachment],
         model: str,
+        summary: str | None = None,
     ) -> AsyncIterator[ChatEvent]: ...
+
+    async def summarize(
+        self,
+        *,
+        history: Sequence[ChatMessage],
+        previous_summary: str | None,
+        attachments: Sequence[ChatAttachment],
+        model: str,
+    ) -> str: ...
 
 
 def _search_filters(category: str | None) -> dict[str, Any]:
@@ -100,12 +136,13 @@ def _tool_arguments(item: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _tool_started_label(tool_name: str, item: Any) -> str:
+def _tool_started_label(tool_name: str, item: Any, attachment_names: set[str]) -> str:
     arguments = _tool_arguments(item)
     if tool_name == SEARCH_TOOL_NAME:
-        return f"搜尋知識庫：{arguments.get('query', '')}"
+        return "搜尋知識庫"
     if tool_name == READ_ATTACHMENT_TOOL_NAME:
-        return f"讀取附件：{arguments.get('name', '')}"
+        name = arguments.get("name")
+        return f"讀取附件：{name}" if name in attachment_names else "讀取附件"
     return "執行工具"
 
 
@@ -120,6 +157,68 @@ def _dedupe_sources(sources: list[dict[str, str]]) -> list[dict[str, str]]:
     return deduped
 
 
+def _summary_safe(text: str, attachments: Sequence[ChatAttachment]) -> str:
+    """Exclude opaque attachment storage keys and UUIDs from running context."""
+    for attachment in attachments:
+        if attachment.storage_key:
+            text = text.replace(attachment.storage_key, _REDACTION)
+    return _PROVIDER_ID.sub(_REDACTION, _INTERNAL_ID.sub(_REDACTION, text))
+
+
+class _SafeStream:
+    """Hold only possible identifier suffixes so split deltas cannot expose IDs."""
+
+    def __init__(self, attachments: Sequence[ChatAttachment], known_ids: Sequence[str]) -> None:
+        self.pending = ""
+        self._dropping = False
+        self._secrets = tuple(
+            secret for secret in (*known_ids, *(a.storage_key for a in attachments)) if secret
+        )
+
+    def _clean(self, text: str) -> str:
+        for secret in self._secrets:
+            text = text.replace(secret, _REDACTION)
+        return _PROVIDER_ID.sub(_REDACTION, _INTERNAL_ID.sub(_REDACTION, text))
+
+    def feed(self, chunk: str, *, final: bool = False) -> str:
+        if self._dropping:
+            suffix = re.match(r"[A-Za-z0-9_-]*", chunk)
+            chunk = chunk[suffix.end():] if suffix else chunk
+            if not chunk:
+                if final:
+                    self._dropping = False
+                return ""
+            self._dropping = False
+        self.pending += chunk
+        if final:
+            safe = self._clean(self.pending)
+            self.pending = ""
+            return safe
+        hold = 0
+        for secret in (*self._secrets, *_PROVIDER_PREFIXES):
+            for size in range(1, min(len(secret), len(self.pending)) + 1):
+                if self.pending.endswith(secret[:size]):
+                    hold = max(hold, size)
+        uuid_match = _UUID_PREFIX.search(self.pending)
+        if uuid_match:
+            hold = max(hold, len(uuid_match.group()))
+        # A trailing prefix-plus-tail may still grow into a full provider id,
+        # so hold it whatever its length; _clean decides once it is complete.
+        provider_match = _PROVIDER_ID_TAIL.search(self.pending)
+        if provider_match:
+            hold = max(hold, len(provider_match.group()))
+        # Retain complete identifiers until a delimiter arrives, then scrub
+        # them before emission. Limit unbounded provider tokens as they grow.
+        if hold > 256:
+            prefix = self.pending[:-hold]
+            self.pending = ""
+            self._dropping = True
+            return self._clean(prefix) + _REDACTION
+        ready = self.pending[:-hold] if hold else self.pending
+        self.pending = self.pending[-hold:] if hold else ""
+        return self._clean(ready)
+
+
 def _is_pdf(attachment: ChatAttachment) -> bool:
     return attachment.mime_type == "application/pdf"
 
@@ -128,38 +227,54 @@ def _attachment_note(attachment: ChatAttachment) -> str:
     if attachment.kind == ChatAttachmentKind.IMAGE.value:
         return "圖片"
     if _is_pdf(attachment):
-        return "PDF，已直接附在傳送它的訊息中"
+        return "PDF，最近訊息可直接查看，較早附件請在新訊息提及名稱"
     if (attachment.text_chars or 0) > 0:
         return "文件，可用 read_attachment 讀取內容"
     return "文件，沒有可讀取的文字內容"
 
 
-def _build_instructions(attachments: Sequence[ChatAttachment]) -> str:
-    ready = [a for a in attachments if a.status == ChatAttachmentStatus.READY.value]
-    if not ready:
-        return BASE_INSTRUCTIONS
-    lines = [BASE_INSTRUCTIONS, "", "這個對話目前的附件："]
-    lines.extend(f"- {attachment.display_name}（{_attachment_note(attachment)}）" for attachment in ready)
-    return "\n".join(lines)
+def _build_turn_context(attachments: Sequence[ChatAttachment], summary: str | None) -> str | None:
+    """Return the per-turn context block, or ``None`` when there is nothing to say.
+
+    It rides on the newest user message (for prompt caching), so it is fenced
+    and labelled as system-supplied; unfenced, models read it as something the
+    user wrote and start answering it ("目前這段對話沒有附件").
+    """
+
+    lines = []
+    if summary:
+        lines.extend(("先前對話摘要：", summary))
+    if attachments:
+        lines.append("這個對話目前的附件：")
+        lines.extend(
+            f"- {attachment.display_name}（{_attachment_note(attachment) if attachment.status == ChatAttachmentStatus.READY.value else '無法讀取'}；"
+            f"{'可使用' if attachment.status == ChatAttachmentStatus.READY.value else '處理失敗'}）"
+            for attachment in attachments
+        )
+    if not lines:
+        return None
+    return "\n".join((TURN_CONTEXT_OPEN, *lines, TURN_CONTEXT_CLOSE))
 
 
 async def _message_to_input_item(
     message: ChatMessage,
     attachments_by_id: Mapping[UUID, ChatAttachment],
     storage: ChatAttachmentStorage,
+    *,
+    inline: bool = True,
 ) -> dict[str, Any]:
     """Rebuild one stored turn as an Agents SDK input item.
 
     Only the final text is replayed for every turn (decision 3 in the plan --
     earlier tool calls are not replayed). Image attachments sent with a user
-    turn are re-attached as ``input_image`` parts, and PDFs as ``input_file``
-    parts, every time that turn is replayed, matching the plan's "re-sent with
-    that message in later turns". The provider reads a PDF natively, scanned
-    pages included; DOCX/TXT/MD are read through ``read_attachment`` instead.
+    turn are attached only while eligible. Older ones use a stable text
+    placeholder. The provider reads a PDF natively, scanned pages included;
+    DOCX/TXT/MD are read through ``read_attachment`` instead.
     """
 
     role = "user" if message.role == ChatMessageRole.USER.value else "assistant"
-    inline: list[ChatAttachment] = []
+    inline_attachments: list[ChatAttachment] = []
+    expired: list[ChatAttachment] = []
     if role == "user":
         for raw_id in message.attachment_ids:
             attachment = attachments_by_id.get(UUID(raw_id))
@@ -168,12 +283,18 @@ async def _message_to_input_item(
                 and attachment.status == ChatAttachmentStatus.READY.value
                 and (attachment.kind == ChatAttachmentKind.IMAGE.value or _is_pdf(attachment))
             ):
-                inline.append(attachment)
-    if not inline:
+                (inline_attachments if inline else expired).append(attachment)
+    if not inline_attachments and not expired:
         return {"role": role, "content": message.content}
 
-    parts: list[dict[str, Any]] = [{"type": "input_text", "text": message.content}]
-    for attachment in inline:
+    text = message.content + "".join(
+        EXPIRED_ATTACHMENT_NOTE.format(name=attachment.display_name)
+        for attachment in expired
+    )
+    if not inline_attachments:
+        return {"role": role, "content": text}
+    parts: list[dict[str, Any]] = [{"type": "input_text", "text": text}]
+    for attachment in inline_attachments:
         path = storage.resolve(message.session_id, attachment.storage_key)
         data = await asyncio.to_thread(path.read_bytes)
         data_url = f"data:{attachment.mime_type};base64,{base64.b64encode(data).decode('ascii')}"
@@ -274,9 +395,9 @@ class AgentsSdkChatEngine:
                     # Post-filter: only a currently ready, retrieval-enabled
                     # document may be cited (docs/9_29_chat_core_and_attachments_plan.md).
                     continue
-                snippet = " ".join(
+                snippet = _summary_safe(" ".join(
                     part.text for part in result.content if getattr(part, "text", None)
-                ).strip()
+                ).strip(), ())
                 # Several passages from one document are all useful to the
                 # model; only exact repeats are dropped. The sources shown to
                 # the user are deduplicated by name separately.
@@ -315,7 +436,7 @@ class AgentsSdkChatEngine:
 
             Args:
                 name: The attachment's display name, exactly as listed in the
-                    instructions.
+                    current turn context.
                 start: Character offset to start from, for paging through a
                     long document.
                 max_chars: Maximum number of characters to return.
@@ -325,12 +446,12 @@ class AgentsSdkChatEngine:
             if attachment is None or attachment.kind != ChatAttachmentKind.DOCUMENT.value:
                 tool_labels[ctx.tool_call_id] = "找不到此附件"
                 return "找不到這個附件。"
-            if _is_pdf(attachment):
-                tool_labels[ctx.tool_call_id] = f"讀取附件：{name}"
-                return f"（{name} 是 PDF，已直接附在傳送它的訊息中，請直接閱讀該檔案。）"
             if attachment.status != ChatAttachmentStatus.READY.value:
                 tool_labels[ctx.tool_call_id] = "附件無法讀取"
                 return "這個附件目前無法讀取。"
+            if _is_pdf(attachment):
+                tool_labels[ctx.tool_call_id] = f"讀取附件：{name}"
+                return f"（{name} 是 PDF；若目前訊息中沒有該檔案，請使用者在新訊息提及附件名稱以再次查看。）"
             path = self._attachment_storage.resolve(attachment.session_id, attachment.storage_key)
             text, total = await asyncio.to_thread(
                 self._attachment_storage.read_text,
@@ -356,13 +477,70 @@ class AgentsSdkChatEngine:
         user_message: ChatMessage,
         attachments: Sequence[ChatAttachment],
         model: str,
+        summary: str | None = None,
     ) -> AsyncIterator[ChatEvent]:
-        attachments_by_id = {attachment.id: attachment for attachment in attachments}
+        attachments_by_id = {
+            attachment.id: attachment
+            for attachment in attachments
+            if attachment.session_id == user_message.session_id
+        }
         try:
+            session_attachments = tuple(attachments_by_id.values())
+            eligible = {
+                message.id
+                for message in [
+                    item
+                    for item in (*history, user_message)
+                    if item.role == ChatMessageRole.USER.value
+                ][-INLINE_USER_MESSAGE_WINDOW:]
+            }
             input_items = [
-                await _message_to_input_item(message, attachments_by_id, self._attachment_storage)
+                await _message_to_input_item(
+                    message, attachments_by_id, self._attachment_storage,
+                    inline=message.id in eligible,
+                )
                 for message in (*history, user_message)
             ]
+            # When the newest request names an older attachment, provide the
+            # original file on this turn only. The SDK's structured tool output
+            # can retain file_data, but provider-specific LiteLLM tool-message
+            # transformations are not guaranteed to preserve multimodal parts.
+            already_attached = set(user_message.attachment_ids)
+            for attachment in session_attachments:
+                if (
+                    attachment.status == ChatAttachmentStatus.READY.value
+                    and (attachment.kind == ChatAttachmentKind.IMAGE.value or _is_pdf(attachment))
+                    and attachment.display_name in user_message.content
+                    and str(attachment.id) not in already_attached
+                ):
+                    file_item = await _message_to_input_item(
+                        ChatMessage(
+                            session_id=user_message.session_id,
+                            role=ChatMessageRole.USER.value,
+                            content="",
+                            attachment_ids=[str(attachment.id)],
+                        ),
+                        attachments_by_id,
+                        self._attachment_storage,
+                    )
+                    parts = file_item["content"]
+                    if isinstance(parts, list):
+                        current = input_items[-1]["content"]
+                        if isinstance(current, str):
+                            current = [{"type": "input_text", "text": current}]
+                        input_items[-1]["content"] = [*current, *parts[1:]]
+            context_text = _build_turn_context(
+                session_attachments,
+                _summary_safe(summary, session_attachments) if summary else None,
+            )
+            if context_text is not None:
+                turn_context = {"type": "input_text", "text": context_text}
+                current_content = input_items[-1]["content"]
+                input_items[-1]["content"] = (
+                    [*current_content, turn_context]
+                    if isinstance(current_content, list)
+                    else [{"type": "input_text", "text": current_content}, turn_context]
+                )
         except Exception:
             yield ChatEvent("error", {"code": "chat_attachment_unavailable", "message": "附件目前無法讀取，請稍後再試。"})
             return
@@ -370,10 +548,21 @@ class AgentsSdkChatEngine:
         collected_sources: list[dict[str, str]] = []
         tool_labels: dict[str, str] = {}
         tool_call_names: dict[str, str] = {}
+        attachment_names = {attachment.display_name for attachment in session_attachments}
+        known_ids = [
+            str(item.id) for item in (*history, user_message, *session_attachments)
+        ] + [str(user_message.session_id)]
+        text_stream = _SafeStream(session_attachments, known_ids)
+        reasoning_stream = _SafeStream(session_attachments, known_ids)
         agent = Agent(
             name="健保署 AI 助理",
-            instructions=_build_instructions(attachments),
+            instructions=BASE_INSTRUCTIONS,
             model=model,
+            model_settings=(
+                ModelSettings(reasoning=Reasoning(summary="auto"))
+                if model.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4"))
+                else ModelSettings()
+            ),
             tools=[
                 self._search_tool(collected_sources, tool_labels),
                 self._read_attachment_tool(attachments_by_id, tool_labels),
@@ -388,12 +577,26 @@ class AgentsSdkChatEngine:
         try:
             streamed = self._runner_factory.run_streamed(agent, input_items, run_config=run_config)
             async for event in streamed.stream_events():
-                for chat_event in _translate_stream_event(event, tool_labels, tool_call_names):
-                    yield chat_event
+                for chat_event in _translate_stream_event(
+                    event, tool_labels, tool_call_names, attachment_names,
+                ):
+                    if chat_event.type in ("text_delta", "reasoning_delta"):
+                        stream = text_stream if chat_event.type == "text_delta" else reasoning_stream
+                        safe = stream.feed(chat_event.data["text"])
+                        if safe:
+                            yield ChatEvent(chat_event.type, {"text": safe})
+                    else:
+                        yield chat_event
         except Exception:
+            for event_type, stream in (("reasoning_delta", reasoning_stream), ("text_delta", text_stream)):
+                if safe := stream.feed("", final=True):
+                    yield ChatEvent(event_type, {"text": safe})
             yield ChatEvent("error", {"code": "chat_unavailable", "message": "對話服務暫時無法使用，請稍後再試。"})
             return
 
+        for event_type, stream in (("reasoning_delta", reasoning_stream), ("text_delta", text_stream)):
+            if safe := stream.feed("", final=True):
+                yield ChatEvent(event_type, {"text": safe})
         yield ChatEvent("sources", {"sources": _dedupe_sources(collected_sources)})
         usage = streamed.context_wrapper.usage
         yield ChatEvent(
@@ -405,14 +608,68 @@ class AgentsSdkChatEngine:
             },
         )
 
+    async def summarize(
+        self,
+        *,
+        history: Sequence[ChatMessage],
+        previous_summary: str | None,
+        attachments: Sequence[ChatAttachment],
+        model: str,
+    ) -> str:
+        """Summarize only newly expired messages, without model-facing identifiers."""
+        by_id = {attachment.id: attachment for attachment in attachments}
+        lines = [
+            "請用繁體中文整理以下較早對話，保留使用者目標與限制、已做決定、"
+            "事實與數字及其來源文件名稱、附件名稱與內容、尚未回答的問題。"
+            "不可包含內部識別碼、儲存位置或系統金鑰。",
+        ]
+        if previous_summary:
+            lines.extend(("\n先前摘要：", previous_summary))
+        lines.append("\n新增的較早訊息：")
+        for message in history:
+            role = "使用者" if message.role == ChatMessageRole.USER.value else "助理"
+            lines.append(f"{role}：{message.content}")
+            for raw_id in message.attachment_ids:
+                attachment = by_id.get(UUID(raw_id))
+                if attachment is None or attachment.session_id != message.session_id:
+                    continue
+                lines.append(f"附件名稱：{attachment.display_name}（{_attachment_note(attachment)}）")
+                if (
+                    attachment.kind == ChatAttachmentKind.DOCUMENT.value
+                    and (attachment.text_chars or 0) > 0
+                ):
+                    path = self._attachment_storage.resolve(
+                        attachment.session_id, attachment.storage_key,
+                    )
+                    excerpt, _ = await asyncio.to_thread(
+                        self._attachment_storage.read_text, path, start=0, max_chars=2_000,
+                    )
+                    lines.append(f"附件內容摘錄：{excerpt}")
+            for source in message.sources or []:
+                lines.append(f"來源文件：{source['name']}；相關資料：{source['snippet']}")
+        agent = Agent(name="對話摘要", instructions="只輸出繁體中文摘要；不得輸出內部識別碼。", model=model, tools=[])
+        run_config = build_litellm_run_config(model, self._litellm_api_keys) or RunConfig()
+        result = await self._runner_factory.run(
+            agent, _summary_safe("\n".join(lines), attachments), run_config=run_config,
+        )
+        summary = _summary_safe(str(result.final_output or ""), attachments).strip()
+        if not summary:
+            raise ValueError("摘要服務未產生內容")
+        return summary
+
 
 def _translate_stream_event(
     event: StreamEvent,
     tool_labels: Mapping[str, str],
     tool_call_names: dict[str, str],
+    attachment_names: set[str] | None = None,
 ) -> Iterator[ChatEvent]:
     if isinstance(event, RawResponsesStreamEvent):
         data = event.data
+        if getattr(data, "type", None) == "response.reasoning_summary_text.delta":
+            delta = getattr(data, "delta", "") or ""
+            if delta:
+                yield ChatEvent("reasoning_delta", {"text": delta})
         if getattr(data, "type", None) == "response.output_text.delta":
             delta = getattr(data, "delta", "") or ""
             if delta:
@@ -427,7 +684,10 @@ def _translate_stream_event(
         if tool_name not in (SEARCH_TOOL_NAME, READ_ATTACHMENT_TOOL_NAME) or not call_id:
             return
         tool_call_names[call_id] = tool_name
-        yield ChatEvent("tool_started", {"tool": tool_name, "label": _tool_started_label(tool_name, item)})
+        yield ChatEvent(
+            "tool_started",
+            {"tool": tool_name, "label": _tool_started_label(tool_name, item, attachment_names or set())},
+        )
         return
     if event.name == "tool_output":
         item = event.item

@@ -267,3 +267,28 @@ Report:
   verified in the SDK source;
 - for A4: which providers emit reasoning through our path, per the SDK source;
 - anything you had to decide that this spec did not settle.
+
+## Implementation notes
+
+- Attachment reopening uses the name-mention fallback for every provider. The installed
+  Agents SDK preserves inline `file_data` in structured tool outputs, but LiteLLM's
+  Anthropic tool-result conversion accepts text and images and drops file parts. No
+  `open_attachment` tool is registered; a named PDF/image is added to the new message only.
+- Instructions are static. Attachment kind/status and any running summary are appended to
+  the newest user input, never saved into its message content. Anthropic cache breakpoints
+  are omitted: the SDK copies `prompt_cache_breakpoint`, whereas the installed LiteLLM
+  Anthropic conversion consumes `cache_control`.
+- Model context windows conservatively use 128,000 tokens. `CHAT_COMPACTION_THRESHOLD`
+  defaults to `0.6` and must be between zero and one, exclusive. Compaction uses the
+  specified strict `>` trigger and retains the last six stored messages. Failure replays
+  full history for that turn and preserves the previous summary/marker.
+- Reasoning summaries use `response.reasoning_summary_text.delta`. OpenAI reasoning
+  families request automatic summaries; LiteLLM's `reasoning_content` produces the same
+  summary event when supplied by Gemini/Anthropic. Separate raw reasoning-text events are
+  not displayed as summaries. No provider response is assumed to contain reasoning.
+- Apply Alembic revision `a6294c7e1d30` before using an existing chat database. Summary text
+  remains internal; session responses expose only its message marker. Stored reasoning
+  is capped at 20,000 characters and excluded from later model input.
+- Chat follows the app shell's window scroll container without a new dependency.
+  Reasoning duration is measured from its first delta to the first answer delta; the
+  generic thinking indicator remains visible when a provider sends no reasoning.

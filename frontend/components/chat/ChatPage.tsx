@@ -1,7 +1,8 @@
 "use client";
 
-import { CircleAlert, LoaderCircle } from "lucide-react";
+import { ArrowDown, CircleAlert, LoaderCircle } from "lucide-react";
 import { useChatEngine } from "../../lib/hooks/useChatEngine";
+import { useStickToBottom } from "../../lib/hooks/useStickToBottom";
 import { ChatComposer } from "./ChatComposer";
 import { ChatEmptyState } from "./ChatEmptyState";
 import { ChatMessageList } from "./ChatMessageList";
@@ -13,53 +14,90 @@ import { ChatMessageList } from "./ChatMessageList";
  */
 export function ChatPage() {
     const chat = useChatEngine();
+    let latestUserKey: string | null = null;
+    for (let index = chat.messages.length - 1; index >= 0; index--) {
+        if (chat.messages[index].role === "user") {
+            latestUserKey = chat.messages[index].localKey;
+            break;
+        }
+    }
+    const { contentRef, showLatest, scrollToBottom } = useStickToBottom({
+        sessionId: chat.sessionId,
+        loading: chat.loading,
+        latestUserKey,
+    });
 
     const showEmptyState = !chat.sessionId && chat.messages.length === 0 && !chat.loading;
 
+    const composer = (
+        <>
+            {chat.sendError && (
+                <div role="alert" className="mb-2 flex items-center gap-2 text-xs text-red-600">
+                    <CircleAlert size={14} />
+                    {chat.sendError}
+                </div>
+            )}
+            <ChatComposer
+                sessionId={chat.sessionId}
+                draft={chat.draft}
+                setDraft={chat.setDraft}
+                attachments={chat.attachments}
+                onAttachFiles={(files) => void chat.attachFiles(files)}
+                onRemoveAttachment={chat.removeAttachment}
+                models={chat.models}
+                model={chat.model}
+                setModel={chat.setModel}
+                modelsLoading={chat.modelsLoading}
+                busy={chat.busy}
+                uploadsPending={chat.uploadsPending}
+                onSend={() => void chat.send()}
+                onStop={chat.stop}
+            />
+        </>
+    );
+
     return (
-        <section className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-3xl flex-col px-5">
-            <div className={`flex flex-1 flex-col ${chat.messages.length ? "justify-start py-8" : "justify-center py-12"}`}>
-                {chat.loading ? (
-                    <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
-                        <LoaderCircle size={16} className="animate-spin" />
-                        正在載入對話…
-                    </div>
-                ) : chat.loadError ? (
-                    <div role="alert" className="flex items-center justify-center gap-2 py-16 text-sm text-destructive">
-                        <CircleAlert size={16} />
-                        {chat.loadError}
-                    </div>
-                ) : showEmptyState ? (
-                    <ChatEmptyState onPick={chat.setDraft} />
-                ) : (
-                    <ChatMessageList messages={chat.messages} />
-                )}
-            </div>
-            {!chat.loadError && (
+        <section ref={contentRef} className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-3xl flex-col px-4 sm:px-5">
+            {showEmptyState ? (
+                <div data-chat-layout="centered" className="flex flex-1 flex-col items-center justify-center py-12">
+                    <ChatEmptyState onPick={chat.setDraft}>{composer}</ChatEmptyState>
+                </div>
+            ) : (
                 <>
-                    {chat.sendError && (
-                        <div role="alert" className="mb-2 flex items-center gap-2 text-xs text-red-600">
-                            <CircleAlert size={14} />
-                            {chat.sendError}
+                    <div className="flex flex-1 flex-col justify-start pt-12 pb-8 sm:pt-16">
+                        {chat.loading ? (
+                            <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+                                <LoaderCircle size={16} className="animate-spin" />
+                                正在載入對話…
+                            </div>
+                        ) : chat.loadError ? (
+                            <div role="alert" className="flex items-center justify-center gap-2 py-16 text-sm text-destructive">
+                                <CircleAlert size={16} />
+                                {chat.loadError}
+                            </div>
+                        ) : (
+                            <ChatMessageList messages={chat.messages} compactedThroughMessageId={chat.compactedThroughMessageId} />
+                        )}
+                    </div>
+                    {!chat.loadError && (
+                        <div
+                            data-chat-layout="docked"
+                            className="sticky bottom-0 z-10 bg-gradient-to-t from-background via-background/95 to-transparent pt-6 pb-7"
+                        >
+                            {composer}
                         </div>
                     )}
-                    <ChatComposer
-                        sessionId={chat.sessionId}
-                        draft={chat.draft}
-                        setDraft={chat.setDraft}
-                        attachments={chat.attachments}
-                        onAttachFiles={(files) => void chat.attachFiles(files)}
-                        onRemoveAttachment={chat.removeAttachment}
-                        models={chat.models}
-                        model={chat.model}
-                        setModel={chat.setModel}
-                        modelsLoading={chat.modelsLoading}
-                        busy={chat.busy}
-                        uploadsPending={chat.uploadsPending}
-                        onSend={() => void chat.send()}
-                        onStop={chat.stop}
-                    />
                 </>
+            )}
+            {showLatest && chat.messages.length > 0 && (
+                <button
+                    type="button"
+                    onClick={() => scrollToBottom(true)}
+                    className="fixed bottom-24 left-1/2 z-10 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border bg-card px-4 py-2 text-xs font-medium text-foreground shadow-md hover:bg-accent md:bottom-6"
+                >
+                    <ArrowDown size={14} aria-hidden="true" />
+                    最新訊息
+                </button>
             )}
         </section>
     );

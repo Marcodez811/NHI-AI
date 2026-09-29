@@ -31,7 +31,11 @@ export function ChatModelPicker({
             }}
             disabled={disabled || !models.length}
         >
-            <SelectTrigger size="sm" aria-label="選擇模型" className="max-w-[11rem] text-xs">
+            <SelectTrigger
+                size="sm"
+                aria-label="選擇模型"
+                className="max-w-[11rem] gap-1 border-transparent bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-muted hover:text-foreground dark:bg-transparent dark:hover:bg-muted/50"
+            >
                 <SelectValue>{selected?.label ?? "選擇模型"}</SelectValue>
             </SelectTrigger>
             <SelectContent>

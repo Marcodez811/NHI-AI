@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 from uuid import UUID, uuid4
@@ -33,6 +34,7 @@ from app.models.chat import (
     ChatSessionDetail,
     ChatSessionSummary,
     ChatSessionUpdate,
+    MAX_REASONING_CHARS,
     as_chat_attachment_read,
     as_chat_message_read,
     session_title_from_message,
@@ -45,6 +47,8 @@ from app.services.documents.repository import DocumentRepository
 from app.services.streaming import SSE_RESPONSE_HEADERS, _stream_with_heartbeat
 
 router = APIRouter(tags=["chat"])
+logger = logging.getLogger(__name__)
+COMPACTION_RECENT_MESSAGES = 6
 
 _repository = InMemoryChatRepository()
 _attachment_storage = ChatAttachmentStorage()
@@ -145,6 +149,7 @@ async def create_chat_session(
         model=session.model,
         created_at=session.created_at,
         updated_at=session.updated_at,
+        compacted_through_message_id=session.summary_through_message_id,
         messages=[],
         attachments=[],
     )
@@ -166,6 +171,7 @@ async def get_chat_session(
         model=session.model,
         created_at=session.created_at,
         updated_at=session.updated_at,
+        compacted_through_message_id=session.summary_through_message_id,
         messages=[as_chat_message_read(message) for message in messages],
         attachments=[as_chat_attachment_read(attachment) for attachment in attachments],
     )
@@ -256,6 +262,7 @@ async def delete_chat_attachment(
     session_id: UUID,
     attachment_id: UUID,
     repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+    storage: Annotated[ChatAttachmentStorage, Depends(get_chat_attachment_storage)],
 ) -> None:
     attachment = await repository.get_attachment(attachment_id)
     if attachment is None or attachment.session_id != session_id:
@@ -266,6 +273,7 @@ async def delete_chat_attachment(
             status_code=status.HTTP_409_CONFLICT,
             detail="此附件已送出，無法刪除。",
         )
+    await storage.delete_attachment(session_id, attachment.storage_key)
     await repository.delete_attachment(attachment_id)
 
 
@@ -279,7 +287,8 @@ async def send_chat_message(
     session = await repository.get_session(session_id)
     if session is None:
         raise _session_not_found_error()
-    if chat_models.find_available_model(payload.model) is None:
+    selected_model = chat_models.find_available_model(payload.model)
+    if selected_model is None:
         raise _model_unavailable_error()
 
     all_attachments = await repository.list_attachments(session_id)
@@ -308,22 +317,78 @@ async def send_chat_message(
     message_id = uuid4()
 
     async def _generate() -> AsyncGenerator[str, None]:
-        yield _sse("message_start", {"message_id": str(message_id)})
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        reasoning_length = 0
         sources: list[dict[str, str]] = []
         usage: dict[str, int] | None = None
         had_error = False
         completed = False
         try:
+            yield _sse("message_start", {"message_id": str(message_id)})
+            replay_history = history
+            previous = next((message for message in reversed(history) if message.role == ChatMessageRole.ASSISTANT.value), None)
+            previous_tokens = (previous.usage or {}).get("input_tokens") if previous else None
+            marker_index = next(
+                (index for index, message in enumerate(history) if message.id == session.summary_through_message_id),
+                -1,
+            )
+            if session.summary_through_message_id is not None and marker_index >= 0:
+                replay_history = history[marker_index + 1:]
+            turn_summary = session.summary if replay_history is not history else None
+            if (
+                isinstance(previous_tokens, (int, float))
+                and previous_tokens > settings.chat_compaction_threshold * selected_model.context_window
+                and len(replay_history) > COMPACTION_RECENT_MESSAGES
+            ):
+                newly_old = replay_history[:-COMPACTION_RECENT_MESSAGES]
+                yield _sse("compacting", {})
+                saved_summary = session.summary
+                saved_marker = session.summary_through_message_id
+                try:
+                    summary = await engine.summarize(
+                        history=newly_old,
+                        previous_summary=turn_summary,
+                        attachments=all_attachments,
+                        model=payload.model,
+                    )
+                    if not summary.strip():
+                        raise ValueError("Empty compaction summary")
+                    session.summary = summary
+                    session.summary_through_message_id = newly_old[-1].id
+                    await repository.update_session(session)
+                    replay_history = replay_history[-COMPACTION_RECENT_MESSAGES:]
+                    turn_summary = summary
+                    yield _sse("compacted", {"ok": True})
+                except (asyncio.CancelledError, GeneratorExit):
+                    session.summary = saved_summary
+                    session.summary_through_message_id = saved_marker
+                    raise
+                except Exception:
+                    session.summary = saved_summary
+                    session.summary_through_message_id = saved_marker
+                    logger.exception("Chat compaction failed")
+                    # A failed summary must not truncate the conversation for this turn.
+                    replay_history = history
+                    turn_summary = None
+                    yield _sse("compacted", {"ok": False})
             async for event in engine.run_turn(
-                history=history,
+                history=replay_history,
                 user_message=user_message,
                 attachments=all_attachments,
                 model=payload.model,
+                summary=turn_summary,
             ):
                 if event.type == "text_delta":
                     text_parts.append(str(event.data.get("text", "")))
                     yield _sse("text_delta", event.data)
+                elif event.type == "reasoning_delta":
+                    delta = str(event.data.get("text", ""))
+                    if reasoning_length < MAX_REASONING_CHARS:
+                        kept = delta[:MAX_REASONING_CHARS - reasoning_length]
+                        reasoning_parts.append(kept)
+                        reasoning_length += len(kept)
+                    yield _sse("reasoning_delta", {"text": delta})
                 elif event.type in ("tool_started", "tool_finished"):
                     yield _sse(event.type, event.data)
                 elif event.type == "sources":
@@ -362,6 +427,7 @@ async def send_chat_message(
                     status=status_value,
                     model=payload.model,
                     usage=usage,
+                    reasoning="".join(reasoning_parts) or None,
                 )
             )
             session.model = payload.model

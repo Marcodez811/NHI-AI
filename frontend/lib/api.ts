@@ -930,6 +930,7 @@ export interface ChatMessageRecord {
     id: string;
     role: "user" | "assistant";
     content: string;
+    reasoning?: string | null;
     attachment_ids?: string[] | null;
     sources?: ChatSourceRef[] | null;
     status: ChatMessageStatus;
@@ -946,6 +947,7 @@ export interface ChatSessionSummary {
 export interface ChatSessionDetail extends ChatSessionSummary {
     model: string;
     created_at: string;
+    compacted_through_message_id: string | null;
     messages: ChatMessageRecord[];
     attachments: ChatAttachment[];
 }
@@ -1049,9 +1051,12 @@ export async function deleteChatAttachment(sessionId: string, attachmentId: stri
     );
 }
 
-/** The chat v2 SSE vocabulary; see `docs/9_29_chat_core_and_attachments_plan.md`. */
+/** The chat SSE vocabulary; see `docs/9_29_chat_context_and_ux_spec.md`. */
 export type ChatEvent =
     | { type: "message_start"; message_id: string }
+    | { type: "reasoning_delta"; text: string }
+    | { type: "compacting" }
+    | { type: "compacted"; ok: boolean }
     | { type: "text_delta"; text: string }
     | { type: "tool_started"; tool: string; label: string }
     | { type: "tool_finished"; tool: string; label: string }
@@ -1109,6 +1114,16 @@ export function parseChatEventBlock(block: string): ChatEvent | null {
         if (text === undefined) throw invalidChatStreamError();
         return { type: "text_delta", text };
     }
+    if (type === "reasoning_delta") {
+        const text = rawStringValue(payload.text);
+        if (text === undefined) throw invalidChatStreamError();
+        return { type: "reasoning_delta", text };
+    }
+    if (type === "compacting") return { type: "compacting" };
+    if (type === "compacted") {
+        if (typeof payload.ok !== "boolean") throw invalidChatStreamError();
+        return { type: "compacted", ok: payload.ok };
+    }
     if (type === "tool_started" || type === "tool_finished") {
         const tool = stringValue(payload.tool);
         if (!tool) throw invalidChatStreamError();
@@ -1137,6 +1152,9 @@ export function parseChatEventBlock(block: string): ChatEvent | null {
 
 export interface ChatStreamHandlers {
     onDelta: (text: string) => void;
+    onReasoningDelta?: (text: string) => void;
+    onCompacting?: () => void;
+    onCompacted?: (ok: boolean) => void;
     onMessageStart?: (messageId: string) => void;
     onToolStarted?: (tool: string, label: string) => void;
     onToolFinished?: (tool: string, label: string) => void;
@@ -1160,6 +1178,9 @@ export async function sendChatMessage(
             if (!event) return;
             if (event.type === "message_start") handlers.onMessageStart?.(event.message_id);
             else if (event.type === "text_delta") handlers.onDelta(event.text);
+            else if (event.type === "reasoning_delta") handlers.onReasoningDelta?.(event.text);
+            else if (event.type === "compacting") handlers.onCompacting?.();
+            else if (event.type === "compacted") handlers.onCompacted?.(event.ok);
             else if (event.type === "tool_started") handlers.onToolStarted?.(event.tool, event.label);
             else if (event.type === "tool_finished") handlers.onToolFinished?.(event.tool, event.label);
             else if (event.type === "sources") handlers.onSources?.(event.sources);

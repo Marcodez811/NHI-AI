@@ -88,4 +88,14 @@ describe("ChatComposer", () => {
         await userEvent.click(button);
         expect(onStop).toHaveBeenCalledOnce();
     });
+
+    it("uses the new placeholder and moves the attachment note onto the attach button", () => {
+        renderComposer();
+        expect(screen.getByPlaceholderText("問問健保署 AI…")).toBeInTheDocument();
+
+        const attachButton = screen.getByRole("button", { name: "附加檔案" });
+        expect(attachButton).toHaveAttribute("title", "附件僅供此對話使用，不會加入知識庫");
+
+        expect(screen.queryByText("附件僅供此對話使用，不會加入知識庫。")).not.toBeInTheDocument();
+    });
 });

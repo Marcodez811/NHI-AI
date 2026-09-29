@@ -31,6 +31,10 @@ _LABELS: dict[str, str] = {
     "litellm/anthropic/claude-sonnet-5": "Claude Sonnet 5",
 }
 
+# Use the same conservative bound for all catalog entries until their actual
+# context windows have been verified for the provider/model combination.
+_CONSERVATIVE_CONTEXT_WINDOW = 128_000
+
 
 @dataclass(frozen=True)
 class ChatModel:
@@ -38,6 +42,7 @@ class ChatModel:
     label: str
     provider: str
     available: bool
+    context_window: int
 
 
 def _provider_for(model_id: str) -> str:
@@ -73,6 +78,7 @@ def list_models(app_settings: Settings | None = None) -> list[ChatModel]:
                 label=_LABELS.get(model_id, model_id),
                 provider=provider,
                 available=_is_available(provider, app_settings),
+                context_window=_CONSERVATIVE_CONTEXT_WINDOW,
             )
         )
     return models

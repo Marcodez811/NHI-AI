@@ -381,3 +381,42 @@ def test_agent_stage_settings_migration_assigns_existing_rows_to_slides(tmp_path
     assert row[0] == "slides"
     assert row[2] == "legacy-model"
     engine.dispose()
+
+
+def test_chat_context_migration_preserves_existing_rows(tmp_path):
+    """Upgrading old conversations adds nullable compaction and reasoning columns."""
+    from alembic import command
+
+    db_path = str(tmp_path / "chat_context.db")
+    cfg = _alembic_config(db_path)
+    command.upgrade(cfg, "f9d62e31a528")
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO chat_sessions (id, title, model, created_at, updated_at) "
+            "VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '既有對話', 'gpt-6-astra', "
+            "'2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(text(
+            "INSERT INTO chat_messages "
+            "(id, session_id, role, content, attachment_ids, sources, status, model, usage, created_at) "
+            "VALUES ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
+            "'assistant', '既有回答', '[]', '[]', 'complete', 'gpt-6-astra', NULL, '2026-01-01')"
+        ))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    inspector = sa.inspect(engine)
+    assert {"summary", "summary_through_message_id"} <= {
+        column["name"] for column in inspector.get_columns("chat_sessions")
+    }
+    assert "reasoning" in {column["name"] for column in inspector.get_columns("chat_messages")}
+    with engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT title, summary, summary_through_message_id FROM chat_sessions"
+        )).one() == ("既有對話", None, None)
+        assert conn.execute(text(
+            "SELECT content, reasoning FROM chat_messages"
+        )).one() == ("既有回答", None)
+    engine.dispose()

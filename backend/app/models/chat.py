@@ -23,6 +23,7 @@ DEFAULT_SESSION_TITLE = "新對話"
 SESSION_TITLE_MAX_CHARS = 30
 MAX_MESSAGE_CHARS = 20_000
 MAX_ATTACHMENTS_PER_MESSAGE = 10
+MAX_REASONING_CHARS = 20_000
 
 
 def utcnow() -> datetime:
@@ -60,6 +61,8 @@ class ChatSession(SQLModel, table=True):
     title: str = Field(default=DEFAULT_SESSION_TITLE, max_length=255)
     # The last model used in this session; also the default for the next turn.
     model: str | None = Field(default=None, max_length=128)
+    summary: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    summary_through_message_id: UUID | None = Field(default=None, nullable=True)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=utcnow, nullable=False)
 
@@ -79,6 +82,7 @@ class ChatMessage(SQLModel, table=True):
     # Assistant messages only.
     model: str | None = Field(default=None, max_length=128)
     usage: dict[str, int] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    reasoning: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
 
 
@@ -171,6 +175,7 @@ class ChatMessageRead(BaseModel):
     status: ChatMessageStatus
     model: str | None
     usage: dict[str, int] | None
+    reasoning: str | None
     created_at: datetime
 
 
@@ -180,6 +185,7 @@ class ChatSessionDetail(BaseModel):
     model: str | None
     created_at: datetime
     updated_at: datetime
+    compacted_through_message_id: UUID | None
     messages: list[ChatMessageRead]
     attachments: list[ChatAttachmentRead]
 

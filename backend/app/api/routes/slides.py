@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Annotated
@@ -585,22 +584,17 @@ async def send_slide_job_outline_message(
     if latest.approved_at is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Outline has already been approved.")
 
-    async def _generate() -> AsyncGenerator[str, None]:
-        source = planner.continue_conversation(
-            job_id=job_id,
-            message=request.message,
-            latest=latest,
-            outline_repository=outline_repository,
-        )
-        async for chunk in _stream_with_heartbeat(
-            source,
+    return StreamingResponse(
+        _stream_with_heartbeat(
+            planner.continue_conversation(
+                job_id=job_id,
+                message=request.message,
+                latest=latest,
+                outline_repository=outline_repository,
+            ),
             heartbeat_seconds=settings.chat_stream_heartbeat_seconds,
             timeout_seconds=settings.chat_timeout_seconds,
-        ):
-            yield chunk
-
-    return StreamingResponse(
-        _generate(),
+        ),
         media_type="text/event-stream",
         headers=SSE_RESPONSE_HEADERS,
     )
