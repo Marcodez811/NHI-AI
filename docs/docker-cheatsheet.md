@@ -14,7 +14,7 @@ Everything runs from the repo root (`~/NHI-AI`). Services: `postgres`, `redis`,
 | I want to… | Run |
 | --- | --- |
 | start everything (normal) | `docker compose up -d` |
-| start with frontend hot reload | `docker compose -f docker-compose.yml -f docker-compose.dev.yml up --watch` |
+| **day-to-day dev** (frontend + backend live reload) | `docker compose -f docker-compose.yml -f docker-compose.dev.yml up --watch` |
 | see what's running | `docker compose ps` |
 | stop everything, **keep data** | `docker compose down` |
 | stop just the job worker | `docker compose stop tasks-worker` |
@@ -22,7 +22,7 @@ Everything runs from the repo root (`~/NHI-AI`). Services: `postgres`, `redis`,
 > ⚠️ **Never** `docker compose down -v` unless you mean it: `-v` **deletes the Postgres
 > database and every uploaded document**.
 
-`--watch` only live-syncs the **frontend**. Backend changes always need a rebuild.
+With `--watch`, code changes go live without a rebuild: the frontend hot-reloads, the backend API reloads, and the workers and scheduler restart automatically. `config.yaml` changes restart the services. Only dependency changes (`package.json`, `pyproject.toml`, `uv.lock`, a Dockerfile) rebuild the image, and that happens automatically too. A **new Alembic migration** still needs `docker compose run --rm migrate`.
 
 ---
 

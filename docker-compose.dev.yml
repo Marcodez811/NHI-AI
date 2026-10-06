@@ -24,3 +24,59 @@ services:
                   path: ./frontend/pnpm-workspace.yaml
                 - action: rebuild
                   path: ./frontend/Dockerfile
+
+    # Backend live reload: the API reloads in place (uvicorn --reload); workers and
+    # the scheduler restart on code changes. Only dependency changes rebuild the image.
+    # New Alembic migrations still need: docker compose run --rm migrate
+    backend:
+        command: ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "app"]
+        develop:
+            watch: &backend-sync
+                - action: sync
+                  path: ./backend/app
+                  target: /app/app
+                  ignore: [__pycache__/]
+                - action: sync+restart
+                  path: ./backend/config.yaml
+                  target: /app/config.yaml
+                - action: sync
+                  path: ./backend/.agents
+                  target: /app/.agents
+                - action: sync
+                  path: ./backend/alembic
+                  target: /app/alembic
+                - action: rebuild
+                  path: ./backend/pyproject.toml
+                - action: rebuild
+                  path: ./backend/uv.lock
+                - action: rebuild
+                  path: ./backend/package.json
+                - action: rebuild
+                  path: ./backend/Dockerfile
+    documents-worker:
+        develop:
+            watch: &worker-sync
+                - action: sync+restart
+                  path: ./backend/app
+                  target: /app/app
+                  ignore: [__pycache__/]
+                - action: sync+restart
+                  path: ./backend/config.yaml
+                  target: /app/config.yaml
+                - action: sync+restart
+                  path: ./backend/.agents
+                  target: /app/.agents
+                - action: rebuild
+                  path: ./backend/pyproject.toml
+                - action: rebuild
+                  path: ./backend/uv.lock
+                - action: rebuild
+                  path: ./backend/package.json
+                - action: rebuild
+                  path: ./backend/Dockerfile
+    tasks-worker:
+        develop:
+            watch: *worker-sync
+    scheduler:
+        develop:
+            watch: *worker-sync
