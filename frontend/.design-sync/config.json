@@ -1,0 +1,54 @@
+{
+  "projectId": "8ff266f8-e575-4269-8e31-68f6a3b604a7",
+  "shape": "package",
+  "pkg": "nhi-ai-ui",
+  "globalName": "NhiAiUi",
+  "buildCmd": "node .design-sync/build.mjs",
+  "entry": ".design-sync/pkg/dist/index.js",
+  "srcDir": "../../components",
+  "cssEntry": "dist/styles.css",
+  "overrides": {
+    "Dialog": {
+      "cardMode": "single",
+      "viewport": "720x480"
+    },
+    "ChatMessageList": {
+      "cardMode": "column"
+    },
+    "AlertDialog": {
+      "cardMode": "single",
+      "viewport": "720x420"
+    },
+    "ConfirmDialog": {
+      "cardMode": "single",
+      "viewport": "720x420"
+    },
+    "DropdownMenu": {
+      "cardMode": "single",
+      "primaryStory": "AttachMenu",
+      "viewport": "480x320"
+    },
+    "Select": {
+      "cardMode": "single",
+      "primaryStory": "Open",
+      "viewport": "480x320"
+    },
+    "Tooltip": {
+      "cardMode": "single",
+      "viewport": "400x200"
+    },
+    "Table": {
+      "cardMode": "column"
+    },
+    "ChatComposer": {
+      "cardMode": "column"
+    },
+    "ChatEmptyState": {
+      "cardMode": "column"
+    }
+  },
+  "extraEntries": [
+    "lucide-react"
+  ],
+  "readmeHeader": ".design-sync/conventions.md"
+}
