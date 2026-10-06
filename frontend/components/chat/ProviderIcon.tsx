@@ -9,6 +9,21 @@ const PROVIDER_LABELS: Record<string, string> = {
     gemini: "Google Gemini",
 };
 
+export function providerLabel(provider: string): string {
+    return PROVIDER_LABELS[provider] ?? provider;
+}
+
+/** Groups models by provider, keeping the catalog's order of first appearance. */
+export function groupByProvider<T extends { provider: string }>(models: T[]): { provider: string; models: T[] }[] {
+    const groups = new Map<string, T[]>();
+    for (const model of models) {
+        const list = groups.get(model.provider) ?? [];
+        list.push(model);
+        groups.set(model.provider, list);
+    }
+    return [...groups].map(([provider, items]) => ({ provider, models: items }));
+}
+
 const PROVIDER_ICONS: Record<string, typeof OpenAIIcon> = {
     openai: OpenAIIcon,
     anthropic: ClaudeIcon,

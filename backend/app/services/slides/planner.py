@@ -23,6 +23,7 @@ from pathlib import Path
 from uuid import UUID
 
 from app.config import settings
+from app.services import app_settings
 from app.models.slides import SlideOutline
 from app.services.agentic.contracts import AgentExecutionRequest, AgentReasoningEffort, AgentRunner
 from app.services.agentic.model_settings import load_snapshot
@@ -104,8 +105,8 @@ class PlannerConversationService:
             return AgentsSdkRunner(
                 model=model,
                 reasoning_effort=effort,
-                timeout_seconds=float(settings.agent_timeout_minutes) * 60,
-                heartbeat_seconds=settings.agent_heartbeat_seconds,
+                timeout_seconds=float(app_settings.value("agents.limits.timeout_minutes")) * 60,
+                heartbeat_seconds=app_settings.value("agents.limits.heartbeat_seconds"),
                 litellm_api_keys={
                     "gemini": settings.gemini_api_key,
                     "anthropic": settings.anthropic_api_key,
@@ -118,9 +119,9 @@ class PlannerConversationService:
                     model=model,
                     reasoning_effort=effort,
                     api_key=settings.openai_api_key,
-                    timeout_seconds=float(settings.agent_timeout_minutes) * 60,
-                    heartbeat_seconds=settings.agent_heartbeat_seconds,
-                    require_process_isolation=settings.agent_require_process_isolation,
+                    timeout_seconds=float(app_settings.value("agents.limits.timeout_minutes")) * 60,
+                    heartbeat_seconds=app_settings.value("agents.limits.heartbeat_seconds"),
+                    require_process_isolation=app_settings.value("agents.limits.require_process_isolation"),
                 )
             )
         raise WorkflowExecutionError("Unknown planner runner")
@@ -157,7 +158,7 @@ class PlannerConversationService:
                 evidence_block = await asyncio.to_thread(
                     build_planner_evidence_block,
                     workspace,
-                    max_chars=settings.agent_planner_max_evidence_chars,
+                    max_chars=app_settings.value("agents.limits.planner_max_evidence_chars"),
                 )
             except EvidenceError as exc:
                 yield _sse(

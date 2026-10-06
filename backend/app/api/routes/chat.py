@@ -45,9 +45,10 @@ from app.models.chat import (
     as_chat_message_read,
     session_title_from_message,
 )
+from app.services import app_settings
 from app.services.chat import models as chat_models
 from app.models.documents import Document, DocumentStatus
-from app.services.chat.attachments import AttachmentError, ChatAttachmentStorage, MAX_PDF_BYTES, process_upload
+from app.services.chat.attachments import AttachmentError, ChatAttachmentStorage, process_upload
 from app.services.chat.engine import AgentsSdkChatEngine, ChatEngine
 from app.services.chat.repository import ChatRepository, InMemoryChatRepository
 from app.services.documents.repository import DocumentRepository
@@ -164,7 +165,7 @@ async def _session_attachments(
 
 @router.get("/chat/models", response_model=ChatModelsResponse)
 async def list_chat_models() -> ChatModelsResponse:
-    models = chat_models.list_models()
+    models = chat_models.list_visible_models()
     return ChatModelsResponse(
         models=[
             ChatModelOption(id=model.id, label=model.label, provider=model.provider, available=model.available)
@@ -378,7 +379,7 @@ async def attach_chat_documents(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "document_not_ready", "message": "此知識庫文件尚未建立索引或目前無法使用。"},
             )
-        if document.extension.lower() == ".pdf" and document.size_bytes > MAX_PDF_BYTES:
+        if document.extension.lower() == ".pdf" and document.size_bytes > app_settings.value("uploads.chat.max_pdf_bytes"):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "document_too_large", "message": "此 PDF 檔案過大，無法加入對話。"},
@@ -462,7 +463,7 @@ async def send_chat_message(
             turn_summary = session.summary if replay_history is not history else None
             if (
                 isinstance(previous_tokens, (int, float))
-                and previous_tokens > settings.chat_compaction_threshold * selected_model.context_window
+                and previous_tokens > app_settings.value("chat.compaction_threshold") * selected_model.context_window
                 and len(replay_history) > COMPACTION_RECENT_MESSAGES
             ):
                 newly_old = replay_history[:-COMPACTION_RECENT_MESSAGES]
@@ -571,7 +572,7 @@ async def send_chat_message(
         _stream_with_heartbeat(
             _generate(),
             heartbeat_seconds=settings.chat_stream_heartbeat_seconds,
-            timeout_seconds=settings.chat_timeout_seconds,
+            timeout_seconds=app_settings.value("chat.timeout_seconds"),
         ),
         media_type="text/event-stream",
         headers=SSE_RESPONSE_HEADERS,

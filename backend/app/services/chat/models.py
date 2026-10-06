@@ -12,30 +12,6 @@ from dataclasses import dataclass
 
 from app.config import Settings, settings
 
-# OpenAI models are sent as plain names; Gemini/Anthropic go through LiteLLM,
-# matching how app.services.agentic.sdk_runner routes "litellm/<provider>/..."
-# model names for the rest of the app.
-_DEFAULT_MODEL_IDS: tuple[str, ...] = (
-    "gpt-6-astra",
-    "gpt-6-sol",
-    "gpt-6-luna",
-    "litellm/gemini/gemini-3.8-flash",
-    "litellm/anthropic/claude-sonnet-5",
-)
-
-_LABELS: dict[str, str] = {
-    "gpt-6-astra": "GPT-6 Astra",
-    "gpt-6-sol": "GPT-6 Sol",
-    "gpt-6-luna": "GPT-6 Luna",
-    "litellm/gemini/gemini-3.8-flash": "Gemini 3.8 Flash",
-    "litellm/anthropic/claude-sonnet-5": "Claude Sonnet 5",
-}
-
-# Use the same conservative bound for all catalog entries until their actual
-# context windows have been verified for the provider/model combination.
-_CONSERVATIVE_CONTEXT_WINDOW = 128_000
-
-
 @dataclass(frozen=True)
 class ChatModel:
     id: str
@@ -43,19 +19,6 @@ class ChatModel:
     provider: str
     available: bool
     context_window: int
-
-
-def _provider_for(model_id: str) -> str:
-    if model_id.startswith("litellm/"):
-        return model_id.removeprefix("litellm/").partition("/")[0]
-    return "openai"
-
-
-def _configured_ids(app_settings: Settings) -> list[str]:
-    raw = app_settings.chat_model_options
-    if not raw:
-        return list(_DEFAULT_MODEL_IDS)
-    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def _is_available(provider: str, app_settings: Settings) -> bool:
@@ -67,26 +30,50 @@ def _is_available(provider: str, app_settings: Settings) -> bool:
     return bool(secret and secret.get_secret_value())
 
 
-def list_models(app_settings: Settings | None = None) -> list[ChatModel]:
+def _entry_to_model(entry, app_settings: Settings) -> ChatModel:
+    return ChatModel(
+        id=entry.id,
+        label=entry.label,
+        provider=entry.provider,
+        available=_is_available(entry.provider, app_settings),
+        context_window=entry.context_window,
+    )
+
+
+def list_models(app_settings: Settings | None = None, use: str = "chat") -> list[ChatModel]:
+    """The catalog from config.yaml, in file order, filtered by its ``use`` list."""
+
     app_settings = app_settings or settings
-    models: list[ChatModel] = []
-    for model_id in _configured_ids(app_settings):
-        provider = _provider_for(model_id)
-        models.append(
-            ChatModel(
-                id=model_id,
-                label=_LABELS.get(model_id, model_id),
-                provider=provider,
-                available=_is_available(provider, app_settings),
-                context_window=_CONSERVATIVE_CONTEXT_WINDOW,
-            )
-        )
-    return models
+    return [_entry_to_model(entry, app_settings) for entry in app_settings.catalog_models if use in entry.use]
+
+
+def list_visible_models(app_settings: Settings | None = None) -> list[ChatModel]:
+    """Chat models minus those the settings page hides from the picker."""
+
+    from app.services import app_settings as overrides
+
+    hidden = set(overrides.value("chat.hidden_models", cfg=app_settings))
+    return [m for m in list_models(app_settings) if m.id not in hidden]
 
 
 def default_model_id(app_settings: Settings | None = None) -> str:
-    app_settings = app_settings or settings
-    return app_settings.chat_default_model or app_settings.agent_default_model
+    """The configured default, unless it is hidden/unavailable/unknown.
+
+    Falls back to the first visible available model, then the first available
+    one, then the raw configured id (so callers still get a string).
+    """
+
+    from app.services import app_settings as overrides
+
+    configured = overrides.value("chat.default_model", cfg=app_settings)
+    visible = list_visible_models(app_settings)
+    if any(m.id == configured and m.available for m in visible):
+        return configured
+    for pool in (visible, list_models(app_settings)):
+        for model in pool:
+            if model.available:
+                return model.id
+    return configured
 
 
 def find_available_model(model_id: str, app_settings: Settings | None = None) -> ChatModel | None:
@@ -98,4 +85,4 @@ def find_available_model(model_id: str, app_settings: Settings | None = None) ->
     return None
 
 
-__all__ = ["ChatModel", "list_models", "default_model_id", "find_available_model"]
+__all__ = ["ChatModel", "list_models", "list_visible_models", "default_model_id", "find_available_model"]

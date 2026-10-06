@@ -13,6 +13,7 @@ from typing import Any
 from sqlmodel import Session, select
 
 from app.config import settings
+from app.services import app_settings
 from app.models.agent_settings import AgentStageSettings
 from app.services.agentic.contracts import AgentReasoningEffort
 
@@ -31,28 +32,27 @@ class StageModelSettings:
     planner_enabled: bool | None
 
 
-def _base_effective(stage: str) -> dict[str, tuple[Any, str]]:
+def _base_effective(stage: str, session: Session | None = None) -> dict[str, tuple[Any, str]]:
     runner = getattr(settings, f"agent_{stage}_runner")
     configured_model = getattr(settings, f"agent_{stage}_model")
     model = configured_model or settings.agent_default_model
     configured_effort = getattr(settings, f"agent_{stage}_reasoning_effort")
     effort = configured_effort or settings.agent_default_reasoning_effort
     result = {
-        "runner": (runner, "env"),
+        "runner": (runner, app_settings.field_source(f"agent_{stage}_runner")),
         "model": (
             model,
-            "env" if configured_model is not None else "default",
+            app_settings.field_source(f"agent_{stage}_model") if configured_model is not None else "default",
         ),
         "reasoning_effort": (
             effort,
-            "env" if configured_effort is not None else "default",
+            app_settings.field_source(f"agent_{stage}_reasoning_effort") if configured_effort is not None else "default",
         ),
     }
     if stage == "planner":
-        result["planner_enabled"] = (
-            settings.agent_planner_enabled,
-            "env",
-        )
+        # Generic dev setting (database > env > config > default) is the base
+        # layer; per-workflow agent_stage_settings rows override it.
+        result["planner_enabled"] = app_settings.effective("agents.stages.planner.enabled", session)
     return result
 
 
@@ -74,7 +74,7 @@ def resolve_all_stage_settings(
     }
     resolved: dict[str, StageModelSettings] = {}
     for stage in stages:
-        base = _base_effective(stage)
+        base = _base_effective(stage, session)
         row = stored_rows.get(stage)
         values = {
             key: (getattr(row, key), "database") if row is not None and getattr(row, key) is not None else value

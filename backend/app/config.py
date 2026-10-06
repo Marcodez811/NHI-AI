@@ -2,11 +2,149 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import AliasChoices, SecretStr, Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import yaml
+from pydantic import AliasChoices, BaseModel, ConfigDict, SecretStr, Field, ValidationError, model_validator
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 from app.services.agentic.contracts import AgentReasoningEffort
+
+DEFAULT_CONFIG_FILE = Path(__file__).resolve().parent.parent / "config.yaml"
+
+
+def config_file_path() -> Path:
+    return Path(os.environ.get("CONFIG_FILE") or DEFAULT_CONFIG_FILE)
+
+
+class ModelEntry(BaseModel):
+    """One ``models:`` entry of config.yaml."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    provider: Literal["openai", "anthropic", "gemini"]
+    context_window: int = Field(default=128_000, gt=0)
+    use: list[Literal["chat", "agents", "codex"]] = Field(min_length=1)
+
+
+# Nested YAML path -> flat ``Settings`` field. Env var names are unchanged.
+YAML_FIELD_MAP: dict[tuple[str, ...], str] = {
+    ("chat", "default_model"): "chat_default_model",
+    ("chat", "timeout_seconds"): "chat_timeout_seconds",
+    ("chat", "stream_heartbeat_seconds"): "chat_stream_heartbeat_seconds",
+    ("chat", "compaction_threshold"): "chat_compaction_threshold",
+    ("agents", "default_model"): "agent_default_model",
+    ("agents", "default_reasoning_effort"): "agent_default_reasoning_effort",
+    **{
+        ("agents", "stages", stage, key): f"agent_{stage}_{field}"
+        for stage in ("extraction", "planner", "author", "reviewer")
+        for key, field in (("runner", "runner"), ("model", "model"), ("reasoning_effort", "reasoning_effort"))
+    },
+    ("agents", "stages", "planner", "enabled"): "agent_planner_enabled",
+    **{
+        ("agents", "limits", key): field
+        for key, field in {
+            "timeout_minutes": "agent_timeout_minutes",
+            "heartbeat_seconds": "agent_heartbeat_seconds",
+            "max_author_attempts": "agent_max_author_attempts",
+            "review_stagnation_limit": "agent_review_stagnation_limit",
+            "planner_max_evidence_chars": "agent_planner_max_evidence_chars",
+            "awaiting_outline_ttl_seconds": "agent_awaiting_outline_ttl_seconds",
+            "awaiting_outline_sweep_interval_seconds": "agent_awaiting_outline_sweep_interval_seconds",
+            "event_retention_seconds": "agent_event_retention_seconds",
+            "keep_workspace_on_failure": "agent_keep_workspace_on_failure",
+            "require_process_isolation": "agent_require_process_isolation",
+        }.items()
+    },
+    ("uploads", "max_upload_bytes"): "max_upload_bytes",
+    **{
+        ("uploads", "chat", key): f"chat_{key}"
+        for key in (
+            "max_attachments",
+            "max_message_chars",
+            "max_document_bytes",
+            "max_pdf_bytes",
+            "max_pdf_pages",
+            "max_image_bytes",
+            "max_image_edge",
+        )
+    },
+    ("cleanup", "lease_seconds"): "document_cleanup_lease_seconds",
+    ("cleanup", "retry_base_seconds"): "document_cleanup_retry_base_seconds",
+    ("cleanup", "retry_max_seconds"): "document_cleanup_retry_max_seconds",
+    ("cleanup", "reconcile_interval_seconds"): "document_cleanup_reconcile_interval_seconds",
+    ("cleanup", "reconcile_batch_size"): "document_cleanup_reconcile_batch_size",
+    ("knowledge_base", "vector_store_name"): "openai_vector_store_name",
+    ("knowledge_base", "bootstrap_timeout_seconds"): "openai_vector_store_bootstrap_timeout_seconds",
+}
+_FIELD_TO_YAML_PATH = {field: ".".join(path) for path, field in YAML_FIELD_MAP.items()}
+_FIELD_TO_YAML_PATH["catalog_models"] = "models"
+
+
+def _leaves(node: Any, path: tuple[str, ...] = ()):
+    if isinstance(node, dict) and node:
+        for key, value in node.items():
+            yield from _leaves(value, (*path, str(key)))
+    else:
+        yield path, node
+
+
+def load_yaml_values(path: Path | None = None) -> dict[str, Any]:
+    """Flatten config.yaml into ``Settings`` field values; errors name the YAML path."""
+
+    path = path or config_file_path()
+    if not path.is_file():
+        return {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path}: invalid YAML: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: top level must be a mapping")
+    values: dict[str, Any] = {}
+    models = raw.pop("models", None)
+    for leaf_path, value in _leaves(raw):
+        if not leaf_path:
+            continue
+        field = YAML_FIELD_MAP.get(leaf_path)
+        if field is None:
+            raise ValueError(f"{path}: unknown setting '{'.'.join(leaf_path)}'")
+        values[field] = value
+    if models is not None:
+        if not isinstance(models, list):
+            raise ValueError(f"{path}: models must be a list")
+        entries: list[ModelEntry] = []
+        seen: set[str] = set()
+        for index, item in enumerate(models):
+            try:
+                entry = ModelEntry.model_validate(item)
+            except ValidationError as exc:
+                first = exc.errors()[0]
+                where = ".".join(str(part) for part in first["loc"])
+                raise ValueError(f"{path}: models[{index}].{where}: {first['msg']}") from exc
+            if entry.id in seen:
+                raise ValueError(f"{path}: models[{index}].id: duplicate model id '{entry.id}'")
+            seen.add(entry.id)
+            entries.append(entry)
+        values["catalog_models"] = entries
+    return values
+
+
+class ConfigYamlSource(PydanticBaseSettingsSource):
+    """Lowest-priority source: values from config.yaml (``CONFIG_FILE`` overrides the path)."""
+
+    def __init__(self, settings_cls):
+        super().__init__(settings_cls)
+        self._values = load_yaml_values()
+
+    def get_field_value(self, field, field_name):  # pragma: no cover - unused, __call__ is used
+        return self._values.get(field_name), field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        return dict(self._values)
 
 
 class Settings(BaseSettings):
@@ -16,21 +154,19 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr
     gemini_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
-    # Agent model policy is separate from the chat/vector-store settings. The
-    # old OPENAI_MODEL variable remains an input alias for the generic default
-    # during migration.
+    # Agent model policy is separate from the chat/vector-store settings.
     agent_default_model: str = Field(
-        default="gpt-5.6-luna",
+        default="gpt-6-luna",
         min_length=1,
-        validation_alias=AliasChoices("AGENT_DEFAULT_MODEL", "OPENAI_MODEL"),
+        validation_alias=AliasChoices("AGENT_DEFAULT_MODEL"),
     )
     agent_author_model: str | None = Field(
-        default="gpt-5.6-luna",
+        default="gpt-6-luna",
         min_length=1,
         validation_alias=AliasChoices("AGENT_AUTHOR_MODEL"),
     )
     agent_reviewer_model: str | None = Field(
-        default="gpt-5.6-sol",
+        default="gpt-6.1-sol",
         min_length=1,
         validation_alias=AliasChoices("AGENT_REVIEWER_MODEL"),
     )
@@ -66,13 +202,6 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("AGENT_PLANNER_REASONING_EFFORT"),
     )
-    openai_chat_model: str = "gpt-5.6-luna"
-    # Comma-separated override for the chat model picker (app/services/chat/models.py).
-    # Unset means "use the built-in catalog".
-    chat_model_options: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("CHAT_MODEL_OPTIONS"),
-    )
     chat_default_model: str | None = Field(
         default=None,
         validation_alias=AliasChoices("CHAT_DEFAULT_MODEL"),
@@ -97,25 +226,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHAT_TIMEOUT_SECONDS"),
     )
     database_url: str = "sqlite:///./nhi_ai.db"
-    # Canonical Luna 1 names.  AliasChoices keeps deployments using the old
-    # SLIDES_* names working during migration; the new name is intentionally
-    # first, so it wins when both are present.
     documents_root: Path = Field(
         default=Path("/tmp/documents"),
-        validation_alias=AliasChoices("DOCUMENTS_ROOT", "SLIDES_DOCUMENTS_ROOT"),
+        validation_alias=AliasChoices("DOCUMENTS_ROOT"),
     )
     agent_jobs_root: Path = Field(
         default=Path("/tmp/agents/jobs"),
-        validation_alias=AliasChoices("AGENT_JOBS_ROOT", "SLIDES_JOBS_ROOT"),
+        validation_alias=AliasChoices("AGENT_JOBS_ROOT"),
     )
     agent_output_root: Path = Field(
         default=Path("/tmp/agents/output"),
-        validation_alias=AliasChoices("AGENT_OUTPUT_ROOT", "SLIDES_OUTPUT_ROOT"),
+        validation_alias=AliasChoices("AGENT_OUTPUT_ROOT"),
     )
     agent_timeout_minutes: int = Field(
         default=60,
         gt=0,
-        validation_alias=AliasChoices("AGENT_TIMEOUT_MINUTES", "SLIDES_TIMEOUT_MINUTES"),
+        validation_alias=AliasChoices("AGENT_TIMEOUT_MINUTES"),
     )
     agent_heartbeat_seconds: float = Field(
         default=10.0,
@@ -124,7 +250,7 @@ class Settings(BaseSettings):
     )
     agent_keep_workspace_on_failure: bool = Field(
         default=True,
-        validation_alias=AliasChoices("AGENT_KEEP_WORKSPACE_ON_FAILURE", "SLIDES_KEEP_WORKSPACE_ON_FAILURE"),
+        validation_alias=AliasChoices("AGENT_KEEP_WORKSPACE_ON_FAILURE"),
     )
     agent_max_author_attempts: int = Field(
         default=5,
@@ -213,6 +339,10 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("ENABLE_AGENT_DEV_ROUTES"),
     )
+    enable_dev_settings: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("ENABLE_DEV_SETTINGS"),
+    )
     documents_worker_processes: int = Field(default=1, gt=0)
     documents_worker_max_async_tasks: int = Field(default=4, gt=0)
     tasks_worker_processes: int = Field(default=2, gt=0)
@@ -229,6 +359,16 @@ class Settings(BaseSettings):
     document_cleanup_reconcile_interval_seconds: int = Field(default=900, gt=0)
     document_cleanup_reconcile_batch_size: int = Field(default=100, gt=0)
     taskiq_schedule_prefix: str = "nhi-ai"
+    # Chat upload/message limits (config.yaml uploads.chat.*).
+    chat_max_attachments: int = Field(default=10, ge=1)
+    chat_max_message_chars: int = Field(default=20_000, ge=1)
+    chat_max_document_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
+    chat_max_pdf_bytes: int = Field(default=20 * 1024 * 1024, ge=1)
+    chat_max_pdf_pages: int = Field(default=100, ge=1)
+    chat_max_image_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
+    chat_max_image_edge: int = Field(default=1568, ge=1)
+    # Model catalog (config.yaml models:), validated by ``ModelEntry``.
+    catalog_models: list[ModelEntry] = Field(default_factory=list)
 
     # Short aliases used by operator configuration and older deployment
     # manifests.  The canonical names above remain the serialized settings.
@@ -248,81 +388,32 @@ class Settings(BaseSettings):
     def cleanup_reconcile_interval_seconds(self) -> int:
         return self.document_cleanup_reconcile_interval_seconds
 
-    # env variables storage
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
+
+    @classmethod
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+    ):
+        # init > env > .env > config.yaml > code defaults
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+            ConfigYamlSource(settings_cls),
+        )
 
     @model_validator(mode="before")
     @classmethod
     def migrate_legacy_constructor_names(cls, values):
-        """Accept old Python keyword names with canonical names taking priority."""
+        """Accept the old Python keyword name with the canonical name taking priority."""
 
         if not isinstance(values, dict):
             return values
         values = dict(values)
-        for old_name, new_name in {
-            "openai_model": "agent_default_model",
-            "slides_jobs_root": "agent_jobs_root",
-            "slides_documents_root": "documents_root",
-            "slides_output_root": "agent_output_root",
-            "slides_timeout_minutes": "agent_timeout_minutes",
-            "slides_keep_workspace_on_failure": "agent_keep_workspace_on_failure",
-            "agent_max_review_rounds": "agent_max_author_attempts",
-        }.items():
-            if new_name not in values and old_name in values:
-                values[new_name] = values[old_name]
+        if "agent_max_author_attempts" not in values and "agent_max_review_rounds" in values:
+            values["agent_max_author_attempts"] = values["agent_max_review_rounds"]
         return values
-
-    # Transitional Python attribute alias for callers that still use the old
-    # setting name (the queued agent worker uses ``agent_default_model``).
-    @property
-    def openai_model(self) -> str:
-        return self.agent_default_model
-
-    @openai_model.setter
-    def openai_model(self, value: str) -> None:
-        self.agent_default_model = value
-
-    # Transitional Python attribute aliases.  Setters are deliberate: a
-    # number of integrations override settings in tests/startup hooks.
-    @property
-    def slides_jobs_root(self) -> Path:
-        return self.agent_jobs_root
-
-    @slides_jobs_root.setter
-    def slides_jobs_root(self, value: Path) -> None:
-        self.agent_jobs_root = Path(value)
-
-    @property
-    def slides_documents_root(self) -> Path:
-        return self.documents_root
-
-    @slides_documents_root.setter
-    def slides_documents_root(self, value: Path) -> None:
-        self.documents_root = Path(value)
-
-    @property
-    def slides_output_root(self) -> Path:
-        return self.agent_output_root
-
-    @slides_output_root.setter
-    def slides_output_root(self, value: Path) -> None:
-        self.agent_output_root = Path(value)
-
-    @property
-    def slides_timeout_minutes(self) -> int:
-        return self.agent_timeout_minutes
-
-    @slides_timeout_minutes.setter
-    def slides_timeout_minutes(self, value: int) -> None:
-        self.agent_timeout_minutes = int(value)
-
-    @property
-    def slides_keep_workspace_on_failure(self) -> bool:
-        return self.agent_keep_workspace_on_failure
-
-    @slides_keep_workspace_on_failure.setter
-    def slides_keep_workspace_on_failure(self, value: bool) -> None:
-        self.agent_keep_workspace_on_failure = bool(value)
 
     @property
     def agent_max_review_rounds(self) -> int:
@@ -334,4 +425,18 @@ class Settings(BaseSettings):
     def agent_max_review_rounds(self, value: int) -> None:
         self.agent_max_author_attempts = int(value)
 
-settings = Settings()
+
+def _load_settings() -> Settings:
+    try:
+        return Settings()
+    except ValidationError as exc:
+        if not any(str(e["loc"][0]) in _FIELD_TO_YAML_PATH for e in exc.errors() if e["loc"]):
+            raise
+        lines = []
+        for error in exc.errors():
+            field = str(error["loc"][0]) if error["loc"] else "?"
+            lines.append(f"{_FIELD_TO_YAML_PATH.get(field, field)}: {error['msg']}")
+        raise RuntimeError("Invalid configuration (config.yaml / environment): " + "; ".join(lines)) from exc
+
+
+settings = _load_settings()

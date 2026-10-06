@@ -1,10 +1,7 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/chat" }));
-vi.mock("../components/app-shell/theme-menu", () => ({
-    ThemeMenu: () => <button type="button">佈景</button>,
-}));
 
 import { AppShell } from "../components/app-shell/app-shell";
 
@@ -52,5 +49,15 @@ describe("AppShell sidebar preference", () => {
         // /chat is still reachable through 新對話, which replaces the old entry.
         const newChatLinks = screen.getAllByRole("link", { name: "新對話" });
         expect(newChatLinks.some((link) => link.getAttribute("href") === "/chat")).toBe(true);
+    });
+
+    it("links the footer to /settings and keeps 設定 out of the main nav", async () => {
+        render(<AppShell><div>內容</div></AppShell>);
+        const mainNav = screen.getAllByRole("navigation", { name: "主要導覽" })[0];
+        expect(within(mainNav).queryByRole("link", { name: "設定" })).not.toBeInTheDocument();
+        expect(screen.queryByText("外觀")).not.toBeInTheDocument();
+        const settingsLinks = screen.getAllByRole("link", { name: "設定" });
+        expect(settingsLinks.length).toBeGreaterThanOrEqual(2); // sidebar footer + mobile header
+        expect(settingsLinks.every((link) => link.getAttribute("href") === "/settings")).toBe(true);
     });
 });

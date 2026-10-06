@@ -18,6 +18,7 @@ from taskiq.depends.progress_tracker import TaskProgress
 
 from app.broker import result_backend, tasks_broker as broker
 from app.config import settings
+from app.services import app_settings
 from app.services.agentic import AgentPhase, AgentTaskPayload, AgentTaskResult, WorkflowStatus, workflow_registry
 from app.services.agentic.service import execute_workflow
 from app.services.agentic.runner import (
@@ -63,7 +64,7 @@ def _build_runner_registry() -> tuple[RunnerRegistry, float | None]:
     exposing either choice through the task payload.
     """
 
-    if settings.agent_require_process_isolation and not bwrap_available():
+    if app_settings.value("agents.limits.require_process_isolation") and not bwrap_available():
         raise RuntimeError("AGENT_REQUIRE_PROCESS_ISOLATION is enabled but bubblewrap is unavailable")
 
     timeout_seconds = float(getattr(settings, "agent_timeout_minutes", 45)) * 60
@@ -73,8 +74,8 @@ def _build_runner_registry() -> tuple[RunnerRegistry, float | None]:
             reasoning_effort=settings.agent_default_reasoning_effort,
             api_key=settings.openai_api_key,
             timeout_seconds=timeout_seconds,
-            heartbeat_seconds=settings.agent_heartbeat_seconds,
-            require_process_isolation=settings.agent_require_process_isolation,
+            heartbeat_seconds=app_settings.value("agents.limits.heartbeat_seconds"),
+            require_process_isolation=app_settings.value("agents.limits.require_process_isolation"),
         ),
     )
     # Registered, not selected: every ``agent_*_runner`` setting defaults to
@@ -84,7 +85,7 @@ def _build_runner_registry() -> tuple[RunnerRegistry, float | None]:
         model=settings.agent_default_model,
         reasoning_effort=settings.agent_default_reasoning_effort,
         timeout_seconds=timeout_seconds,
-        heartbeat_seconds=settings.agent_heartbeat_seconds,
+        heartbeat_seconds=app_settings.value("agents.limits.heartbeat_seconds"),
         litellm_api_keys={
             "gemini": settings.gemini_api_key,
             "anthropic": settings.anthropic_api_key,
@@ -169,7 +170,7 @@ async def run(payload: AgentTaskPayload) -> AgentTaskResult:
                 # A slide run can legitimately outlive the generic five-minute
                 # lease; keep a duplicate stream delivery from purchasing a
                 # second workflow while the original worker is still active.
-                lease_seconds=max(300, settings.agent_timeout_minutes * 60 + 60),
+                lease_seconds=max(300, app_settings.value("agents.limits.timeout_minutes") * 60 + 60),
                 # Only an explicit resume (the outline-approval endpoint
                 # enqueues ``resume_from="author"``) may reclaim a job parked
                 # in AWAITING_INPUT; an ordinary delivery must not silently
@@ -433,7 +434,7 @@ async def expire_awaiting_outline_task() -> dict[str, int]:
     and is skipped here.
     """
 
-    ttl_seconds = settings.agent_awaiting_outline_ttl_seconds
+    ttl_seconds = app_settings.value("agents.limits.awaiting_outline_ttl_seconds")
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
     reason = f"Outline approval was not completed within {ttl_seconds} seconds and the job was automatically expired."
     jobs_root = Path(settings.agent_jobs_root).expanduser().resolve()

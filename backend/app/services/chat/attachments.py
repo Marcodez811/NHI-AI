@@ -24,16 +24,11 @@ from PIL import Image, UnidentifiedImageError
 from pypdf import PdfReader
 
 from app.config import settings
+from app.services import app_settings
 from app.models.chat import ChatAttachmentKind, ChatAttachmentStatus
 from app.services.documents.storage import CHAT_TEXT_SUFFIX
 
-MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
-# PDFs go to the model as the file itself, so they must fit every provider's
-# inline-file limits, which are tighter than ours for other documents.
-MAX_PDF_BYTES = 20 * 1024 * 1024
-MAX_PDF_PAGES = 100
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_IMAGE_EDGE = 1568
+# Size/page limits come from config.yaml (uploads.chat.*) and are read per call.
 
 DOCUMENT_EXTENSIONS = frozenset({".pdf", ".docx", ".txt", ".md"})
 IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
@@ -261,8 +256,8 @@ def _check_pdf(path: Path) -> None:
         raise
     except Exception as exc:
         raise AttachmentError("無法讀取此 PDF 檔案內容。") from exc
-    if page_count > MAX_PDF_PAGES:
-        raise AttachmentError(f"PDF 超過 {MAX_PDF_PAGES} 頁上限，請拆分後再上傳。")
+    if page_count > app_settings.value("uploads.chat.max_pdf_pages"):
+        raise AttachmentError(f"PDF 超過 {app_settings.value("uploads.chat.max_pdf_pages")} 頁上限，請拆分後再上傳。")
 
 
 def _reencode_image(data: bytes) -> tuple[bytes, str]:
@@ -281,8 +276,8 @@ def _reencode_image(data: bytes) -> tuple[bytes, str]:
             )
             image = image.convert("RGBA" if has_alpha else "RGB")
             long_edge = max(image.size)
-            if long_edge > MAX_IMAGE_EDGE:
-                scale = MAX_IMAGE_EDGE / long_edge
+            if long_edge > app_settings.value("uploads.chat.max_image_edge"):
+                scale = app_settings.value("uploads.chat.max_image_edge") / long_edge
                 new_size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
                 image = image.resize(new_size, Image.LANCZOS)
             buffer = BytesIO()
@@ -326,7 +321,7 @@ async def process_upload(
         # how the bytes are parsed below.
         is_image = False
 
-    max_bytes = MAX_IMAGE_BYTES if is_image else MAX_PDF_BYTES if extension == ".pdf" else MAX_DOCUMENT_BYTES
+    max_bytes = app_settings.value("uploads.chat.max_image_bytes") if is_image else app_settings.value("uploads.chat.max_pdf_bytes") if extension == ".pdf" else app_settings.value("uploads.chat.max_document_bytes")
     data = await upload.read()
     if not data:
         raise AttachmentError("上傳的檔案是空的。")
@@ -431,6 +426,4 @@ __all__ = [
     "process_upload",
     "DOCUMENT_EXTENSIONS",
     "IMAGE_MIME_TYPES",
-    "MAX_DOCUMENT_BYTES",
-    "MAX_IMAGE_BYTES",
 ]

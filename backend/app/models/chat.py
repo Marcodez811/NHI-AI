@@ -20,10 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field as PydanticField, field_valida
 from sqlalchemy import Column, JSON, Text
 from sqlmodel import Field, SQLModel
 
+from app.services import app_settings
+
 DEFAULT_SESSION_TITLE = "新對話"
 SESSION_TITLE_MAX_CHARS = 30
-MAX_MESSAGE_CHARS = 20_000
-MAX_ATTACHMENTS_PER_MESSAGE = 10
 MAX_REASONING_CHARS = 20_000
 
 
@@ -232,16 +232,34 @@ class UserFileRead(BaseModel):
     in_knowledge_base: bool
 
 
+def _check_link_count(value: list[UUID]) -> list[UUID]:
+    # Live limit (settings page): read at validation time, not import time.
+    limit = app_settings.value("uploads.chat.max_attachments") * 5
+    if len(value) > limit:
+        raise ValueError(f"一次最多可選 {limit} 個項目。")
+    return value
+
+
 class LinkFilesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    file_ids: list[UUID] = PydanticField(min_length=1, max_length=MAX_ATTACHMENTS_PER_MESSAGE * 5)
+    file_ids: list[UUID] = PydanticField(min_length=1)
+
+    @field_validator("file_ids")
+    @classmethod
+    def _limit(cls, value: list[UUID]) -> list[UUID]:
+        return _check_link_count(value)
 
 
 class LinkDocumentsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    document_ids: list[UUID] = PydanticField(min_length=1, max_length=MAX_ATTACHMENTS_PER_MESSAGE * 5)
+    document_ids: list[UUID] = PydanticField(min_length=1)
+
+    @field_validator("document_ids")
+    @classmethod
+    def _limit(cls, value: list[UUID]) -> list[UUID]:
+        return _check_link_count(value)
 
 
 class ChatSourceRead(BaseModel):
@@ -278,13 +296,16 @@ class ChatSessionDetail(BaseModel):
 class ChatMessageCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    content: str = PydanticField(min_length=1, max_length=MAX_MESSAGE_CHARS)
-    attachment_ids: list[UUID] = PydanticField(default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE)
+    content: str = PydanticField(min_length=1)
+    attachment_ids: list[UUID] = PydanticField(default_factory=list)
     model: str
 
     @field_validator("content")
     @classmethod
     def content_not_blank(cls, value: str) -> str:
+        limit = app_settings.value("uploads.chat.max_message_chars")
+        if len(value) > limit:
+            raise ValueError(f"訊息不可超過 {limit} 字。")
         value = value.strip()
         if not value:
             raise ValueError("content cannot be empty or whitespace")
@@ -293,6 +314,9 @@ class ChatMessageCreate(BaseModel):
     @field_validator("attachment_ids")
     @classmethod
     def attachment_ids_unique(cls, value: list[UUID]) -> list[UUID]:
+        limit = app_settings.value("uploads.chat.max_attachments")
+        if len(value) > limit:
+            raise ValueError(f"每則訊息最多 {limit} 個附件。")
         if len(value) != len(set(value)):
             raise ValueError("attachment_ids must be unique")
         return value

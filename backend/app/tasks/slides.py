@@ -11,6 +11,7 @@ from taskiq.depends.progress_tracker import TaskProgress
 
 from app.broker import result_backend
 from app.config import settings
+from app.services import app_settings
 from app.models.slides import JobStatus, SlidesTaskPayload, SlidesTaskResult
 from app.services.slides.contracts import JobError
 
@@ -113,16 +114,16 @@ async def generate_slides_task(payload: SlidesTaskPayload) -> SlidesTaskResult:
             model=settings.agent_default_model,
             reasoning_effort=settings.agent_default_reasoning_effort,
             api_key=settings.openai_api_key,
-            timeout_seconds=settings.agent_timeout_minutes * 60,
-            heartbeat_seconds=settings.agent_heartbeat_seconds,
-            require_process_isolation=settings.agent_require_process_isolation,
+            timeout_seconds=app_settings.value("agents.limits.timeout_minutes") * 60,
+            heartbeat_seconds=app_settings.value("agents.limits.heartbeat_seconds"),
+            require_process_isolation=app_settings.value("agents.limits.require_process_isolation"),
         )
         workflow_result = await execute_workflow(
             AgentTaskPayload(job_id=payload.job_id, workflow="slides", input=payload),
             runner=RunnerRegistry({"codex": CodexAgentRunner(codex)}),
             workspace_root=settings.agent_jobs_root,
             progress_callback=report_progress,
-            timeout_seconds=settings.agent_timeout_minutes * 60,
+            timeout_seconds=app_settings.value("agents.limits.timeout_minutes") * 60,
         )
         if workflow_result.status is not WorkflowStatus.COMPLETED or workflow_result.output is None:
             raise RuntimeError("presentation workflow did not complete")

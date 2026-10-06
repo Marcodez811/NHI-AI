@@ -18,6 +18,7 @@ from uuid import UUID
 from loguru import logger
 
 from app.config import settings
+from app.services import app_settings
 from app.models.slides import JobStatus, SlideOutline, SlidesTaskPayload, SlidesTaskResult
 from app.services.agentic.contracts import (
     AgentExecutionResult,
@@ -179,7 +180,7 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
     @property
     def planner_role(self) -> str | None:
         selected = stage_settings("planner")
-        enabled = selected.planner_enabled if selected else settings.agent_planner_enabled
+        enabled = selected.planner_enabled if selected else app_settings.value("agents.stages.planner.enabled")
         return "presentation_planner" if enabled else None
 
     @property
@@ -201,7 +202,7 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
     def max_author_attempts(self) -> int:
         # Five write-capable author activations is the hard slides-workflow
         # ceiling; deployment settings can only lower it.
-        return min(5, settings.agent_max_author_attempts)
+        return min(5, app_settings.value("agents.limits.max_author_attempts"))
 
     @property
     def max_review_rounds(self) -> int:
@@ -211,7 +212,7 @@ class SlidesWorkflowAdapter(BaseWorkflowAdapter[SlidesTaskPayload, SlidesTaskRes
 
     @property
     def review_stagnation_limit(self) -> int:
-        return settings.agent_review_stagnation_limit
+        return app_settings.value("agents.limits.review_stagnation_limit")
 
     def deterministic_validate(self, value: SlidesTaskPayload, workspace: Path) -> None:
         # Input/preflight checks run in prepare_input.  Generated-deck checks
@@ -500,7 +501,7 @@ rather than presenting both sides unreconciled.
             return await asyncio.to_thread(
                 build_planner_evidence_block,
                 workspace,
-                max_chars=settings.agent_planner_max_evidence_chars,
+                max_chars=app_settings.value("agents.limits.planner_max_evidence_chars"),
             )
         except EvidenceError as exc:
             raise JobError("planning", str(exc)) from exc
@@ -801,7 +802,7 @@ rather than presenting both sides unreconciled.
             logger.exception("Could not record the slide deck artifact", job_id=value.job_id)
 
     async def cleanup(self, value: SlidesTaskPayload, workspace: Path, *, success: bool) -> None:
-        if success or not settings.agent_keep_workspace_on_failure:
+        if success or not app_settings.value("agents.limits.keep_workspace_on_failure"):
             await asyncio.to_thread(cleanup_job, workspace)
 
     @staticmethod

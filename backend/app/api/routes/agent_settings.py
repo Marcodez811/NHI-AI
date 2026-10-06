@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 from app.config import settings
 from app.db import get_session
 from app.models.agent_settings import AgentStageSettings
+from app.services import app_settings
 from app.services.agentic.contracts import AgentReasoningEffort
 from app.services.agentic.events import _safe_model_name
 from app.services.agentic.model_settings import resolve_all_stage_settings
@@ -76,7 +77,7 @@ def _effective_settings(session: Session, workflow: str, stage_names: tuple[str,
         if stage == "planner":
             effective["planner_enabled"] = {
                 "value": value.planner_enabled,
-                "source": "database" if stored["planner_enabled"] is not None else "env",
+                "source": "database" if stored["planner_enabled"] is not None else app_settings.effective("agents.stages.planner.enabled", session)[1],
             }
         stages[stage] = {
             "stored": stored,
@@ -88,11 +89,9 @@ def _effective_settings(session: Session, workflow: str, stage_names: tuple[str,
 
 def _source(stage: str, field: str) -> str:
     value = getattr(settings, f"agent_{stage}_{field}")
-    if field == "model":
-        return "env" if value is not None else "default"
-    if field == "reasoning_effort":
-        return "env" if value is not None else "default"
-    return "env"
+    if field in ("model", "reasoning_effort") and value is None:
+        return "default"
+    return app_settings.field_source(f"agent_{stage}_{field}")
 
 
 def _environment_value(stage: str, field: str):

@@ -1,0 +1,97 @@
+# Global product configuration (reviewed baseline).
+# Secrets and deployment values (keys, URLs, paths, workers, queues) live in .env.
+# Resolution order: .env (environment) > this file > code default.
+models:                       # the model catalog; order = picker order
+  - id: litellm/anthropic/claude-fable-5-1
+    label: Claude Fable 5.1
+    provider: anthropic
+    context_window: 128000    # conservative until verified per model
+    use: [chat, agents]       # chat | agents | codex
+  - id: litellm/anthropic/claude-opus-5-5
+    label: Claude Opus 5.5
+    provider: anthropic
+    context_window: 128000
+    use: [chat, agents]
+  - id: litellm/anthropic/claude-sonnet-5-5
+    label: Claude Sonnet 5.5
+    provider: anthropic
+    context_window: 128000
+    use: [chat, agents]
+  - id: litellm/anthropic/claude-haiku-4-5
+    label: Claude Haiku 4.5
+    provider: anthropic
+    context_window: 128000
+    use: [chat, agents]
+  - id: gpt-6-astra           # OpenAI models use plain ids
+    label: GPT-6 Astra
+    provider: openai
+    context_window: 128000
+    use: [chat, agents, codex]
+  - id: gpt-6.1-sol
+    label: GPT-6.1 Sol
+    provider: openai
+    context_window: 128000
+    use: [chat, agents, codex]
+  - id: gpt-6-luna
+    label: GPT-6 Luna
+    provider: openai
+    context_window: 128000
+    use: [chat, agents, codex]
+  - id: litellm/gemini/gemini-3.8-flash
+    label: Gemini 3.8 Flash
+    provider: gemini
+    context_window: 128000
+    use: [chat, agents]
+  - id: litellm/gemini/gemini-3.5-flash-lite
+    label: Gemini 3.5 Flash-Lite
+    provider: gemini
+    context_window: 128000
+    use: [chat, agents]
+  - id: litellm/gemini/gemini-3.1-pro-preview
+    label: Gemini 3.1 Pro Preview
+    provider: gemini
+    context_window: 128000
+    use: [chat, agents]
+chat:
+  default_model: gpt-6-luna
+  timeout_seconds: 180
+  stream_heartbeat_seconds: 10
+  compaction_threshold: 0.6   # fraction of the context window that triggers compaction
+agents:
+  default_model: gpt-6-luna
+  default_reasoning_effort: high
+  stages:                     # runner / model / reasoning_effort per stage
+    extraction: {runner: codex, model: null, reasoning_effort: null}
+    planner:    {runner: codex, model: null, reasoning_effort: null, enabled: false}
+    author:     {runner: codex, model: gpt-6-luna, reasoning_effort: high}
+    reviewer:   {runner: codex, model: gpt-6.1-sol, reasoning_effort: high}
+  limits:
+    timeout_minutes: 60
+    heartbeat_seconds: 10
+    max_author_attempts: 5
+    review_stagnation_limit: 2
+    planner_max_evidence_chars: 150000
+    awaiting_outline_ttl_seconds: 604800
+    awaiting_outline_sweep_interval_seconds: 3600
+    event_retention_seconds: 86400
+    keep_workspace_on_failure: true
+    require_process_isolation: true
+uploads:
+  max_upload_bytes: 262144000           # knowledge-base documents
+  chat:
+    max_attachments: 10
+    max_message_chars: 20000
+    max_document_bytes: 26214400
+    max_pdf_bytes: 20971520
+    max_pdf_pages: 100
+    max_image_bytes: 10485760
+    max_image_edge: 1568
+cleanup:
+  lease_seconds: 300
+  retry_base_seconds: 60
+  retry_max_seconds: 3600
+  reconcile_interval_seconds: 900
+  reconcile_batch_size: 100
+knowledge_base:
+  vector_store_name: NHI-AI Knowledge Base
+  bootstrap_timeout_seconds: 10

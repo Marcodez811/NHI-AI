@@ -57,13 +57,11 @@ def test_worker_launcher_supports_dedicated_scheduler_process():
     ]
 
 
-def test_new_settings_names_take_precedence_over_deprecated_aliases(monkeypatch):
+def test_documents_and_jobs_roots_come_from_env(monkeypatch):
     monkeypatch.setenv("REDIS_URL", "redis://localhost")
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     monkeypatch.setenv("DOCUMENTS_ROOT", "/new/documents")
-    monkeypatch.setenv("SLIDES_DOCUMENTS_ROOT", "/old/documents")
     monkeypatch.setenv("AGENT_JOBS_ROOT", "/new/jobs")
-    monkeypatch.setenv("SLIDES_JOBS_ROOT", "/old/jobs")
     settings = Settings(_env_file=None)
     assert str(settings.documents_root) == "/new/documents"
     assert str(settings.agent_jobs_root) == "/new/jobs"
@@ -75,15 +73,13 @@ def test_agent_model_settings_have_role_defaults_and_legacy_fallback(monkeypatch
     monkeypatch.delenv("AGENT_DEFAULT_MODEL", raising=False)
     monkeypatch.delenv("AGENT_AUTHOR_MODEL", raising=False)
     monkeypatch.delenv("AGENT_REVIEWER_MODEL", raising=False)
-    monkeypatch.setenv("OPENAI_MODEL", "legacy-model")
     settings = Settings(_env_file=None)
-    assert settings.agent_default_model == "legacy-model"
-    assert settings.agent_author_model == "gpt-5.6-luna"
-    assert settings.agent_reviewer_model == "gpt-5.6-sol"
+    assert settings.agent_default_model == "gpt-6-luna"
+    assert settings.agent_author_model == "gpt-6-luna"
+    assert settings.agent_reviewer_model == "gpt-6.1-sol"
     assert settings.agent_default_reasoning_effort.value == "high"
     assert settings.agent_author_reasoning_effort.value == "high"
     assert settings.agent_reviewer_reasoning_effort.value == "high"
-    assert settings.openai_model == "legacy-model"
 
     monkeypatch.setenv("AGENT_DEFAULT_MODEL", "new-default")
     monkeypatch.setenv("AGENT_AUTHOR_MODEL", "author-env")

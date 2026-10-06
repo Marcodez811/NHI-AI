@@ -11,6 +11,7 @@ import {
     type StoredAgentStageSettings,
 } from "../../lib/api/settings";
 import { ApiError } from "../../lib/api/client";
+import { fetchCatalogModels, type CatalogModel } from "../../lib/api/config";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 
@@ -48,14 +49,20 @@ const RUNNER_LABELS: Record<string, string> = {
 const SOURCE_LABELS: Record<string, string> = {
     database: "來自自訂設定",
     env: "來自 .env",
-    default: "來自系統預設",
+    config: "來自設定檔",
+    default: "來自設定檔",
 };
-const OPENAI_MODELS = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"];
-// Codex takes plain OpenAI model names; the Agents runner takes LiteLLM names.
-const MODEL_SUGGESTIONS: Record<string, string[]> = {
-    codex: OPENAI_MODELS,
-    agents: ["litellm/gemini/gemini-3.8-flash", ...OPENAI_MODELS.map((model) => `litellm/openai/${model}`)],
-};
+// Codex takes plain OpenAI model names; the Agents runner takes LiteLLM names
+// (`litellm/<provider>/<id>`, OpenAI as `litellm/openai/<id>`).
+function modelSuggestions(runner: string, catalog: { codex: CatalogModel[]; agents: CatalogModel[] }): string[] {
+    if (runner === "codex") return catalog.codex.map((model) => model.id);
+    if (runner === "agents") {
+        return catalog.agents.map((model) =>
+            model.id.startsWith("litellm/") ? model.id : `litellm/${model.provider}/${model.id}`,
+        );
+    }
+    return [];
+}
 const EMPTY_SETTINGS: StoredAgentStageSettings = {
     runner: null,
     model: null,
@@ -87,6 +94,7 @@ export function WorkflowModelSettings({ workflow }: { workflow: AgentSettingWork
     const [data, setData] = useState<AgentSettingsResponse | null>(null);
     const stages = workflowStages(data);
     const [drafts, setDrafts] = useState<Record<AgentSettingStage, StoredAgentStageSettings> | null>(null);
+    const [catalog, setCatalog] = useState<{ codex: CatalogModel[]; agents: CatalogModel[] }>({ codex: [], agents: [] });
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState(false);
     const [saving, setSaving] = useState<AgentSettingStage | null>(null);
@@ -112,6 +120,19 @@ export function WorkflowModelSettings({ workflow }: { workflow: AgentSettingWork
             });
         return () => controller.abort();
     }, [workflow]);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        Promise.all([
+            fetchCatalogModels("codex", { signal: controller.signal }),
+            fetchCatalogModels("agents", { signal: controller.signal }),
+        ])
+            .then(([codex, agents]) => setCatalog({ codex, agents }))
+            .catch(() => {
+                // Suggestions are optional; the field still accepts any model name.
+            });
+        return () => controller.abort();
+    }, []);
 
     function change(stage: AgentSettingStage, key: keyof StoredAgentStageSettings, value: string | boolean | null) {
         if (!drafts) return;
@@ -244,7 +265,7 @@ export function WorkflowModelSettings({ workflow }: { workflow: AgentSettingWork
                                                 className="font-normal"
                                             />
                                             <datalist id={`models-${id}`}>
-                                                {(MODEL_SUGGESTIONS[draft.runner ?? stage.effective.runner.value] ?? []).map((model) => <option key={model} value={model} />)}
+                                                {modelSuggestions(draft.runner ?? stage.effective.runner.value, catalog).map((model) => <option key={model} value={model} />)}
                                             </datalist>
                                         </label>
                                         <label className="flex flex-col gap-2 text-sm font-medium sm:col-span-2">

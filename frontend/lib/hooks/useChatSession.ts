@@ -13,13 +13,11 @@ import {
     fetchChatSession,
     sendChatMessage,
     uploadChatAttachment,
-    CHAT_MAX_ATTACHMENTS,
-    CHAT_MAX_DOCUMENT_BYTES,
-    CHAT_MAX_PDF_BYTES,
-    CHAT_MAX_IMAGE_BYTES,
 } from "../api/chat";
 import type { ChatAttachment, ChatMessageRecord, ChatSourceRef } from "../api/chat";
+import type { ChatLimits } from "../api/config";
 import { useChatSessions } from "./useChatSessions";
+import { useClientConfig } from "./useClientConfig";
 
 function errorText(error: unknown): string {
     return error instanceof ApiError ? error.message : "服務暫時無法使用，請稍後再試。";
@@ -60,11 +58,11 @@ export type ComposerAttachment = {
 };
 
 /** Client-side echo of the server's own validation, for instant feedback before upload. */
-function validateFile(file: File): string | null {
+function validateFile(file: File, limits: ChatLimits): string | null {
     const kind = classifyChatAttachment(file);
     if (!kind) return "不支援的檔案類型，僅接受 PDF、DOCX、TXT、MD 或 PNG、JPEG、WEBP 圖片。";
     const isPdf = file.name.toLowerCase().endsWith(".pdf");
-    const limit = kind === "image" ? CHAT_MAX_IMAGE_BYTES : isPdf ? CHAT_MAX_PDF_BYTES : CHAT_MAX_DOCUMENT_BYTES;
+    const limit = kind === "image" ? limits.max_image_bytes : isPdf ? limits.max_pdf_bytes : limits.max_document_bytes;
     if (file.size > limit) {
         const limitMb = Math.round(limit / (1024 * 1024));
         return `檔案超過大小上限（${limitMb} MB）。`;
@@ -81,6 +79,7 @@ function validateFile(file: File): string | null {
 export function useChatSession(sessionId: string | null, defaultModel?: string) {
     const router = useRouter();
     const sessionsCtx = useChatSessions();
+    const chatLimits = useClientConfig().chat;
     const [messages, setMessages] = useState<ChatTurn[]>([]);
     const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
     const [attachmentLookup, setAttachmentLookup] = useState<Record<string, ChatAttachment>>({});
@@ -177,7 +176,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
 
     /** Uploads files; resolves with the attachments that finished successfully. */
     const attachFiles = useCallback(async (files: File[]): Promise<ChatAttachment[]> => {
-        const room = CHAT_MAX_ATTACHMENTS - attachments.length;
+        const room = chatLimits.max_attachments - attachments.length;
         const accepted = files.slice(0, Math.max(room, 0));
         if (!accepted.length) return [];
 
@@ -185,7 +184,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         const uploads: Promise<ChatAttachment | null>[] = [];
         for (const file of accepted) {
             const localId = newLocalId("attachment");
-            const invalid = validateFile(file);
+            const invalid = validateFile(file, chatLimits);
             if (invalid) {
                 setAttachments((items) => [...items, { localId, file, status: "failed", error: invalid }]);
                 continue;
@@ -195,7 +194,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         }
         const done = await Promise.all(uploads);
         return done.filter((item): item is ChatAttachment => item !== null);
-    }, [attachments.length, ensureSession, uploadOne]);
+    }, [attachments.length, chatLimits, ensureSession, uploadOne]);
 
     /** Links already-stored files or knowledge-base documents to this conversation. */
     const attachExisting = useCallback(async (
@@ -205,7 +204,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         const known = new Set(attachments.map((item) => item.attachment?.id));
         const fresh = entries
             .filter((entry) => !known.has(entry.id))
-            .slice(0, Math.max(CHAT_MAX_ATTACHMENTS - attachments.length, 0));
+            .slice(0, Math.max(chatLimits.max_attachments - attachments.length, 0));
         if (!fresh.length) return;
         const targetId = await ensureSession();
         const ids = fresh.map((entry) => entry.id);
@@ -226,7 +225,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
                 },
             })),
         ]);
-    }, [attachments, ensureSession]);
+    }, [attachments, chatLimits, ensureSession]);
 
     const removeAttachment = useCallback((localId: string) => {
         setAttachments((items) => {

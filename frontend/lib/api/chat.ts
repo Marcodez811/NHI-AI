@@ -82,11 +82,6 @@ export interface ChatSendMessagePayload {
 /** Kinds accepted by the chat attachment picker; enforced again server-side. */
 const CHAT_DOCUMENT_EXTENSIONS = [".pdf", ".docx", ".txt", ".md"] as const;
 const CHAT_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
-export const CHAT_MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
-/** PDFs go to the model as files, so they must fit the providers' inline limits. */
-export const CHAT_MAX_PDF_BYTES = 20 * 1024 * 1024;
-export const CHAT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-export const CHAT_MAX_ATTACHMENTS = 10;
 
 /** Classifies a picked file the way the server will, for instant client-side feedback. */
 export function classifyChatAttachment(file: File): ChatAttachmentKind | null {

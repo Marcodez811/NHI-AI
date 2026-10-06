@@ -37,9 +37,9 @@ async def test_compatibility_task_routes_through_staged_workflow(tmp_path, monke
         )
 
     monkeypatch.setattr(task_module, "result_backend", fake_backend)
-    monkeypatch.setattr(task_module.settings, "slides_documents_root", tmp_path / "documents")
-    monkeypatch.setattr(task_module.settings, "slides_jobs_root", tmp_path / "jobs")
-    monkeypatch.setattr(task_module.settings, "slides_output_root", tmp_path / "output")
+    monkeypatch.setattr(task_module.settings, "documents_root", tmp_path / "documents")
+    monkeypatch.setattr(task_module.settings, "agent_jobs_root", tmp_path / "jobs")
+    monkeypatch.setattr(task_module.settings, "agent_output_root", tmp_path / "output")
     monkeypatch.setattr("app.services.agentic.service.execute_workflow", fake_execute_workflow)
     payload = SlidesTaskPayload(
         job_id=uuid4(),

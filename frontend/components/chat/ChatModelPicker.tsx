@@ -1,14 +1,17 @@
 "use client";
 
+import { Fragment } from "react";
 import { ChevronDown } from "lucide-react";
 import type { ChatModelOption } from "../../lib/api/chat";
-import { ProviderIcon } from "./ProviderIcon";
+import { ProviderIcon, groupByProvider, providerLabel } from "./ProviderIcon";
 import {
     DropdownMenu,
     DropdownMenuContent,
+    DropdownMenuGroup,
     DropdownMenuLabel,
     DropdownMenuRadioGroup,
     DropdownMenuRadioItem,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
@@ -37,28 +40,36 @@ export function ChatModelPicker({
                 <ChevronDown className="size-3.5 shrink-0 opacity-60" aria-hidden="true" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" side="top" sideOffset={8} className="w-60">
-                <DropdownMenuRadioGroup
-                    value={value ?? ""}
-                    onValueChange={(next) => {
-                        if (next) onValueChange(String(next));
-                    }}
-                >
-                    <DropdownMenuLabel>選擇模型</DropdownMenuLabel>
-                    {models.map((model) => (
-                        <DropdownMenuRadioItem
-                            key={model.id}
-                            value={model.id}
-                            disabled={!model.available}
-                            className="gap-2"
-                        >
-                            <ProviderIcon provider={model.provider} disabled={!model.available} />
-                            <span className="truncate">{model.label}</span>
-                            {!model.available && (
-                                <span className="ml-auto pr-5 text-xs text-muted-foreground">未設定金鑰</span>
-                            )}
-                        </DropdownMenuRadioItem>
-                    ))}
-                </DropdownMenuRadioGroup>
+                {groupByProvider(models).map((group, index) => (
+                    <Fragment key={group.provider}>
+                        {index > 0 && <DropdownMenuSeparator />}
+                        <DropdownMenuGroup>
+                            <DropdownMenuLabel>{providerLabel(group.provider)}</DropdownMenuLabel>
+                            {/* One radio group per provider; all share the value, so only the selected model is checked. */}
+                            <DropdownMenuRadioGroup
+                                value={value ?? ""}
+                                onValueChange={(next) => {
+                                    if (next) onValueChange(String(next));
+                                }}
+                            >
+                                {group.models.map((model) => (
+                                    <DropdownMenuRadioItem
+                                        key={model.id}
+                                        value={model.id}
+                                        disabled={!model.available}
+                                        className="gap-2"
+                                    >
+                                        <ProviderIcon provider={model.provider} disabled={!model.available} />
+                                        <span className="truncate">{model.label}</span>
+                                        {!model.available && (
+                                            <span className="ml-auto pr-5 text-xs text-muted-foreground">未設定金鑰</span>
+                                        )}
+                                    </DropdownMenuRadioItem>
+                                ))}
+                            </DropdownMenuRadioGroup>
+                        </DropdownMenuGroup>
+                    </Fragment>
+                ))}
             </DropdownMenuContent>
         </DropdownMenu>
     );

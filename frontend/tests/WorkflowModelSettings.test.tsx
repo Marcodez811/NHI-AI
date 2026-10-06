@@ -1,10 +1,16 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { WorkflowModelSettings } from "../components/workspace/WorkflowModelSettings";
 
 const api = vi.hoisted(() => ({
     fetch: vi.fn(),
     update: vi.fn(),
+    models: vi.fn(),
+}));
+
+vi.mock("../lib/api/config", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../lib/api/config")>()),
+    fetchCatalogModels: api.models,
 }));
 
 vi.mock("../lib/api/settings", async (importOriginal) => {
@@ -38,6 +44,16 @@ function stageSettings(stages: string[]) {
 const slidesSettings = stageSettings(["extraction", "planner", "author", "reviewer"]);
 const newsSettings = stageSettings(["extraction", "author"]);
 
+beforeEach(() => {
+    api.models.mockImplementation(async (use: string) =>
+        use === "codex"
+            ? [{ id: "gpt-6-luna", label: "GPT-6 Luna", provider: "openai", available: true }]
+            : [
+                { id: "litellm/anthropic/claude-sonnet-5-5", label: "Sonnet", provider: "anthropic", available: true },
+                { id: "gpt-6-luna", label: "GPT-6 Luna", provider: "openai", available: true },
+            ]);
+});
+
 afterEach(() => {
     cleanup();
     vi.clearAllMocks();
@@ -50,7 +66,7 @@ it("renders effective values and their configured sources", async () => {
     const extractionStage = await screen.findByRole("region", { name: "資料擷取" });
     expect(within(extractionStage).getByText("gpt-5-codex")).toBeTruthy();
     expect(screen.getAllByText("來自 .env")).toHaveLength(9);
-    expect(screen.getAllByText("來自系統預設")).toHaveLength(4);
+    expect(screen.getAllByText("來自設定檔")).toHaveLength(4);
     expect(api.fetch).toHaveBeenCalledWith("slides", expect.anything());
 });
 
@@ -91,4 +107,27 @@ it("renders only the given workflow's stages", async () => {
     expect(screen.queryByRole("region", { name: "工作規劃" })).toBeNull();
     expect(screen.queryByRole("region", { name: "內容審查" })).toBeNull();
     expect(api.fetch).toHaveBeenCalledWith("news", expect.anything());
+});
+
+it("builds model suggestions from the catalog API, converting ids per runner", async () => {
+    api.fetch.mockResolvedValue(slidesSettings);
+    const { container } = render(<WorkflowModelSettings workflow="slides" />);
+    await screen.findByRole("region", { name: "資料擷取" });
+    await vi.waitFor(() => expect(container.querySelectorAll("datalist option").length).toBeGreaterThan(0));
+    expect(api.models).toHaveBeenCalledWith("codex", expect.anything());
+    expect(api.models).toHaveBeenCalledWith("agents", expect.anything());
+    const values = [...container.querySelectorAll("datalist option")].map((o) => o.getAttribute("value"));
+    expect(values).toContain("gpt-6-luna");
+    expect(values).not.toContain("litellm/openai/gpt-6-luna");
+});
+
+it("uses litellm/openai ids for OpenAI models under the agents runner", async () => {
+    const settings = stageSettings(["planner"]);
+    (settings.stages as any).planner.effective.runner = { value: "agents", source: "env" };
+    api.fetch.mockResolvedValue(settings);
+    const { container } = render(<WorkflowModelSettings workflow="slides" />);
+    await screen.findByRole("region", { name: "規劃" }).catch(() => null);
+    await vi.waitFor(() => expect(container.querySelectorAll("datalist option").length).toBeGreaterThan(0));
+    const values = [...container.querySelectorAll("datalist option")].map((o) => o.getAttribute("value"));
+    expect(values).toEqual(["litellm/anthropic/claude-sonnet-5-5", "litellm/openai/gpt-6-luna"]);
 });

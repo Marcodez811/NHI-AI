@@ -268,7 +268,7 @@ async def test_completed_status_and_download_are_safe(tmp_path, monkeypatch, fil
     deck = tmp_path / "jobs" / "deck.pptx"
     deck.parent.mkdir()
     deck.write_bytes(b"pptx")
-    monkeypatch.setattr(settings, "slides_output_root", tmp_path)
+    monkeypatch.setattr(settings, "agent_output_root", tmp_path)
     backend.results[str(job_id)] = SimpleNamespace(
         is_err=False,
         return_value={

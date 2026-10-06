@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 from app.config import settings
+from app.services import app_settings
 from app.models.news import NewsTaskPayload, NewsTaskResult
 from app.services.agentic.contracts import AgentReasoningEffort, BaseWorkflowAdapter
 from app.services.agentic.job_model_context import stage_settings
@@ -126,7 +127,7 @@ class NewsWorkflowAdapter(BaseWorkflowAdapter[NewsTaskPayload, NewsTaskResult]):
         return NewsTaskResult(job_id=value.job_id, article=result.response.strip())
 
     def cleanup(self, value: NewsTaskPayload, workspace: Path, *, success: bool) -> None:
-        if success or not settings.agent_keep_workspace_on_failure:
+        if success or not app_settings.value("agents.limits.keep_workspace_on_failure"):
             shutil.rmtree(workspace, ignore_errors=True)
 
 

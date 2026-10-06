@@ -14,6 +14,7 @@ from app.config import settings
 # Import table models so SQLModel.metadata includes them before create_all.
 from app.models.documents import Document, Folder, IngestionJob
 from app.models.agent_settings import AgentStageSettings
+from app.models.app_settings import AppSettingOverride
 from app.models.artifacts import Artifact
 from app.models.chat import ChatMessage, ChatSession, ChatSessionDocument, ChatSessionFile, UserFile
 from app.models.retrieval import RetrievalIndex

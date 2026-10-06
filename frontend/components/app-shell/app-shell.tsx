@@ -7,7 +7,6 @@ import { useEffect, useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { NhiBrand } from "./nhi-brand"
-import { ThemeMenu } from "./theme-menu"
 import { ChatSidebarSessions } from "@/components/chat/ChatSidebarSessions"
 
 const navigation = [
@@ -15,7 +14,6 @@ const navigation = [
   { href: "/knowledge", label: "知識庫管理", icon: Library },
   { href: "/files", label: "我的檔案", icon: FolderOpen },
   { href: "/workflows", label: "AI 工作流", icon: Workflow },
-  { href: "/settings", label: "設定", icon: Settings },
 ] as const
 
 function isCurrentPath(pathname: string, href: string): boolean {
@@ -87,20 +85,36 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
         {collapsed && <div className="flex-1" />}
         <div className="mt-auto shrink-0 border-t border-sidebar-border p-3">
-          <div className={cn("flex h-10 items-center gap-3 rounded-md text-sm text-muted-foreground", collapsed ? "justify-center" : "px-3")}>
-            <ThemeMenu />
-            {!collapsed && <span>外觀</span>}
-          </div>
+          <Link
+            href="/settings"
+            aria-label={collapsed ? "設定" : undefined}
+            title={collapsed ? "設定" : undefined}
+            aria-current={isCurrentPath(pathname, "/settings") ? "page" : undefined}
+            className={cn(
+              "flex h-10 items-center gap-3 rounded-lg text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              collapsed ? "justify-center px-0" : "px-3",
+              isCurrentPath(pathname, "/settings") ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+            )}
+          >
+            <Settings className="size-4" aria-hidden="true" />
+            {!collapsed && "設定"}
+          </Link>
         </div>
       </aside>
       <header className="sticky top-0 z-20 flex h-14 items-center border-b border-border bg-background/95 px-4 backdrop-blur md:hidden">
         <Link href="/chat" aria-label="健保署 AI" className="text-foreground"><NhiBrand /></Link>
-        <div className="ml-auto"><ThemeMenu /></div>
+        <Link
+          href="/settings"
+          aria-label="設定"
+          className="ml-auto inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Settings className="size-4" aria-hidden="true" />
+        </Link>
       </header>
       <main className={cn("min-h-screen pb-20 transition-[margin] md:pb-0", collapsed ? "md:ml-24" : "md:ml-60")}>{children}</main>
 
       <nav
-        className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-5 gap-1 rounded-xl border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur md:hidden"
+        className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-4 gap-1 rounded-xl border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur md:hidden"
         aria-label="主要導覽"
       >
         {navigation.map(({ href, label, icon: Icon }) => {

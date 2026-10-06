@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 
 from app.config import settings
+from app.services import app_settings
 from app.models.documents import (
     Document,
     DocumentCategory,
@@ -178,7 +179,7 @@ async def ingest_upload(
         storage_key, size_bytes, checksum = await storage.save_upload(
             document_id,
             file,
-            max_bytes=settings.max_upload_bytes,
+            max_bytes=app_settings.value("uploads.max_upload_bytes"),
         )
         # Use the safe ASCII storage filename for `original_filename` / `storage_key`,
         # but keep the raw unicode name for `display_name` so it is readable in the UI.

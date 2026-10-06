@@ -17,6 +17,7 @@ from taskiq_redis.exceptions import ResultIsMissingError
 from app.services.streaming import SSE_RESPONSE_HEADERS, _stream_with_heartbeat
 from app.broker import result_backend
 from app.config import settings
+from app.services import app_settings
 from app.models.slides import (
     ApproveOutlineRequest,
     ApproveOutlineResponse,
@@ -593,7 +594,7 @@ async def send_slide_job_outline_message(
                 outline_repository=outline_repository,
             ),
             heartbeat_seconds=settings.chat_stream_heartbeat_seconds,
-            timeout_seconds=settings.chat_timeout_seconds,
+            timeout_seconds=app_settings.value("chat.timeout_seconds"),
         ),
         media_type="text/event-stream",
         headers=SSE_RESPONSE_HEADERS,

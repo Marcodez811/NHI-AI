@@ -7,13 +7,11 @@ import pytest
 from PIL import Image
 from pypdf import PdfWriter
 
+from app.config import settings
 from app.models.chat import ChatAttachmentKind, ChatAttachmentStatus
 from app.services.chat import attachments as attachments_module
 from app.services.chat.attachments import (
-    MAX_DOCUMENT_BYTES,
-    MAX_IMAGE_BYTES,
-    MAX_IMAGE_EDGE,
-    MAX_PDF_PAGES,
+
     AttachmentError,
     ChatAttachmentStorage,
     process_upload,
@@ -61,7 +59,7 @@ async def test_empty_file_is_rejected(tmp_path):
 @pytest.mark.asyncio
 async def test_oversized_document_is_rejected(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
-    data = b"%PDF-" + b"0" * MAX_DOCUMENT_BYTES
+    data = b"%PDF-" + b"0" * settings.chat_max_document_bytes
     with pytest.raises(AttachmentError):
         await process_upload(storage, uuid4(), FakeUpload("big.pdf", data, "application/pdf"))
 
@@ -69,7 +67,7 @@ async def test_oversized_document_is_rejected(tmp_path):
 @pytest.mark.asyncio
 async def test_oversized_image_is_rejected(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
-    data = b"\x89PNG\r\n" + b"0" * MAX_IMAGE_BYTES
+    data = b"\x89PNG\r\n" + b"0" * settings.chat_max_image_bytes
     with pytest.raises(AttachmentError):
         await process_upload(storage, uuid4(), FakeUpload("big.png", data, "image/png"))
 
@@ -211,11 +209,11 @@ async def test_corrupt_pdf_is_marked_failed(tmp_path):
 @pytest.mark.asyncio
 async def test_pdf_over_the_page_limit_is_marked_failed(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
-    data = _pdf_bytes(pages=MAX_PDF_PAGES + 1)
+    data = _pdf_bytes(pages=settings.chat_max_pdf_pages + 1)
     processed = await process_upload(storage, uuid4(), FakeUpload("long.pdf", data, "application/pdf"))
 
     assert processed.status == ChatAttachmentStatus.FAILED.value
-    assert str(MAX_PDF_PAGES) in processed.error
+    assert str(settings.chat_max_pdf_pages) in processed.error
 
 
 # ── Images: re-encode, strip metadata, downscale ────────────────────────────
@@ -254,7 +252,7 @@ async def test_large_image_is_downscaled_to_the_max_edge(tmp_path):
 
     path = storage.resolve(processed.storage_key)
     with Image.open(path) as stored:
-        assert max(stored.size) <= MAX_IMAGE_EDGE
+        assert max(stored.size) <= settings.chat_max_image_edge
 
 
 # ── Storage path safety ──────────────────────────────────────────────────────

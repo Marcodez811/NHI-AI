@@ -19,6 +19,7 @@ from uuid import uuid4
 from openai import OpenAI
 from app.broker import documents_broker
 from app.config import settings
+from app.services import app_settings
 from app.db import engine, init_db  # compatibility export for older worker tests
 from app.models.documents import (
     Document,
@@ -600,8 +601,8 @@ def _fail_cleanup(
         if job is None or job.cleanup_lease_token != lease_token:
             return None
         delay = min(
-            settings.document_cleanup_retry_max_seconds,
-            settings.document_cleanup_retry_base_seconds
+            app_settings.value("cleanup.retry_max_seconds"),
+            app_settings.value("cleanup.retry_base_seconds")
             * (2 ** max(job.cleanup_attempts - 1, 0)),
         )
         job.cleanup_lease_token = None
@@ -653,7 +654,7 @@ async def cleanup_document_task(payload: DocumentCleanupTaskPayload) -> dict[str
         _claim_cleanup,
         payload,
         lease_token=lease_token,
-        lease_seconds=settings.document_cleanup_lease_seconds,
+        lease_seconds=app_settings.value("cleanup.lease_seconds"),
     )
     if claim is None:
         return {"document_id": str(payload.document_id), "status": "already_cleaned_or_claimed"}
@@ -693,7 +694,7 @@ def _pending_cleanup_payloads() -> list[DocumentCleanupTaskPayload]:
             select(IngestionJob)
             .where(IngestionJob.phase == "cleanup_pending")
             .order_by(IngestionJob.updated_at)
-            .limit(settings.document_cleanup_reconcile_batch_size)
+            .limit(app_settings.value("cleanup.reconcile_batch_size"))
         ).all()
         result: list[DocumentCleanupTaskPayload] = []
         for job in jobs:

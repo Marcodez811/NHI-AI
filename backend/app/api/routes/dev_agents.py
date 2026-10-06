@@ -28,12 +28,12 @@ def get_agent_telemetry_store() -> AgentTelemetryStore:
     # ``main`` owns the application's long-lived client.  Importing lazily
     # keeps this route module usable in unit tests and avoids importing the
     # FastAPI application while it is constructing its router graph.
-    from app.config import settings
     from app.main import redis_client
+    from app.services import app_settings
 
     return AgentTelemetryStore(
         redis_client,
-        retention_seconds=settings.agent_event_retention_seconds,
+        retention_seconds=app_settings.value("agents.limits.event_retention_seconds"),
     )
 
 
