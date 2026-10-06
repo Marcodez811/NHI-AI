@@ -10,6 +10,7 @@ columns yet -- this is a single-user prototype.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
@@ -86,11 +87,18 @@ class ChatMessage(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
 
 
-class ChatAttachment(SQLModel, table=True):
-    __tablename__ = "chat_attachments"
+class UserFile(SQLModel, table=True):
+    """A file the user uploaded; conversations reference it, none own it.
+
+    ``storage_key`` is relative to the documents root: new files live at
+    ``user_files/<id>``; files migrated from the old per-chat attachments keep
+    their ``chat_attachments/<session_id>/<file>`` path.
+    # TODO(auth): add an owner column when login exists.
+    """
+
+    __tablename__ = "user_files"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    session_id: UUID = Field(foreign_key="chat_sessions.id", index=True)
     display_name: str = Field(max_length=512)
     mime_type: str = Field(max_length=255)
     kind: str = Field(max_length=16)
@@ -99,7 +107,57 @@ class ChatAttachment(SQLModel, table=True):
     status: str = Field(default=ChatAttachmentStatus.READY.value, max_length=16)
     error: str | None = Field(default=None, max_length=512)
     text_chars: int | None = Field(default=None)
+    origin_session_id: UUID | None = Field(
+        default=None, foreign_key="chat_sessions.id", ondelete="SET NULL", nullable=True, index=True
+    )
+    promoted_document_id: UUID | None = Field(default=None, nullable=True)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
+
+
+class ChatSessionFile(SQLModel, table=True):
+    """Which user files a conversation uses. Deleting the conversation deletes only this link."""
+
+    __tablename__ = "chat_session_files"
+
+    session_id: UUID = Field(foreign_key="chat_sessions.id", primary_key=True, ondelete="CASCADE")
+    file_id: UUID = Field(foreign_key="user_files.id", primary_key=True, ondelete="CASCADE")
+    created_at: datetime = Field(default_factory=utcnow, nullable=False)
+
+
+class ChatSessionDocument(SQLModel, table=True):
+    """Knowledge-base documents attached to a conversation."""
+
+    __tablename__ = "chat_session_documents"
+
+    session_id: UUID = Field(foreign_key="chat_sessions.id", primary_key=True, ondelete="CASCADE")
+    document_id: UUID = Field(foreign_key="documents.id", primary_key=True, ondelete="CASCADE")
+    created_at: datetime = Field(default_factory=utcnow, nullable=False)
+
+
+class ChatAttachmentSource(StrEnum):
+    UPLOAD = "upload"
+    KNOWLEDGE_BASE = "knowledge_base"
+
+
+@dataclass
+class ChatAttachmentView:
+    """One attachment as the engine and the API see it: a user file or a knowledge-base document.
+
+    ``storage_key`` is relative to the documents root for both sources.
+    """
+
+    id: UUID
+    session_id: UUID
+    display_name: str
+    mime_type: str
+    kind: str
+    size_bytes: int
+    storage_key: str
+    status: str
+    error: str | None
+    text_chars: int | None
+    created_at: datetime
+    source: str = ChatAttachmentSource.UPLOAD.value
 
 
 # ── API contracts ───────────────────────────────────────────────────────────
@@ -157,6 +215,33 @@ class ChatAttachmentRead(BaseModel):
     error: str | None
     text_chars: int | None
     created_at: datetime
+    source: ChatAttachmentSource = ChatAttachmentSource.UPLOAD
+
+
+class UserFileRead(BaseModel):
+    id: UUID
+    display_name: str
+    mime_type: str
+    kind: ChatAttachmentKind
+    size_bytes: int
+    status: ChatAttachmentStatus
+    error: str | None
+    created_at: datetime
+    origin_session_id: UUID | None
+    origin_session_title: str | None
+    in_knowledge_base: bool
+
+
+class LinkFilesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    file_ids: list[UUID] = PydanticField(min_length=1, max_length=MAX_ATTACHMENTS_PER_MESSAGE * 5)
+
+
+class LinkDocumentsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_ids: list[UUID] = PydanticField(min_length=1, max_length=MAX_ATTACHMENTS_PER_MESSAGE * 5)
 
 
 class ChatSourceRead(BaseModel):
@@ -229,6 +314,25 @@ def as_chat_message_read(message: ChatMessage) -> ChatMessageRead:
     return ChatMessageRead.model_validate(data)
 
 
-def as_chat_attachment_read(attachment: ChatAttachment) -> ChatAttachmentRead:
-    data: dict[str, Any] = attachment.model_dump()
+def as_chat_attachment_read(attachment: ChatAttachmentView | UserFile) -> ChatAttachmentRead:
+    if isinstance(attachment, UserFile):
+        data: dict[str, Any] = attachment.model_dump()
+    else:
+        data = {**attachment.__dict__}
     return ChatAttachmentRead.model_validate(data)
+
+
+def as_chat_attachment_view(file: UserFile, session_id: UUID) -> ChatAttachmentView:
+    return ChatAttachmentView(
+        id=file.id,
+        session_id=session_id,
+        display_name=file.display_name,
+        mime_type=file.mime_type,
+        kind=file.kind,
+        size_bytes=file.size_bytes,
+        storage_key=file.storage_key,
+        status=file.status,
+        error=file.error,
+        text_chars=file.text_chars,
+        created_at=file.created_at,
+    )

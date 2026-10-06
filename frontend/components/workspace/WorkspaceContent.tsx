@@ -4,6 +4,7 @@ import { FilesView } from "./FilesView";
 import { SlidesView } from "./SlidesView";
 import { SlideJobView } from "./SlideJobView";
 import { NewsView } from "./NewsView";
+import { ConfirmDialog } from "../ui/confirm-dialog";
 import { UploadModal } from "./UploadModal";
 import { WorkflowList } from "./WorkflowList";
 import type { WorkspaceController } from "../../lib/hooks/useWorkspaceController";
@@ -26,6 +27,13 @@ export function WorkspaceContent({
 
     return (
         <>
+            <ConfirmDialog
+                open={workspace.pendingDelete !== null}
+                title={`刪除「${workspace.pendingDelete?.display_name ?? ""}」？`}
+                description="此操作會移除來源與檢索資料。"
+                onCancel={workspace.cancelDeleteDocument}
+                onConfirm={workspace.confirmDeleteDocument}
+            />
             {workspace.actionError && (
                 <div
                     className="mx-auto mt-4 max-w-5xl rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"

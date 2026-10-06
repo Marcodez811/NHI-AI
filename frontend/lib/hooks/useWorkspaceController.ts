@@ -9,7 +9,6 @@ import {
     DocumentRead,
     MAX_DOCUMENTS,
     QaModeInfo,
-    fetchQaModes,
     getDocumentDownloadUrl,
 } from "../api/documents";
 import { createSlideJob, supportsSlideGeneration } from "../api/slides";
@@ -18,7 +17,8 @@ import { useDocuments } from "./useDocuments";
 import { useRetrievalStatus } from "./useRetrievalStatus";
 import { useWorkspaceSession } from "./useWorkspaceSession";
 
-const fallbackModes: QaModeInfo[] = CATEGORY_VALUES.map((mode) => ({
+// Categories are fixed in the frontend; there is no server endpoint for them.
+const modes: QaModeInfo[] = CATEGORY_VALUES.map((mode) => ({
     mode,
     label: CATEGORY_LABELS[mode],
     description: "",
@@ -77,22 +77,8 @@ export function useWorkspaceController() {
     } = session;
 
     const [uploading, setUploading] = useState(false);
-    const [qaModes, setQaModes] = useState<QaModeInfo[]>([]);
-    const [qaError, setQaError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
-
-    const loadModes = async () => {
-        try {
-            setQaError(null);
-            setQaModes(await fetchQaModes());
-        } catch (error) {
-            setQaError(errorText(error));
-        }
-    };
-
-    useEffect(() => {
-        void loadModes();
-    }, []);
+    const [pendingDelete, setPendingDelete] = useState<DocumentRead | null>(null);
 
     useEffect(() => {
         if (!catalog.documents.some((doc) => ["queued", "indexing", "deleting"].includes(doc.status))) return;
@@ -100,7 +86,6 @@ export function useWorkspaceController() {
         return () => window.clearTimeout(timer);
     }, [catalog.documents, catalog.reloadDocuments]);
 
-    const modes = qaModes.length ? qaModes : fallbackModes;
     const folderName = folderId
         ? catalog.folders.find((folder) => folder.id === folderId)?.name || "資料夾"
         : "全部文件";
@@ -149,7 +134,20 @@ export function useWorkspaceController() {
             setActionError("文件仍在索引中，完成後才能刪除。");
             return;
         }
-        if (document.status !== "delete_failed" && !window.confirm("刪除「" + document.display_name + "」？此操作會移除來源與檢索資料。")) return;
+        if (document.status !== "delete_failed") {
+            setPendingDelete(document);
+            return;
+        }
+        void performDelete(document);
+    };
+
+    const confirmDeleteDocument = () => {
+        const document = pendingDelete;
+        setPendingDelete(null);
+        if (document) void performDelete(document);
+    };
+
+    const performDelete = (document: DocumentRead) => {
         void (async () => {
             setActionError(null);
             try {
@@ -244,8 +242,6 @@ export function useWorkspaceController() {
         uploading,
         openUpload,
         modes,
-        qaError,
-        loadModes,
         actionError,
         retrievalStatus: retrieval.status,
         retrievalLoading: retrieval.loading,
@@ -257,6 +253,9 @@ export function useWorkspaceController() {
         toggleSelected,
         mutateDocument,
         deleteDocument,
+        pendingDelete,
+        cancelDeleteDocument: () => setPendingDelete(null),
+        confirmDeleteDocument,
         downloadDocument,
         createFolder,
         renameFolder,

@@ -3,6 +3,8 @@ export { ApiError, getApiErrorMessage } from "./client";
 export * from "./agents";
 export * from "./chat";
 export * from "./documents";
+export * from "./files";
+export * from "./artifacts";
 export * from "./retrieval";
 export * from "./settings";
 export * from "./slides";

@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from loguru import logger
+
 from app.config import settings
 from app.models.slides import JobStatus, SlideOutline, SlidesTaskPayload, SlidesTaskResult
 from app.services.agentic.contracts import (
@@ -773,6 +775,7 @@ rather than presenting both sides unreconciled.
         await self.validate_generated(value, workspace)
         deck = workspace / "output" / "presentation.pptx"
         published = await asyncio.to_thread(publish_output, deck, str(value.job_id), settings.agent_output_root)
+        await asyncio.to_thread(self._record_artifact, value, published)
         return SlidesTaskResult(
             job_id=value.job_id,
             status=JobStatus.COMPLETED,
@@ -781,6 +784,21 @@ rather than presenting both sides unreconciled.
             started_at=datetime.now(timezone.utc),
             finished_at=datetime.now(timezone.utc),
         )
+
+    @staticmethod
+    def _record_artifact(value: SlidesTaskPayload, published: Path) -> None:
+        """Register the published deck in 「我的檔案」; never fail the job over it."""
+
+        try:
+            from sqlmodel import Session
+
+            from app.db import engine
+            from app.services.artifacts import record_slide_artifact
+
+            with Session(engine) as session:
+                record_slide_artifact(session, job_id=value.job_id, title=value.title, published=published)
+        except Exception:
+            logger.exception("Could not record the slide deck artifact", job_id=value.job_id)
 
     async def cleanup(self, value: SlidesTaskPayload, workspace: Path, *, success: bool) -> None:
         if success or not settings.agent_keep_workspace_on_failure:

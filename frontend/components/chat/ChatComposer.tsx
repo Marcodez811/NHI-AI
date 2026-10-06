@@ -2,16 +2,26 @@
 
 import { useRef, useState } from "react";
 import type { ClipboardEvent, DragEvent } from "react";
-import { ArrowUp, Plus, Square } from "lucide-react";
+import { ArrowUp, FolderOpen, Library, Paperclip, Plus, Square, Zap } from "lucide-react";
 import { Button } from "../ui/button";
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
+import { promoteUserFile } from "../../lib/api/files";
+import { AttachPickerDialog } from "./AttachPickerDialog";
+import type { AttachEntry, PickerSource } from "./AttachPickerDialog";
+import { UploadDestinationDialog } from "./UploadDestinationDialog";
+import type { UploadChoice } from "./UploadDestinationDialog";
 import { Textarea } from "../ui/textarea";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ChatModelPicker } from "./ChatModelPicker";
-import type { ChatModelOption } from "../../lib/api/chat";
+import type { ChatAttachment, ChatModelOption } from "../../lib/api/chat";
 import type { ComposerAttachment } from "../../lib/hooks/useChatSession";
 
 const ACCEPTED_FILE_TYPES = ".pdf,.docx,.txt,.md,image/png,image/jpeg,image/webp";
-const ATTACHMENT_HINT = "附件僅供此對話使用，不會加入知識庫";
 
 export function ChatComposer({
     sessionId,
@@ -19,6 +29,7 @@ export function ChatComposer({
     setDraft,
     attachments,
     onAttachFiles,
+    onAttachExisting,
     onRemoveAttachment,
     models,
     model,
@@ -33,7 +44,9 @@ export function ChatComposer({
     draft: string;
     setDraft: (value: string) => void;
     attachments: ComposerAttachment[];
-    onAttachFiles: (files: File[]) => void;
+    /** Resolves with the uploads that succeeded (used to copy them into the knowledge base). */
+    onAttachFiles: (files: File[]) => Promise<ChatAttachment[]> | void;
+    onAttachExisting?: (source: PickerSource, entries: AttachEntry[]) => Promise<void>;
     onRemoveAttachment: (localId: string) => void;
     models: ChatModelOption[];
     model: string | undefined;
@@ -46,18 +59,38 @@ export function ChatComposer({
 }) {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [dragActive, setDragActive] = useState(false);
+    const [picker, setPicker] = useState<PickerSource | null>(null);
+    const [pendingUpload, setPendingUpload] = useState<Promise<ChatAttachment[]> | null>(null);
     const sendBlocked = busy || uploadsPending || !draft.trim();
+
+    /** Picked or dropped files: upload now and ask where they should live. Pasted images skip the ask. */
+    const attachPicked = (files: File[]) => {
+        const upload = Promise.resolve(onAttachFiles(files)).then((done) => done ?? []);
+        if (files.some((file) => !file.type.startsWith("image/"))) setPendingUpload(upload);
+    };
+
+    const resolveUpload = async (choice: UploadChoice) => {
+        const upload = pendingUpload;
+        setPendingUpload(null);
+        if (!upload || !choice.promote) return;
+        const uploaded = await upload.catch(() => [] as ChatAttachment[]);
+        await Promise.all(
+            uploaded
+                .filter((item) => item.kind !== "image")
+                .map((item) => promoteUserFile(item.id, { category: choice.category, folder_id: choice.folderId }).catch(() => undefined)),
+        );
+    };
 
     const handleDrop = (event: DragEvent<HTMLDivElement>) => {
         event.preventDefault();
         setDragActive(false);
         const files = Array.from(event.dataTransfer.files || []);
-        if (files.length) onAttachFiles(files);
+        if (files.length) attachPicked(files);
     };
 
     const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
         const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith("image/"));
-        if (files.length) onAttachFiles(files);
+        if (files.length) void onAttachFiles(files);
     };
 
     return (
@@ -101,16 +134,29 @@ export function ChatComposer({
             />
             <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-1">
-                    <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={() => fileInputRef.current?.click()}
-                        aria-label="附加檔案"
-                        title={ATTACHMENT_HINT}
-                    >
-                        <Plus size={16} />
-                    </Button>
+                    <DropdownMenu>
+                        <DropdownMenuTrigger
+                            aria-label="附加檔案"
+                            className="inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-popup-open:bg-muted data-popup-open:text-foreground"
+                        >
+                            <Plus size={16} />
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" side="top" sideOffset={8} className="w-56">
+                            <DropdownMenuItem onClick={() => fileInputRef.current?.click()}>
+                                <Paperclip /> 上傳檔案
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => setPicker("knowledge_base")}>
+                                <Library /> 從知識庫加入
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => setPicker("upload")}>
+                                <FolderOpen /> 從我的檔案加入
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled>
+                                <Zap /> 使用技能
+                                <span className="ml-auto text-xs text-muted-foreground">即將推出</span>
+                            </DropdownMenuItem>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
                     <input
                         ref={fileInputRef}
                         type="file"
@@ -119,7 +165,7 @@ export function ChatComposer({
                         className="hidden"
                         onChange={(event) => {
                             const files = Array.from(event.target.files || []);
-                            if (files.length) onAttachFiles(files);
+                            if (files.length) attachPicked(files);
                             event.target.value = "";
                         }}
                     />
@@ -139,6 +185,12 @@ export function ChatComposer({
                     </Button>
                 </div>
             </div>
+            <AttachPickerDialog
+                source={picker}
+                onClose={() => setPicker(null)}
+                onConfirm={async (source, entries) => { await onAttachExisting?.(source, entries); }}
+            />
+            <UploadDestinationDialog open={pendingUpload !== null} onConfirm={(choice) => void resolveUpload(choice)} />
         </div>
     );
 }

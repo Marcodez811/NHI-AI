@@ -73,12 +73,26 @@ describe("ChatSidebarSessions", () => {
 
     it("deletes a conversation through the menu after confirming", async () => {
         const user = userEvent.setup();
-        vi.spyOn(window, "confirm").mockReturnValue(true);
         render(<ChatSidebarSessions />);
 
         await user.click(screen.getByRole("button", { name: "「藥價調整討論」的更多操作" }));
         await user.click(await screen.findByRole("menuitem", { name: /刪除/ }));
 
+        expect(sessionsState.remove).not.toHaveBeenCalled();
+        expect(await screen.findByText("此操作無法復原。")).toBeInTheDocument();
+        await user.click(screen.getByRole("button", { name: "刪除" }));
+
         expect(sessionsState.remove).toHaveBeenCalledWith("s2");
+    });
+
+    it("does not delete when the dialog is cancelled", async () => {
+        const user = userEvent.setup();
+        render(<ChatSidebarSessions />);
+
+        await user.click(screen.getByRole("button", { name: "「藥價調整討論」的更多操作" }));
+        await user.click(await screen.findByRole("menuitem", { name: /刪除/ }));
+        await user.click(await screen.findByRole("button", { name: "取消" }));
+
+        expect(sessionsState.remove).not.toHaveBeenCalled();
     });
 });

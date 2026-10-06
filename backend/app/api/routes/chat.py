@@ -1,4 +1,4 @@
-"""Agentic chat API: saved multi-turn sessions with per-session attachments.
+"""Agentic chat API: saved multi-turn sessions that reference the user's files and knowledge-base documents.
 
 Replaces the old single-question chat (docs/9_29_chat_core_and_attachments_plan.md,
 decision 1). ``SSE_RESPONSE_HEADERS``/``_stream_with_heartbeat`` moved to
@@ -20,9 +20,11 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.config import settings
 from app.models.chat import (
-    ChatAttachment,
     ChatAttachmentRead,
+    ChatAttachmentSource,
     ChatAttachmentStatus,
+    ChatAttachmentView,
+    ChatAttachmentKind,
     ChatMessage,
     ChatMessageCreate,
     ChatMessageRole,
@@ -34,13 +36,18 @@ from app.models.chat import (
     ChatSessionDetail,
     ChatSessionSummary,
     ChatSessionUpdate,
+    LinkDocumentsRequest,
+    LinkFilesRequest,
     MAX_REASONING_CHARS,
+    UserFile,
     as_chat_attachment_read,
+    as_chat_attachment_view,
     as_chat_message_read,
     session_title_from_message,
 )
 from app.services.chat import models as chat_models
-from app.services.chat.attachments import AttachmentError, ChatAttachmentStorage, process_upload
+from app.models.documents import Document, DocumentStatus
+from app.services.chat.attachments import AttachmentError, ChatAttachmentStorage, MAX_PDF_BYTES, process_upload
 from app.services.chat.engine import AgentsSdkChatEngine, ChatEngine
 from app.services.chat.repository import ChatRepository, InMemoryChatRepository
 from app.services.documents.repository import DocumentRepository
@@ -112,6 +119,49 @@ def _session_not_found_error() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到此對話。")
 
 
+_KB_MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+}
+
+
+def _document_view(session_id: UUID, document: Document) -> ChatAttachmentView:
+    usable = document.status == DocumentStatus.READY.value and document.retrieval_enabled
+    return ChatAttachmentView(
+        id=document.id,
+        session_id=session_id,
+        display_name=document.display_name,
+        mime_type=_KB_MIME_TYPES.get(document.extension.lower(), document.mime_type),
+        kind=ChatAttachmentKind.DOCUMENT.value,
+        size_bytes=document.size_bytes,
+        storage_key=document.storage_key,
+        status=ChatAttachmentStatus.READY.value if usable else ChatAttachmentStatus.FAILED.value,
+        error=None if usable else "此知識庫文件目前無法使用。",
+        text_chars=None,
+        created_at=document.created_at,
+        source=ChatAttachmentSource.KNOWLEDGE_BASE.value,
+    )
+
+
+async def _session_attachments(
+    session_id: UUID,
+    repository: ChatRepository,
+    document_repository: DocumentRepository | None,
+) -> list[ChatAttachmentView]:
+    """Linked user files plus attached knowledge-base documents, as one list."""
+
+    views = [as_chat_attachment_view(file, session_id) for file in await repository.list_session_files(session_id)]
+    if document_repository is not None:
+        for document_id in await repository.list_session_document_ids(session_id):
+            document = await document_repository.get_document(document_id)
+            if document is not None:
+                views.append(_document_view(session_id, document))
+    return views
+
+
 @router.get("/chat/models", response_model=ChatModelsResponse)
 async def list_chat_models() -> ChatModelsResponse:
     models = chat_models.list_models()
@@ -159,12 +209,13 @@ async def create_chat_session(
 async def get_chat_session(
     session_id: UUID,
     repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+    document_repository: Annotated[DocumentRepository, Depends(get_chat_document_repository)] = None,
 ) -> ChatSessionDetail:
     session = await repository.get_session(session_id)
     if session is None:
         raise _session_not_found_error()
     messages = await repository.list_messages(session_id)
-    attachments = await repository.list_attachments(session_id)
+    attachments = await _session_attachments(session_id, repository, document_repository)
     return ChatSessionDetail(
         id=session.id,
         title=session.title,
@@ -195,13 +246,12 @@ async def rename_chat_session(
 async def delete_chat_session(
     session_id: UUID,
     repository: Annotated[ChatRepository, Depends(get_chat_repository)],
-    storage: Annotated[ChatAttachmentStorage, Depends(get_chat_attachment_storage)],
 ) -> None:
     session = await repository.get_session(session_id)
     if session is None:
         raise _session_not_found_error()
+    # Only the links go: the user's files stay in 「我的檔案」.
     await repository.delete_session(session_id)
-    await storage.delete_session(session_id)
 
 
 @router.post(
@@ -218,15 +268,14 @@ async def upload_chat_attachment(
     session = await repository.get_session(session_id)
     if session is None:
         raise _session_not_found_error()
-    attachment_id = uuid4()
+    file_id = uuid4()
     try:
-        processed = await process_upload(storage, session_id, attachment_id, file)
+        processed = await process_upload(storage, file_id, file)
     except AttachmentError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    attachment = await repository.create_attachment(
-        ChatAttachment(
-            id=attachment_id,
-            session_id=session_id,
+    user_file = await repository.create_file(
+        UserFile(
+            id=file_id,
             display_name=processed.display_name,
             mime_type=processed.mime_type,
             kind=processed.kind,
@@ -235,9 +284,11 @@ async def upload_chat_attachment(
             status=processed.status,
             error=processed.error,
             text_chars=processed.text_chars,
+            origin_session_id=session_id,
         )
     )
-    return as_chat_attachment_read(attachment)
+    await repository.link_file(session_id, user_file.id)
+    return as_chat_attachment_read(as_chat_attachment_view(user_file, session_id))
 
 
 @router.get("/chat/sessions/{session_id}/attachments/{attachment_id}/content")
@@ -247,11 +298,12 @@ async def get_chat_attachment_content(
     repository: Annotated[ChatRepository, Depends(get_chat_repository)],
     storage: Annotated[ChatAttachmentStorage, Depends(get_chat_attachment_storage)],
 ) -> FileResponse:
-    attachment = await repository.get_attachment(attachment_id)
-    if attachment is None or attachment.session_id != session_id:
+    linked = {file.id: file for file in await repository.list_session_files(session_id)}
+    attachment = linked.get(attachment_id)
+    if attachment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到此附件。")
     try:
-        path = storage.resolve(session_id, attachment.storage_key)
+        path = storage.resolve(attachment.storage_key)
     except AttachmentError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return FileResponse(path, media_type=attachment.mime_type, filename=attachment.display_name)
@@ -262,10 +314,11 @@ async def delete_chat_attachment(
     session_id: UUID,
     attachment_id: UUID,
     repository: Annotated[ChatRepository, Depends(get_chat_repository)],
-    storage: Annotated[ChatAttachmentStorage, Depends(get_chat_attachment_storage)],
 ) -> None:
-    attachment = await repository.get_attachment(attachment_id)
-    if attachment is None or attachment.session_id != session_id:
+    """Legacy route: removes an unsent attachment from the conversation (the file stays in 「我的檔案」)."""
+
+    linked = {file.id for file in await repository.list_session_files(session_id)}
+    if attachment_id not in linked:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到此附件。")
     messages = await repository.list_messages(session_id)
     if any(str(attachment_id) in message.attachment_ids for message in messages):
@@ -273,8 +326,78 @@ async def delete_chat_attachment(
             status_code=status.HTTP_409_CONFLICT,
             detail="此附件已送出，無法刪除。",
         )
-    await storage.delete_attachment(session_id, attachment.storage_key)
-    await repository.delete_attachment(attachment_id)
+    await repository.unlink_file(session_id, attachment_id)
+
+
+@router.post("/chat/sessions/{session_id}/files", response_model=list[ChatAttachmentRead])
+async def link_chat_files(
+    session_id: UUID,
+    payload: LinkFilesRequest,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+) -> list[ChatAttachmentRead]:
+    if await repository.get_session(session_id) is None:
+        raise _session_not_found_error()
+    files = []
+    for file_id in dict.fromkeys(payload.file_ids):
+        user_file = await repository.get_file(file_id)
+        if user_file is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到此檔案。")
+        files.append(user_file)
+    for user_file in files:
+        await repository.link_file(session_id, user_file.id)
+    return [as_chat_attachment_read(as_chat_attachment_view(user_file, session_id)) for user_file in files]
+
+
+@router.delete("/chat/sessions/{session_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def unlink_chat_file(
+    session_id: UUID,
+    file_id: UUID,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+) -> None:
+    if await repository.get_session(session_id) is None:
+        raise _session_not_found_error()
+    await repository.unlink_file(session_id, file_id)
+
+
+@router.post("/chat/sessions/{session_id}/documents", response_model=list[ChatAttachmentRead])
+async def attach_chat_documents(
+    session_id: UUID,
+    payload: LinkDocumentsRequest,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+    document_repository: Annotated[DocumentRepository, Depends(get_chat_document_repository)],
+) -> list[ChatAttachmentRead]:
+    if await repository.get_session(session_id) is None:
+        raise _session_not_found_error()
+    documents = []
+    for document_id in dict.fromkeys(payload.document_ids):
+        document = await document_repository.get_document(document_id)
+        if document is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到此知識庫文件。")
+        if document.status != DocumentStatus.READY.value or not document.retrieval_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "document_not_ready", "message": "此知識庫文件尚未建立索引或目前無法使用。"},
+            )
+        if document.extension.lower() == ".pdf" and document.size_bytes > MAX_PDF_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "document_too_large", "message": "此 PDF 檔案過大，無法加入對話。"},
+            )
+        documents.append(document)
+    for document in documents:
+        await repository.link_document(session_id, document.id)
+    return [as_chat_attachment_read(_document_view(session_id, document)) for document in documents]
+
+
+@router.delete("/chat/sessions/{session_id}/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def detach_chat_document(
+    session_id: UUID,
+    document_id: UUID,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+) -> None:
+    if await repository.get_session(session_id) is None:
+        raise _session_not_found_error()
+    await repository.unlink_document(session_id, document_id)
 
 
 @router.post("/chat/sessions/{session_id}/messages")
@@ -283,6 +406,7 @@ async def send_chat_message(
     payload: ChatMessageCreate,
     repository: Annotated[ChatRepository, Depends(get_chat_repository)],
     engine: Annotated[ChatEngine, Depends(get_chat_engine)],
+    document_repository: Annotated[DocumentRepository, Depends(get_chat_document_repository)] = None,
 ) -> StreamingResponse:
     session = await repository.get_session(session_id)
     if session is None:
@@ -291,7 +415,7 @@ async def send_chat_message(
     if selected_model is None:
         raise _model_unavailable_error()
 
-    all_attachments = await repository.list_attachments(session_id)
+    all_attachments = await _session_attachments(session_id, repository, document_repository)
     ready_by_id = {
         attachment.id: attachment
         for attachment in all_attachments

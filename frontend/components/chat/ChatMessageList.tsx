@@ -1,9 +1,10 @@
 "use client";
 
 import { Fragment, useEffect, useRef } from "react";
-import { Check, ChevronDown, CircleAlert, Loader2 } from "lucide-react";
+import { Check, ChevronDown, CircleAlert, File as FileIcon, FileText, ImageIcon, Loader2 } from "lucide-react";
 import { MessageResponse } from "../ai-elements/message";
 import { Badge } from "../ui/badge";
+import { chatAttachmentContentUrl, type ChatAttachment } from "../../lib/api/chat";
 import type { ChatTurn, ToolStep } from "../../lib/hooks/useChatSession";
 
 const TOOL_NAMES: Record<string, { action: string; unit: string }> = {
@@ -77,20 +78,74 @@ function ReasoningBlock({ message }: { message: ChatTurn }) {
     );
 }
 
+/** Icon and tint by extension: PDF red, Word blue, anything else neutral. */
+function sourceIcon(name: string): { Icon: typeof FileText; className: string } {
+    const ext = name.split(".").pop()?.toLowerCase();
+    if (ext === "pdf") return { Icon: FileText, className: "text-red-600 dark:text-red-400" };
+    if (ext === "docx" || ext === "doc") return { Icon: FileText, className: "text-blue-600 dark:text-blue-400" };
+    return { Icon: FileIcon, className: "text-muted-foreground" };
+}
+
 function SourceChips({ sources }: { sources: ChatTurn["sources"] }) {
     if (!sources?.length) return null;
     return (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-            {sources.map((source, index) => (
-                <Badge key={`${source.name}-${index}`} variant="outline" className="chat-arrival max-w-64 truncate" title={source.snippet}>
-                    {source.name}
-                </Badge>
-            ))}
+        <section className="mt-4" aria-label="資料來源">
+            <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                <span>資料來源</span>
+                <span className="rounded-full bg-muted px-1.5 text-[11px] leading-4 tabular-nums">{sources.length}</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+            {sources.map((source, index) => {
+                const { Icon, className } = sourceIcon(source.name);
+                return (
+                    <div key={`${source.name}-${index}`} title={source.snippet ? `${source.name}\n\n${source.snippet}` : source.name}
+                        className="chat-arrival flex min-w-0 max-w-full items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs sm:max-w-80">
+                        <Icon size={14} className={`shrink-0 ${className}`} aria-hidden="true" />
+                        <span className="truncate text-foreground">{source.name}</span>
+                    </div>
+                );
+            })}
+            </div>
+        </section>
+    );
+}
+
+/** Read-only chips for the files sent with a user message; unknown ids are skipped. */
+function MessageAttachments({ ids, lookup, sessionId }: {
+    ids: string[] | null | undefined;
+    lookup: Record<string, ChatAttachment>;
+    sessionId: string | null | undefined;
+}) {
+    const items = (ids ?? []).map((id) => lookup[id]).filter((item): item is ChatAttachment => Boolean(item));
+    if (!items.length) return null;
+    return (
+        <div className="mb-1.5 flex flex-wrap justify-end gap-1.5" aria-label="附件">
+            {items.map((item) => {
+                const Icon = item.kind === "image" ? ImageIcon : FileText;
+                const chip = (
+                    <>
+                        <Icon size={14} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+                        <span className="truncate font-medium text-foreground">{item.display_name}</span>
+                        {item.source === "knowledge_base" && <Badge variant="secondary" className="shrink-0">知識庫</Badge>}
+                    </>
+                );
+                const className = "flex max-w-64 items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs";
+                return item.source !== "knowledge_base" && sessionId ? (
+                    <a key={item.id} href={chatAttachmentContentUrl(sessionId, item.id)} target="_blank" rel="noreferrer"
+                        className={`${className} hover:bg-accent`}>{chip}</a>
+                ) : (
+                    <div key={item.id} className={className}>{chip}</div>
+                );
+            })}
         </div>
     );
 }
 
-export function ChatMessageList({ messages, compactedThroughMessageId }: {
+const NO_ATTACHMENTS: Record<string, ChatAttachment> = {};
+
+export function ChatMessageList({ messages, compactedThroughMessageId, attachmentLookup = NO_ATTACHMENTS, sessionId }: {
+    attachmentLookup?: Record<string, ChatAttachment>;
+    sessionId?: string | null;
     messages: ChatTurn[];
     compactedThroughMessageId?: string | null;
 }) {
@@ -100,8 +155,11 @@ export function ChatMessageList({ messages, compactedThroughMessageId }: {
                 <Fragment key={message.localKey}>
                     <div className={`chat-arrival flex min-w-0 ${message.role === "user" ? "justify-end" : "justify-start"}`}>
                         {message.role === "user" ? (
-                            <div className="min-w-0 max-w-[85%] rounded-3xl bg-primary/10 px-4 py-2.5 text-base leading-relaxed text-foreground sm:max-w-[70%]">
-                                <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                            <div className="flex min-w-0 max-w-[85%] flex-col items-end sm:max-w-[70%]">
+                                <MessageAttachments ids={message.attachment_ids} lookup={attachmentLookup} sessionId={sessionId} />
+                                <div className="min-w-0 rounded-3xl bg-primary/10 px-4 py-2.5 text-base leading-relaxed text-foreground">
+                                    <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                                </div>
                             </div>
                         ) : (
                             <div className="w-full min-w-0 text-base leading-relaxed text-foreground">

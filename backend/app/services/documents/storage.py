@@ -31,6 +31,10 @@ class DocumentTooLargeError(DocumentStorageError):
     pass
 
 
+# Extracted text cached beside a document for chat; not a source entry.
+CHAT_TEXT_SUFFIX = ".chat-text"
+
+
 class DocumentStorage:
     """Storage protocol implemented by local shared-volume storage."""
 
@@ -174,7 +178,7 @@ class LocalDocumentStorage(DocumentStorage):
         resolved_directory = directory.resolve(strict=True)
         if not _is_within(resolved_directory, root):
             raise DocumentStorageError("Source document is unavailable.")
-        entries = list(directory.iterdir())
+        entries = [entry for entry in directory.iterdir() if not entry.name.endswith(CHAT_TEXT_SUFFIX)]
         if len(entries) != 1:
             raise DocumentStorageError("Source document is unavailable.")
         source = entries[0]

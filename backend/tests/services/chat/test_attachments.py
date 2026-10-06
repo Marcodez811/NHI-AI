@@ -48,14 +48,14 @@ def _png_bytes(size: tuple[int, int] = (4, 4), mode: str = "RGB") -> bytes:
 async def test_unsupported_extension_is_rejected(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     with pytest.raises(AttachmentError):
-        await process_upload(storage, uuid4(), uuid4(), FakeUpload("virus.exe", b"stuff"))
+        await process_upload(storage, uuid4(), FakeUpload("virus.exe", b"stuff"))
 
 
 @pytest.mark.asyncio
 async def test_empty_file_is_rejected(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     with pytest.raises(AttachmentError):
-        await process_upload(storage, uuid4(), uuid4(), FakeUpload("empty.txt", b""))
+        await process_upload(storage, uuid4(), FakeUpload("empty.txt", b""))
 
 
 @pytest.mark.asyncio
@@ -63,7 +63,7 @@ async def test_oversized_document_is_rejected(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     data = b"%PDF-" + b"0" * MAX_DOCUMENT_BYTES
     with pytest.raises(AttachmentError):
-        await process_upload(storage, uuid4(), uuid4(), FakeUpload("big.pdf", data, "application/pdf"))
+        await process_upload(storage, uuid4(), FakeUpload("big.pdf", data, "application/pdf"))
 
 
 @pytest.mark.asyncio
@@ -71,14 +71,14 @@ async def test_oversized_image_is_rejected(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     data = b"\x89PNG\r\n" + b"0" * MAX_IMAGE_BYTES
     with pytest.raises(AttachmentError):
-        await process_upload(storage, uuid4(), uuid4(), FakeUpload("big.png", data, "image/png"))
+        await process_upload(storage, uuid4(), FakeUpload("big.png", data, "image/png"))
 
 
 @pytest.mark.asyncio
 async def test_pdf_with_wrong_magic_bytes_is_rejected(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     with pytest.raises(AttachmentError):
-        await process_upload(storage, uuid4(), uuid4(), FakeUpload("fake.pdf", b"not a pdf", "application/pdf"))
+        await process_upload(storage, uuid4(), FakeUpload("fake.pdf", b"not a pdf", "application/pdf"))
 
 
 @pytest.mark.asyncio
@@ -88,7 +88,6 @@ async def test_docx_with_wrong_magic_bytes_is_rejected(tmp_path):
         await process_upload(
             storage,
             uuid4(),
-            uuid4(),
             FakeUpload("fake.docx", b"not a docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         )
 
@@ -97,14 +96,14 @@ async def test_docx_with_wrong_magic_bytes_is_rejected(tmp_path):
 async def test_txt_with_invalid_utf8_is_rejected(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     with pytest.raises(AttachmentError):
-        await process_upload(storage, uuid4(), uuid4(), FakeUpload("bad.txt", b"\xff\xfe\x00garbage"))
+        await process_upload(storage, uuid4(), FakeUpload("bad.txt", b"\xff\xfe\x00garbage"))
 
 
 @pytest.mark.asyncio
 async def test_garbage_image_bytes_are_rejected(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     with pytest.raises(AttachmentError):
-        await process_upload(storage, uuid4(), uuid4(), FakeUpload("bad.png", b"not an image", "image/png"))
+        await process_upload(storage, uuid4(), FakeUpload("bad.png", b"not an image", "image/png"))
 
 
 # ── Text documents ───────────────────────────────────────────────────────────
@@ -113,14 +112,14 @@ async def test_garbage_image_bytes_are_rejected(tmp_path):
 @pytest.mark.asyncio
 async def test_txt_is_stored_and_extracted_verbatim(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
-    session_id, attachment_id = uuid4(), uuid4()
+    attachment_id = uuid4()
     content = "健保給付規定\n第二段落".encode("utf-8")
-    processed = await process_upload(storage, session_id, attachment_id, FakeUpload("note.txt", content, "text/plain"))
+    processed = await process_upload(storage, attachment_id, FakeUpload("note.txt", content, "text/plain"))
 
     assert processed.status == ChatAttachmentStatus.READY.value
     assert processed.kind == ChatAttachmentKind.DOCUMENT.value
     assert processed.text_chars == len(content.decode("utf-8"))
-    path = storage.resolve(session_id, processed.storage_key)
+    path = storage.resolve(processed.storage_key)
     text, total = storage.read_text(path)
     assert text == content.decode("utf-8")
     assert total == len(text)
@@ -142,13 +141,13 @@ async def test_docx_extraction_joins_block_text(tmp_path, monkeypatch):
 
     monkeypatch.setattr(attachments_module._source_extraction, "extract_docx", fake_extract_docx)
     storage = ChatAttachmentStorage(tmp_path)
-    session_id, attachment_id = uuid4(), uuid4()
+    attachment_id = uuid4()
     processed = await process_upload(
-        storage, session_id, attachment_id, FakeUpload("brief.docx", b"PK\x03\x04rest", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        storage, attachment_id, FakeUpload("brief.docx", b"PK\x03\x04rest", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     )
 
     assert processed.status == ChatAttachmentStatus.READY.value
-    path = storage.resolve(session_id, processed.storage_key)
+    path = storage.resolve(processed.storage_key)
     text, _total = storage.read_text(path)
     assert text == "第一段\n\n第二段"
 
@@ -161,7 +160,7 @@ async def test_docx_extraction_failure_marks_the_attachment_failed(tmp_path, mon
     monkeypatch.setattr(attachments_module._source_extraction, "extract_docx", fake_extract_docx)
     storage = ChatAttachmentStorage(tmp_path)
     processed = await process_upload(
-        storage, uuid4(), uuid4(), FakeUpload("broken.docx", b"PK\x03\x04rest", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        storage, uuid4(), FakeUpload("broken.docx", b"PK\x03\x04rest", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     )
 
     assert processed.status == ChatAttachmentStatus.FAILED.value
@@ -183,7 +182,7 @@ def _pdf_bytes(pages: int = 1, password: str | None = None) -> bytes:
 async def test_pdf_is_stored_as_is_for_the_model_to_read(tmp_path):
     # No text extraction: a scanned PDF is as readable to the model as any other.
     storage = ChatAttachmentStorage(tmp_path)
-    processed = await process_upload(storage, uuid4(), uuid4(), FakeUpload("scan.pdf", _pdf_bytes(), "application/pdf"))
+    processed = await process_upload(storage, uuid4(), FakeUpload("scan.pdf", _pdf_bytes(), "application/pdf"))
 
     assert processed.status == ChatAttachmentStatus.READY.value
     assert processed.mime_type == "application/pdf"
@@ -195,7 +194,7 @@ async def test_pdf_is_stored_as_is_for_the_model_to_read(tmp_path):
 async def test_encrypted_pdf_is_marked_failed(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     data = _pdf_bytes(password="secret")
-    processed = await process_upload(storage, uuid4(), uuid4(), FakeUpload("locked.pdf", data, "application/pdf"))
+    processed = await process_upload(storage, uuid4(), FakeUpload("locked.pdf", data, "application/pdf"))
 
     assert processed.status == ChatAttachmentStatus.FAILED.value
     assert "加密" in processed.error
@@ -204,7 +203,7 @@ async def test_encrypted_pdf_is_marked_failed(tmp_path):
 @pytest.mark.asyncio
 async def test_corrupt_pdf_is_marked_failed(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
-    processed = await process_upload(storage, uuid4(), uuid4(), FakeUpload("broken.pdf", b"%PDF-1.4\nrest", "application/pdf"))
+    processed = await process_upload(storage, uuid4(), FakeUpload("broken.pdf", b"%PDF-1.4\nrest", "application/pdf"))
 
     assert processed.status == ChatAttachmentStatus.FAILED.value
 
@@ -213,7 +212,7 @@ async def test_corrupt_pdf_is_marked_failed(tmp_path):
 async def test_pdf_over_the_page_limit_is_marked_failed(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     data = _pdf_bytes(pages=MAX_PDF_PAGES + 1)
-    processed = await process_upload(storage, uuid4(), uuid4(), FakeUpload("long.pdf", data, "application/pdf"))
+    processed = await process_upload(storage, uuid4(), FakeUpload("long.pdf", data, "application/pdf"))
 
     assert processed.status == ChatAttachmentStatus.FAILED.value
     assert str(MAX_PDF_PAGES) in processed.error
@@ -226,7 +225,7 @@ async def test_pdf_over_the_page_limit_is_marked_failed(tmp_path):
 async def test_image_with_alpha_is_reencoded_as_png(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     data = _png_bytes(mode="RGBA")
-    processed = await process_upload(storage, uuid4(), uuid4(), FakeUpload("logo.png", data, "image/png"))
+    processed = await process_upload(storage, uuid4(), FakeUpload("logo.png", data, "image/png"))
 
     assert processed.kind == ChatAttachmentKind.IMAGE.value
     assert processed.mime_type == "image/png"
@@ -237,7 +236,7 @@ async def test_image_with_alpha_is_reencoded_as_png(tmp_path):
 async def test_opaque_image_is_reencoded_as_jpeg(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     data = _png_bytes(mode="RGB")
-    processed = await process_upload(storage, uuid4(), uuid4(), FakeUpload("photo.png", data, "image/png"))
+    processed = await process_upload(storage, uuid4(), FakeUpload("photo.png", data, "image/png"))
 
     assert processed.mime_type == "image/jpeg"
 
@@ -248,12 +247,12 @@ async def test_large_image_is_downscaled_to_the_max_edge(tmp_path):
     large = Image.new("RGB", (2000, 100), color=(1, 2, 3))
     buffer = BytesIO()
     large.save(buffer, format="PNG")
-    session_id, attachment_id = uuid4(), uuid4()
+    attachment_id = uuid4()
     processed = await process_upload(
-        storage, session_id, attachment_id, FakeUpload("wide.png", buffer.getvalue(), "image/png")
+        storage, attachment_id, FakeUpload("wide.png", buffer.getvalue(), "image/png")
     )
 
-    path = storage.resolve(session_id, processed.storage_key)
+    path = storage.resolve(processed.storage_key)
     with Image.open(path) as stored:
         assert max(stored.size) <= MAX_IMAGE_EDGE
 
@@ -264,35 +263,30 @@ async def test_large_image_is_downscaled_to_the_max_edge(tmp_path):
 def test_resolve_rejects_a_storage_key_outside_the_root(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     with pytest.raises(AttachmentError):
-        storage.resolve(uuid4(), "../../etc/passwd")
+        storage.resolve("../../etc/passwd")
 
 
 @pytest.mark.asyncio
-async def test_delete_session_removes_its_files(tmp_path):
+async def test_legacy_storage_keys_still_resolve(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
-    session_id, attachment_id = uuid4(), uuid4()
-    processed = await process_upload(storage, session_id, attachment_id, FakeUpload("note.txt", b"hello", "text/plain"))
-    path = storage.resolve(session_id, processed.storage_key)
-    assert path.is_file()
+    legacy = tmp_path / "chat_attachments" / str(uuid4())
+    legacy.mkdir(parents=True)
+    (legacy / "old.txt").write_bytes(b"old")
 
-    await storage.delete_session(session_id)
-
-    with pytest.raises(AttachmentError):
-        storage.resolve(session_id, processed.storage_key)
+    assert storage.resolve(f"chat_attachments/{legacy.name}/old.txt").read_bytes() == b"old"
 
 
 @pytest.mark.asyncio
-async def test_delete_attachment_removes_content_and_text_but_preserves_siblings(tmp_path):
+async def test_delete_file_removes_content_and_text_but_preserves_siblings(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
-    session_id = uuid4()
-    removed = await process_upload(storage, session_id, uuid4(), FakeUpload("old.txt", b"old", "text/plain"))
-    kept = await process_upload(storage, session_id, uuid4(), FakeUpload("keep.txt", b"keep", "text/plain"))
-    removed_path = storage.resolve(session_id, removed.storage_key)
+    removed = await process_upload(storage, uuid4(), FakeUpload("old.txt", b"old", "text/plain"))
+    kept = await process_upload(storage, uuid4(), FakeUpload("keep.txt", b"keep", "text/plain"))
+    removed_path = storage.resolve(removed.storage_key)
     removed_text_path = storage.text_path(removed_path)
-    kept_path = storage.resolve(session_id, kept.storage_key)
+    kept_path = storage.resolve(kept.storage_key)
     assert removed_text_path.is_file()
 
-    await storage.delete_attachment(session_id, removed.storage_key)
+    await storage.delete_file(removed.storage_key)
 
     assert not removed_path.exists()
     assert not removed_text_path.exists()
@@ -301,16 +295,17 @@ async def test_delete_attachment_removes_content_and_text_but_preserves_siblings
 
 
 @pytest.mark.asyncio
-async def test_delete_attachment_cannot_remove_another_sessions_file(tmp_path):
+async def test_delete_file_rejects_keys_outside_the_files_trees(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
-    owner_id = uuid4()
-    processed = await process_upload(storage, owner_id, uuid4(), FakeUpload("private.txt", b"secret", "text/plain"))
-    owned_path = storage.resolve(owner_id, processed.storage_key)
+    processed = await process_upload(storage, uuid4(), FakeUpload("private.txt", b"secret", "text/plain"))
+    owned_path = storage.resolve(processed.storage_key)
+    document_dir = tmp_path / str(uuid4())
+    document_dir.mkdir()
+    (document_dir / "doc.pdf").write_bytes(b"%PDF-1.4")
 
-    with pytest.raises(AttachmentError):
-        await storage.delete_attachment(uuid4(), processed.storage_key)
-    with pytest.raises(AttachmentError):
-        await storage.delete_attachment(owner_id, f"{owner_id}/../{owned_path.name}")
+    for bad_key in (f"{document_dir.name}/doc.pdf", "user_files/../../etc/passwd", "user_files"):
+        with pytest.raises(AttachmentError):
+            await storage.delete_file(bad_key)
 
     assert owned_path.read_bytes() == b"secret"
-    assert storage.text_path(owned_path).is_file()
+    assert (document_dir / "doc.pdf").is_file()

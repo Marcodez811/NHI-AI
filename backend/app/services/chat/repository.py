@@ -1,4 +1,4 @@
-"""Repository interfaces for chat sessions, messages, and attachments.
+"""Repository interfaces for chat sessions, messages, user files, and their links.
 
 Mirrors ``app.services.documents.repository``'s shape: the API depends on
 ``ChatRepository`` rather than a global SQL session, ``SQLModelChatRepository``
@@ -11,9 +11,17 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
-from app.models.chat import ChatAttachment, ChatMessage, ChatSession, utcnow
+from app.models.artifacts import Artifact
+from app.models.chat import (
+    ChatMessage,
+    ChatSession,
+    ChatSessionDocument,
+    ChatSessionFile,
+    UserFile,
+    utcnow,
+)
 
 
 class ChatRepositoryError(RuntimeError):
@@ -24,7 +32,7 @@ class ChatSessionNotFoundError(ChatRepositoryError):
     pass
 
 
-class ChatAttachmentNotFoundError(ChatRepositoryError):
+class ChatFileNotFoundError(ChatRepositoryError):
     pass
 
 
@@ -44,13 +52,27 @@ class ChatRepository(Protocol):
 
     async def list_messages(self, session_id: UUID) -> list[ChatMessage]: ...
 
-    async def create_attachment(self, attachment: ChatAttachment) -> ChatAttachment: ...
+    async def create_file(self, file: UserFile) -> UserFile: ...
 
-    async def get_attachment(self, attachment_id: UUID) -> ChatAttachment | None: ...
+    async def get_file(self, file_id: UUID) -> UserFile | None: ...
 
-    async def list_attachments(self, session_id: UUID) -> list[ChatAttachment]: ...
+    async def list_files(self) -> list[UserFile]: ...
 
-    async def delete_attachment(self, attachment_id: UUID) -> None: ...
+    async def update_file(self, file: UserFile) -> UserFile: ...
+
+    async def delete_file(self, file_id: UUID) -> None: ...
+
+    async def link_file(self, session_id: UUID, file_id: UUID) -> None: ...
+
+    async def unlink_file(self, session_id: UUID, file_id: UUID) -> None: ...
+
+    async def list_session_files(self, session_id: UUID) -> list[UserFile]: ...
+
+    async def link_document(self, session_id: UUID, document_id: UUID) -> None: ...
+
+    async def unlink_document(self, session_id: UUID, document_id: UUID) -> None: ...
+
+    async def list_session_document_ids(self, session_id: UUID) -> list[UUID]: ...
 
 
 class InMemoryChatRepository:
@@ -59,7 +81,9 @@ class InMemoryChatRepository:
     def __init__(self) -> None:
         self.sessions: dict[UUID, ChatSession] = {}
         self.messages: dict[UUID, ChatMessage] = {}
-        self.attachments: dict[UUID, ChatAttachment] = {}
+        self.files: dict[UUID, UserFile] = {}
+        self.file_links: dict[tuple[UUID, UUID], object] = {}
+        self.document_links: dict[tuple[UUID, UUID], object] = {}
 
     async def create_session(self, session: ChatSession) -> ChatSession:
         self.sessions[session.id] = session
@@ -83,7 +107,11 @@ class InMemoryChatRepository:
             raise ChatSessionNotFoundError(str(session_id))
         del self.sessions[session_id]
         self.messages = {k: v for k, v in self.messages.items() if v.session_id != session_id}
-        self.attachments = {k: v for k, v in self.attachments.items() if v.session_id != session_id}
+        self.file_links = {k: v for k, v in self.file_links.items() if k[0] != session_id}
+        self.document_links = {k: v for k, v in self.document_links.items() if k[0] != session_id}
+        for file in self.files.values():
+            if file.origin_session_id == session_id:
+                file.origin_session_id = None
 
     async def create_message(self, message: ChatMessage) -> ChatMessage:
         self.messages[message.id] = message
@@ -93,21 +121,47 @@ class InMemoryChatRepository:
         values = [m for m in self.messages.values() if m.session_id == session_id]
         return sorted(values, key=lambda item: item.created_at)
 
-    async def create_attachment(self, attachment: ChatAttachment) -> ChatAttachment:
-        self.attachments[attachment.id] = attachment
-        return attachment
+    async def create_file(self, file: UserFile) -> UserFile:
+        self.files[file.id] = file
+        return file
 
-    async def get_attachment(self, attachment_id: UUID) -> ChatAttachment | None:
-        return self.attachments.get(attachment_id)
+    async def get_file(self, file_id: UUID) -> UserFile | None:
+        return self.files.get(file_id)
 
-    async def list_attachments(self, session_id: UUID) -> list[ChatAttachment]:
-        values = [a for a in self.attachments.values() if a.session_id == session_id]
-        return sorted(values, key=lambda item: item.created_at)
+    async def list_files(self) -> list[UserFile]:
+        return sorted(self.files.values(), key=lambda item: item.created_at, reverse=True)
 
-    async def delete_attachment(self, attachment_id: UUID) -> None:
-        if attachment_id not in self.attachments:
-            raise ChatAttachmentNotFoundError(str(attachment_id))
-        del self.attachments[attachment_id]
+    async def update_file(self, file: UserFile) -> UserFile:
+        if file.id not in self.files:
+            raise ChatFileNotFoundError(str(file.id))
+        self.files[file.id] = file
+        return file
+
+    async def delete_file(self, file_id: UUID) -> None:
+        if file_id not in self.files:
+            raise ChatFileNotFoundError(str(file_id))
+        del self.files[file_id]
+        self.file_links = {k: v for k, v in self.file_links.items() if k[1] != file_id}
+
+    async def link_file(self, session_id: UUID, file_id: UUID) -> None:
+        self.file_links.setdefault((session_id, file_id), utcnow())
+
+    async def unlink_file(self, session_id: UUID, file_id: UUID) -> None:
+        self.file_links.pop((session_id, file_id), None)
+
+    async def list_session_files(self, session_id: UUID) -> list[UserFile]:
+        linked = [(created, self.files[fid]) for (sid, fid), created in self.file_links.items() if sid == session_id and fid in self.files]
+        return [file for _created, file in sorted(linked, key=lambda pair: pair[0])]
+
+    async def link_document(self, session_id: UUID, document_id: UUID) -> None:
+        self.document_links.setdefault((session_id, document_id), utcnow())
+
+    async def unlink_document(self, session_id: UUID, document_id: UUID) -> None:
+        self.document_links.pop((session_id, document_id), None)
+
+    async def list_session_document_ids(self, session_id: UUID) -> list[UUID]:
+        linked = [(created, did) for (sid, did), created in self.document_links.items() if sid == session_id]
+        return [did for _created, did in sorted(linked, key=lambda pair: pair[0])]
 
 
 class SQLModelChatRepository(InMemoryChatRepository):
@@ -148,10 +202,22 @@ class SQLModelChatRepository(InMemoryChatRepository):
             select(ChatMessage).where(ChatMessage.session_id == session_id)
         ).all():
             self.session.delete(message)
-        for attachment in self.session.exec(
-            select(ChatAttachment).where(ChatAttachment.session_id == session_id)
+        # Files and artifacts outlive the conversation: drop only the links
+        # and clear the origin pointers (the FK would do the latter in PostgreSQL).
+        for link in self.session.exec(
+            select(ChatSessionFile).where(ChatSessionFile.session_id == session_id)
         ).all():
-            self.session.delete(attachment)
+            self.session.delete(link)
+        for doc_link in self.session.exec(
+            select(ChatSessionDocument).where(ChatSessionDocument.session_id == session_id)
+        ).all():
+            self.session.delete(doc_link)
+        for file in self.session.exec(select(UserFile).where(UserFile.origin_session_id == session_id)).all():
+            file.origin_session_id = None
+            self.session.add(file)
+        for artifact in self.session.exec(select(Artifact).where(Artifact.session_id == session_id)).all():
+            artifact.session_id = None
+            self.session.add(artifact)
         self.session.delete(session)
         self.session.commit()
 
@@ -170,30 +236,75 @@ class SQLModelChatRepository(InMemoryChatRepository):
             ).all()
         )
 
-    async def create_attachment(self, attachment: ChatAttachment) -> ChatAttachment:
-        self.session.add(attachment)
+    async def create_file(self, file: UserFile) -> UserFile:
+        self.session.add(file)
         self.session.commit()
-        self.session.refresh(attachment)
-        return attachment
+        self.session.refresh(file)
+        return file
 
-    async def get_attachment(self, attachment_id: UUID) -> ChatAttachment | None:
-        return self.session.get(ChatAttachment, attachment_id)
+    async def get_file(self, file_id: UUID) -> UserFile | None:
+        return self.session.get(UserFile, file_id)
 
-    async def list_attachments(self, session_id: UUID) -> list[ChatAttachment]:
+    async def list_files(self) -> list[UserFile]:
+        return list(self.session.exec(select(UserFile).order_by(col(UserFile.created_at).desc())).all())
+
+    async def update_file(self, file: UserFile) -> UserFile:
+        if not self.session.get(UserFile, file.id):
+            raise ChatFileNotFoundError(str(file.id))
+        self.session.add(file)
+        self.session.commit()
+        self.session.refresh(file)
+        return file
+
+    async def delete_file(self, file_id: UUID) -> None:
+        file = self.session.get(UserFile, file_id)
+        if not file:
+            raise ChatFileNotFoundError(str(file_id))
+        for link in self.session.exec(select(ChatSessionFile).where(ChatSessionFile.file_id == file_id)).all():
+            self.session.delete(link)
+        self.session.delete(file)
+        self.session.commit()
+
+    async def link_file(self, session_id: UUID, file_id: UUID) -> None:
+        if self.session.get(ChatSessionFile, (session_id, file_id)) is None:
+            self.session.add(ChatSessionFile(session_id=session_id, file_id=file_id))
+            self.session.commit()
+
+    async def unlink_file(self, session_id: UUID, file_id: UUID) -> None:
+        link = self.session.get(ChatSessionFile, (session_id, file_id))
+        if link is not None:
+            self.session.delete(link)
+            self.session.commit()
+
+    async def list_session_files(self, session_id: UUID) -> list[UserFile]:
         return list(
             self.session.exec(
-                select(ChatAttachment)
-                .where(ChatAttachment.session_id == session_id)
-                .order_by(ChatAttachment.created_at)
+                select(UserFile)
+                .join(ChatSessionFile, col(ChatSessionFile.file_id) == col(UserFile.id))
+                .where(ChatSessionFile.session_id == session_id)
+                .order_by(col(ChatSessionFile.created_at), col(UserFile.id))
             ).all()
         )
 
-    async def delete_attachment(self, attachment_id: UUID) -> None:
-        attachment = self.session.get(ChatAttachment, attachment_id)
-        if not attachment:
-            raise ChatAttachmentNotFoundError(str(attachment_id))
-        self.session.delete(attachment)
-        self.session.commit()
+    async def link_document(self, session_id: UUID, document_id: UUID) -> None:
+        if self.session.get(ChatSessionDocument, (session_id, document_id)) is None:
+            self.session.add(ChatSessionDocument(session_id=session_id, document_id=document_id))
+            self.session.commit()
+
+    async def unlink_document(self, session_id: UUID, document_id: UUID) -> None:
+        link = self.session.get(ChatSessionDocument, (session_id, document_id))
+        if link is not None:
+            self.session.delete(link)
+            self.session.commit()
+
+    async def list_session_document_ids(self, session_id: UUID) -> list[UUID]:
+        return list(
+            self.session.exec(
+                select(ChatSessionDocument.document_id)
+                .where(ChatSessionDocument.session_id == session_id)
+                .order_by(col(ChatSessionDocument.created_at))
+            ).all()
+        )
 
 
 __all__ = [
@@ -202,5 +313,5 @@ __all__ = [
     "SQLModelChatRepository",
     "ChatRepositoryError",
     "ChatSessionNotFoundError",
-    "ChatAttachmentNotFoundError",
+    "ChatFileNotFoundError",
 ]

@@ -42,7 +42,8 @@ export function ChatPage() {
                 draft={chat.draft}
                 setDraft={chat.setDraft}
                 attachments={chat.attachments}
-                onAttachFiles={(files) => void chat.attachFiles(files)}
+                onAttachFiles={chat.attachFiles}
+                onAttachExisting={chat.attachExisting}
                 onRemoveAttachment={chat.removeAttachment}
                 models={chat.models}
                 model={chat.model}
@@ -76,7 +77,7 @@ export function ChatPage() {
                                 {chat.loadError}
                             </div>
                         ) : (
-                            <ChatMessageList messages={chat.messages} compactedThroughMessageId={chat.compactedThroughMessageId} />
+                            <ChatMessageList messages={chat.messages} sessionId={chat.sessionId} attachmentLookup={chat.attachmentLookup} compactedThroughMessageId={chat.compactedThroughMessageId} />
                         )}
                     </div>
                     {!chat.loadError && (

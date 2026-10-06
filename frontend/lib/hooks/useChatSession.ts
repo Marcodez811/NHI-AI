@@ -6,7 +6,10 @@ import { ApiError } from "../api/client";
 import {
     classifyChatAttachment,
     createChatSession,
-    deleteChatAttachment,
+    linkChatDocuments,
+    linkChatFiles,
+    unlinkChatDocument,
+    unlinkChatFile,
     fetchChatSession,
     sendChatMessage,
     uploadChatAttachment,
@@ -49,7 +52,8 @@ export type ChatTurn = ChatMessageRecord & {
 
 export type ComposerAttachment = {
     localId: string;
-    file: File;
+    /** Absent for files and knowledge-base documents attached from elsewhere. */
+    file?: File;
     status: "uploading" | "ready" | "failed";
     attachment?: ChatAttachment;
     error?: string;
@@ -79,6 +83,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
     const sessionsCtx = useChatSessions();
     const [messages, setMessages] = useState<ChatTurn[]>([]);
     const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+    const [attachmentLookup, setAttachmentLookup] = useState<Record<string, ChatAttachment>>({});
     const [draft, setDraft] = useState("");
     const [model, setModel] = useState<string | undefined>(defaultModel);
     const [loading, setLoading] = useState(Boolean(sessionId));
@@ -110,6 +115,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         }
         setMessages([]);
         setAttachments([]);
+        setAttachmentLookup({});
         setCompactedThroughMessageId(null);
         setLoadError(null);
         if (!sessionId) {
@@ -128,6 +134,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
                     reasoningStreaming: false,
                     answerStarted: Boolean(message.content),
                 })));
+                setAttachmentLookup(Object.fromEntries((detail.attachments ?? []).map((item) => [item.id, item])));
                 setCompactedThroughMessageId(detail.compacted_through_message_id ?? null);
                 setModel(detail.model);
             } catch (caught) {
@@ -152,26 +159,30 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         return created.id;
     }, [model, router, sessionsCtx]);
 
-    const uploadOne = useCallback((targetId: string, file: File, localId: string) => {
-        void uploadChatAttachment(targetId, file)
+    const uploadOne = useCallback((targetId: string, file: File, localId: string): Promise<ChatAttachment | null> => {
+        return uploadChatAttachment(targetId, file)
             .then((attachment) => {
                 setAttachments((items) => items.map((item) => (item.localId === localId
                     ? { ...item, status: attachment.status, attachment, error: attachment.error ?? undefined }
                     : item)));
+                return attachment.status === "ready" ? attachment : null;
             })
             .catch((caught) => {
                 setAttachments((items) => items.map((item) => (item.localId === localId
                     ? { ...item, status: "failed", error: errorText(caught) }
                     : item)));
+                return null;
             });
     }, []);
 
-    const attachFiles = useCallback(async (files: File[]) => {
+    /** Uploads files; resolves with the attachments that finished successfully. */
+    const attachFiles = useCallback(async (files: File[]): Promise<ChatAttachment[]> => {
         const room = CHAT_MAX_ATTACHMENTS - attachments.length;
         const accepted = files.slice(0, Math.max(room, 0));
-        if (!accepted.length) return;
+        if (!accepted.length) return [];
 
         const targetId = await ensureSession();
+        const uploads: Promise<ChatAttachment | null>[] = [];
         for (const file of accepted) {
             const localId = newLocalId("attachment");
             const invalid = validateFile(file);
@@ -180,15 +191,50 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
                 continue;
             }
             setAttachments((items) => [...items, { localId, file, status: "uploading" }]);
-            uploadOne(targetId, file, localId);
+            uploads.push(uploadOne(targetId, file, localId));
         }
+        const done = await Promise.all(uploads);
+        return done.filter((item): item is ChatAttachment => item !== null);
     }, [attachments.length, ensureSession, uploadOne]);
+
+    /** Links already-stored files or knowledge-base documents to this conversation. */
+    const attachExisting = useCallback(async (
+        source: "upload" | "knowledge_base",
+        entries: Array<Pick<ChatAttachment, "id" | "display_name" | "mime_type" | "kind" | "size_bytes">>,
+    ) => {
+        const known = new Set(attachments.map((item) => item.attachment?.id));
+        const fresh = entries
+            .filter((entry) => !known.has(entry.id))
+            .slice(0, Math.max(CHAT_MAX_ATTACHMENTS - attachments.length, 0));
+        if (!fresh.length) return;
+        const targetId = await ensureSession();
+        const ids = fresh.map((entry) => entry.id);
+        if (source === "knowledge_base") await linkChatDocuments(targetId, ids);
+        else await linkChatFiles(targetId, ids);
+        setAttachments((items) => [
+            ...items,
+            ...fresh.map((entry) => ({
+                localId: newLocalId("attachment"),
+                status: "ready" as const,
+                attachment: {
+                    ...entry,
+                    status: "ready" as const,
+                    error: null,
+                    text_chars: null,
+                    created_at: new Date().toISOString(),
+                    source,
+                },
+            })),
+        ]);
+    }, [attachments, ensureSession]);
 
     const removeAttachment = useCallback((localId: string) => {
         setAttachments((items) => {
             const target = items.find((item) => item.localId === localId);
             if (target?.attachment && activeSessionId.current) {
-                void deleteChatAttachment(activeSessionId.current, target.attachment.id).catch(() => undefined);
+                // Unlink only: the file stays in "my files", the document stays in the knowledge base.
+                const unlink = target.attachment.source === "knowledge_base" ? unlinkChatDocument : unlinkChatFile;
+                void unlink(activeSessionId.current, target.attachment.id).catch(() => undefined);
             }
             return items.filter((item) => item.localId !== localId);
         });
@@ -207,6 +253,15 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         setSendError(null);
         setBusy(true);
         setDraft("");
+        const sentAttachments = attachments
+            .map((item) => item.attachment)
+            .filter((item): item is ChatAttachment => Boolean(item) && attachmentIds.includes(item!.id));
+        if (sentAttachments.length) {
+            setAttachmentLookup((current) => ({
+                ...current,
+                ...Object.fromEntries(sentAttachments.map((item) => [item.id, item])),
+            }));
+        }
         setAttachments([]);
 
         let targetId: string;
@@ -358,6 +413,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         messages,
         compactedThroughMessageId,
         attachments,
+        attachmentLookup,
         draft,
         setDraft,
         model,
@@ -368,6 +424,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         busy,
         uploadsPending,
         attachFiles,
+        attachExisting,
         removeAttachment,
         send,
         stop,

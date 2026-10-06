@@ -16,7 +16,6 @@ from app.api.routes.chat import (
 )
 from app.config import settings
 from app.models.chat import ChatSessionCreate, ChatSessionUpdate
-from app.services.chat.attachments import ChatAttachmentStorage
 from app.services.chat.repository import InMemoryChatRepository
 
 
@@ -102,12 +101,11 @@ async def test_rename_session_updates_the_title():
 
 
 @pytest.mark.asyncio
-async def test_delete_session_removes_it_and_its_attachment_files(tmp_path):
+async def test_delete_session_removes_it(tmp_path):
     repository = InMemoryChatRepository()
-    storage = ChatAttachmentStorage(tmp_path)
     summary = await create_chat_session(ChatSessionCreate(), repository)
 
-    await delete_chat_session(summary.id, repository, storage)
+    await delete_chat_session(summary.id, repository)
 
     with pytest.raises(HTTPException):
         await get_chat_session(summary.id, repository)
@@ -116,7 +114,7 @@ async def test_delete_session_removes_it_and_its_attachment_files(tmp_path):
 @pytest.mark.asyncio
 async def test_delete_unknown_session_404s():
     with pytest.raises(HTTPException) as error:
-        await delete_chat_session(uuid4(), InMemoryChatRepository(), ChatAttachmentStorage.__new__(ChatAttachmentStorage))
+        await delete_chat_session(uuid4(), InMemoryChatRepository())
     assert error.value.status_code == 404
 
 

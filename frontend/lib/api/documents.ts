@@ -187,7 +187,4 @@ export function getDocumentDownloadUrl(id: string): string {
     return `${API_ROOT}/documents/${encodeURIComponent(id)}/download`;
 }
 
-export async function fetchQaModes(): Promise<QaModeInfo[]> {
-    return request<QaModeInfo[]>("/qa-modes");
-}
 

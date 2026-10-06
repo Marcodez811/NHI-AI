@@ -1,11 +1,11 @@
 """Chat attachment storage, validation, and synchronous text extraction.
 
-Attachments belong to one chat session and are never indexed into the
-knowledge base (docs/9_29_chat_core_and_attachments_plan.md, decision 2).
-Storage reuses the atomic-write / no-user-controlled-path-parts pattern from
+Uploaded files belong to the user; conversations only reference them
+(docs/9_29_files_and_artifacts_spec.md). They are indexed into the knowledge
+base only through an explicit promote. Storage reuses the atomic-write /
+no-user-controlled-path-parts pattern from
 ``app.services.documents.storage.LocalDocumentStorage`` but keys files by
-chat session instead of by document id, under its own
-``chat_attachments/`` tree so the two are never confused.
+file id under its own ``user_files/`` tree.
 """
 
 from __future__ import annotations
@@ -13,12 +13,11 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
-import shutil
 import tempfile
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from fastapi import UploadFile
 from PIL import Image, UnidentifiedImageError
@@ -26,6 +25,7 @@ from pypdf import PdfReader
 
 from app.config import settings
 from app.models.chat import ChatAttachmentKind, ChatAttachmentStatus
+from app.services.documents.storage import CHAT_TEXT_SUFFIX
 
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 # PDFs go to the model as the file itself, so they must fit every provider's
@@ -80,7 +80,7 @@ def _is_within(candidate: Path, root: Path) -> bool:
 
 @dataclass
 class ProcessedAttachment:
-    """Everything needed to build a ``ChatAttachment`` row after processing."""
+    """Everything needed to build a ``UserFile`` row after processing."""
 
     display_name: str
     mime_type: str
@@ -93,14 +93,21 @@ class ProcessedAttachment:
 
 
 class ChatAttachmentStorage:
-    """Owns the on-disk layout for chat attachments.
+    """Owns the on-disk layout for user files.
 
-    Files live at ``<documents_root>/chat_attachments/<session_id>/<uuid><ext>``,
-    with extracted document text saved alongside as ``<uuid><ext>.txt``.
+    Everything is addressed by a ``storage_key`` relative to the documents
+    root. New files live at ``user_files/<file_id>`` (extracted document text
+    beside it as ``<file_id>.txt``); files migrated from the old per-chat
+    attachments keep ``chat_attachments/<session_id>/<name>``. Knowledge-base
+    documents (``<document_id>/<name>``) resolve through the same root, with
+    their extracted text cached as ``<name>.chat-text``.
     """
 
+    USER_FILES_DIR = "user_files"
+    LEGACY_DIR = "chat_attachments"
+
     def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root) if root is not None else Path(settings.documents_root) / "chat_attachments"
+        self.root = Path(root) if root is not None else Path(settings.documents_root)
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _root(self) -> Path:
@@ -109,18 +116,17 @@ class ChatAttachmentStorage:
         except (OSError, RuntimeError) as exc:
             raise AttachmentError("附件儲存空間目前無法使用。") from exc
 
-    def _session_dir(self, session_id: UUID) -> Path:
+    def _files_dir(self) -> Path:
         root = self._root()
-        directory = root / str(session_id)
+        directory = root / self.USER_FILES_DIR
         if directory.is_symlink():
             raise AttachmentError("附件儲存空間目前無法使用。")
         directory.mkdir(mode=0o750, exist_ok=True)
-        resolved = directory.resolve(strict=True)
-        if not _is_within(resolved, root):
+        if not _is_within(directory.resolve(strict=True), root):
             raise AttachmentError("附件儲存空間目前無法使用。")
         return directory
 
-    def resolve(self, session_id: UUID, storage_key: str) -> Path:
+    def resolve(self, storage_key: str) -> Path:
         root = self._root()
         path = (root / storage_key).resolve()
         if not _is_within(path, root) or not path.is_file():
@@ -131,9 +137,13 @@ class ChatAttachmentStorage:
     def text_path(content_path: Path) -> Path:
         return content_path.with_name(content_path.name + ".txt")
 
-    async def save(self, session_id: UUID, attachment_id: UUID, extension: str, data: bytes) -> tuple[Path, str]:
-        directory = self._session_dir(session_id)
-        destination = directory / f"{attachment_id}{extension}"
+    @staticmethod
+    def kb_text_path(content_path: Path) -> Path:
+        return content_path.with_name(content_path.name + CHAT_TEXT_SUFFIX)
+
+    async def save(self, file_id: UUID, data: bytes) -> tuple[Path, str]:
+        directory = self._files_dir()
+        destination = directory / str(file_id)
 
         def _write() -> None:
             fd, temp_name = tempfile.mkstemp(prefix=".upload-", dir=directory)
@@ -153,15 +163,22 @@ class ChatAttachmentStorage:
             await asyncio.to_thread(_write)
         except OSError as exc:
             raise AttachmentError("附件無法儲存，請稍後再試。") from exc
-        return destination, f"{session_id}/{destination.name}"
+        return destination, f"{self.USER_FILES_DIR}/{file_id}"
 
     async def save_text(self, content_path: Path, text: str) -> None:
         await asyncio.to_thread(self.text_path(content_path).write_text, text, encoding="utf-8")
 
-    def read_text(self, content_path: Path, *, start: int = 0, max_chars: int | None = None) -> tuple[str, int]:
-        """Return ``(slice, total_chars)`` of a document attachment's saved text."""
+    def read_text(
+        self,
+        content_path: Path,
+        *,
+        start: int = 0,
+        max_chars: int | None = None,
+        text_path: Path | None = None,
+    ) -> tuple[str, int]:
+        """Return ``(slice, total_chars)`` of a document's saved text."""
 
-        text_path = self.text_path(content_path)
+        text_path = text_path or self.text_path(content_path)
         if not text_path.is_file():
             return "", 0
         full_text = text_path.read_text(encoding="utf-8")
@@ -169,30 +186,34 @@ class ChatAttachmentStorage:
         end = total if max_chars is None else min(total, start + max_chars)
         return full_text[start:end], total
 
-    async def delete_attachment(self, session_id: UUID, storage_key: str) -> None:
-        """Remove one session's saved attachment and any extracted-text sidecar."""
+    async def ensure_kb_text(self, content_path: Path) -> Path:
+        """Extract a knowledge-base DOCX/TXT/MD once and cache it beside the document."""
+
+        cached = self.kb_text_path(content_path)
+        if cached.is_file():
+            return cached
+        extension = content_path.suffix.lower()
+        text, _status, _error = await asyncio.to_thread(
+            _extract_document_text, content_path, extension, uuid5(NAMESPACE_URL, str(content_path))
+        )
+        try:
+            await asyncio.to_thread(cached.write_text, text, encoding="utf-8")
+        except OSError as exc:
+            raise AttachmentError("附件無法讀取。") from exc
+        return cached
+
+    async def delete_file(self, storage_key: str) -> None:
+        """Remove one stored user file and its extracted-text sidecar."""
 
         key = Path(storage_key)
-        if len(key.parts) != 2 or key.parts[0] != str(session_id):
+        legacy = len(key.parts) == 3 and key.parts[0] == self.LEGACY_DIR
+        current = len(key.parts) == 2 and key.parts[0] == self.USER_FILES_DIR
+        if not (legacy or current) or ".." in key.parts:
             raise AttachmentError("附件儲存位置無效。")
-        filename = key.parts[1]
-        if filename in (".", "..") or key.suffix not in DOCUMENT_EXTENSIONS | {".png", ".jpg", ".jpeg"}:
+        root = self._root()
+        content_path = (root / key).resolve()
+        if not _is_within(content_path, root / key.parts[0]):
             raise AttachmentError("附件儲存位置無效。")
-        try:
-            attachment_id = UUID(key.stem)
-        except ValueError as exc:
-            raise AttachmentError("附件儲存位置無效。") from exc
-        if str(attachment_id) != key.stem:
-            raise AttachmentError("附件儲存位置無效。")
-
-        directory = self._root() / str(session_id)
-        if directory.is_symlink():
-            raise AttachmentError("附件儲存空間目前無法使用。")
-        if not directory.exists():
-            return
-        if not directory.is_dir():
-            raise AttachmentError("附件儲存空間目前無法使用。")
-        content_path = directory / filename
 
         def _delete() -> None:
             content_path.unlink(missing_ok=True)
@@ -202,13 +223,6 @@ class ChatAttachmentStorage:
             await asyncio.to_thread(_delete)
         except OSError as exc:
             raise AttachmentError("附件無法刪除，請稍後再試。") from exc
-
-    async def delete_session(self, session_id: UUID) -> None:
-        root = self._root()
-        directory = root / str(session_id)
-        if not directory.exists() or not _is_within(directory.resolve(), root):
-            return
-        await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
 
 
 def _safe_extension(filename: str | None) -> str:
@@ -283,8 +297,7 @@ def _reencode_image(data: bytes) -> tuple[bytes, str]:
 
 async def process_upload(
     storage: ChatAttachmentStorage,
-    session_id: UUID,
-    attachment_id: UUID,
+    file_id: UUID,
     upload: UploadFile,
 ) -> ProcessedAttachment:
     """Validate, store, and (for DOCX/TXT/MD) extract text from one upload.
@@ -324,7 +337,7 @@ async def process_upload(
     if is_image:
         reencoded, mime_type = _reencode_image(data)
         store_extension = ".png" if mime_type == "image/png" else ".jpg"
-        path, storage_key = await storage.save(session_id, attachment_id, store_extension, reencoded)
+        path, storage_key = await storage.save(file_id, reencoded)
         return ProcessedAttachment(
             display_name=display_name,
             mime_type=mime_type,
@@ -337,7 +350,7 @@ async def process_upload(
         )
 
     _validate_document_magic_bytes(extension, data)
-    path, storage_key = await storage.save(session_id, attachment_id, extension, data)
+    path, storage_key = await storage.save(file_id, data)
     mime_type = {
         ".pdf": "application/pdf",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -364,7 +377,7 @@ async def process_upload(
         )
 
     try:
-        text, status_value, error = await asyncio.to_thread(_extract_document_text, path, extension, attachment_id)
+        text, status_value, error = await asyncio.to_thread(_extract_document_text, path, extension, file_id)
     except AttachmentError as exc:
         return ProcessedAttachment(
             display_name=display_name,

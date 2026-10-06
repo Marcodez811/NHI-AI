@@ -155,6 +155,23 @@ async def upload_document(
     storage: Annotated[DocumentStorage, Depends(get_document_storage)] = None,
     task: Annotated[Any, Depends(get_ingestion_task)] = None,
 ) -> DocumentUploadResponse:
+    return await ingest_upload(file, category, folder_id, repo, storage, task)
+
+
+async def ingest_upload(
+    file: UploadFile,
+    category: DocumentCategory,
+    folder_id: UUID | None,
+    repo: DocumentRepository,
+    storage: DocumentStorage,
+    task: Any,
+) -> DocumentUploadResponse:
+    """Store an upload, create its catalog row and ingestion job, and queue indexing.
+
+    Shared by ``POST /documents`` and ``POST /files/{id}/promote`` so both go
+    through exactly the same ingestion path.
+    """
+
     document_id = uuid4()
     catalog_created = False
     try:

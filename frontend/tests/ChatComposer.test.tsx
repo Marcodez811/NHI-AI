@@ -89,22 +89,10 @@ describe("ChatComposer", () => {
         expect(onStop).toHaveBeenCalledOnce();
     });
 
-    it("uses the new placeholder and moves the attachment note onto the attach button", () => {
+    it("uses the new placeholder and a plus menu button", () => {
         renderComposer();
         expect(screen.getByPlaceholderText("問問健保署 AI…")).toBeInTheDocument();
-
-        const attachButton = screen.getByRole("button", { name: "附加檔案" });
-        expect(attachButton).toHaveAttribute("title", "附件僅供此對話使用，不會加入知識庫");
-
-        expect(screen.queryByText("附件僅供此對話使用，不會加入知識庫。")).not.toBeInTheDocument();
-    });
-
-    it("offers a plus attach button that explains attachments stay out of the knowledge base", () => {
-        renderComposer();
-        expect(screen.getByRole("button", { name: "附加檔案" })).toHaveAttribute(
-            "title",
-            "附件僅供此對話使用，不會加入知識庫",
-        );
+        expect(screen.getByRole("button", { name: "附加檔案" })).toBeInTheDocument();
     });
 
     it("puts the model picker in the right-hand group, before the send button", () => {

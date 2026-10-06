@@ -13,7 +13,9 @@ from app.api.routes.chat import (
     get_chat_repository,
     router as chat_router,
 )
+from app.api.routes.artifacts import get_artifact_repository, router as artifacts_router
 from app.api.routes.documents import get_document_repository, router as documents_router
+from app.api.routes.files import router as files_router
 from app.api.routes.dev_agents import router as dev_agents_router
 from app.api.routes.retrieval import (
     get_retrieval_document_repository,
@@ -34,6 +36,7 @@ from app.services.documents.repository import SQLModelDocumentRepository
 from app.services.slides.outline_repository import SQLModelSlideOutlineRepository
 from app.services.slides.repository import SQLModelSlideJobRepository
 from app.services.chat.engine import AgentsSdkChatEngine, ChatEngine
+from app.services.artifacts import SQLModelArtifactRepository
 from app.services.chat.repository import SQLModelChatRepository
 from app.services.retrieval.registry import RetrievalIndexRegistry
 from app.tasks.documents import set_retrieval_index_registry
@@ -136,6 +139,13 @@ def _chat_repository_from_database():
 app.dependency_overrides[get_chat_repository] = _chat_repository_from_database
 
 
+def _artifact_repository_from_database():
+    yield from (SQLModelArtifactRepository(session) for session in get_session())
+
+
+app.dependency_overrides[get_artifact_repository] = _artifact_repository_from_database
+
+
 def _chat_engine_from_database():
     yield from (
         AgentsSdkChatEngine(
@@ -157,6 +167,8 @@ app.dependency_overrides[get_chat_engine] = _chat_engine_from_database
 
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
+app.include_router(files_router, prefix="/api/v1")
+app.include_router(artifacts_router, prefix="/api/v1")
 app.include_router(retrieval_router, prefix="/api/v1")
 app.include_router(slides_router, prefix="/api/v1")
 app.include_router(news_router, prefix="/api/v1")

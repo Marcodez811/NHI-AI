@@ -27,6 +27,18 @@ describe("ChatMessageList", () => {
         expect(bubble.className).not.toMatch(/text-primary-foreground/);
     });
 
+    it("shows attachment chips above a user message, with a knowledge-base badge, skipping unknown ids", () => {
+        const lookup = {
+            a1: { id: "a1", display_name: "報告.pdf", mime_type: "application/pdf", kind: "document", size_bytes: 1, status: "ready", error: null, text_chars: 1, created_at: "", source: "upload" },
+            a2: { id: "a2", display_name: "給付規則.docx", mime_type: "x", kind: "document", size_bytes: 1, status: "ready", error: null, text_chars: 1, created_at: "", source: "knowledge_base" },
+        } as const;
+        render(<ChatMessageList sessionId="s1" attachmentLookup={lookup} messages={[user({ attachment_ids: ["a1", "a2", "gone"] })]} />);
+        expect(screen.getByText("報告.pdf")).toBeInTheDocument();
+        expect(screen.getByText("給付規則.docx")).toBeInTheDocument();
+        expect(screen.getAllByText("知識庫")).toHaveLength(1);
+        expect(screen.queryByText("gone")).not.toBeInTheDocument();
+    });
+
     it("shows thinking before the reply, compaction while summarizing, then a live answer caret", () => {
         const view = render(<ChatMessageList messages={[assistant({ pending: true })]} />);
         expect(screen.getByText("思考中…")).toHaveClass("chat-shimmer");

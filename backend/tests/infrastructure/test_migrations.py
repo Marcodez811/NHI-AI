@@ -420,3 +420,64 @@ def test_chat_context_migration_preserves_existing_rows(tmp_path):
             "SELECT content, reasoning FROM chat_messages"
         )).one() == ("既有回答", None)
     engine.dispose()
+
+
+def test_user_files_migration_moves_attachments_and_backfills_artifacts(tmp_path, monkeypatch):
+    """chat_attachments become user_files (same id) plus links; completed decks get artifacts."""
+    from alembic import command
+    from app.config import settings
+
+    output_root = tmp_path / "outputs"
+    documents_root = tmp_path / "documents"
+    output_root.mkdir()
+    (output_root / "job-a.pptx").write_bytes(b"deck-bytes")
+    monkeypatch.setattr(settings, "agent_output_root", output_root)
+    monkeypatch.setattr(settings, "documents_root", documents_root)
+
+    db_path = str(tmp_path / "user_files.db")
+    cfg = _alembic_config(db_path)
+    command.upgrade(cfg, "a6294c7e1d30")
+    session_id = "a" * 32
+    attachment_id = "b" * 32
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO chat_sessions (id, title, model, created_at, updated_at) "
+            f"VALUES ('{session_id}', '既有對話', 'gpt-6-astra', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(text(
+            "INSERT INTO chat_attachments (id, session_id, display_name, mime_type, kind, size_bytes, "
+            "storage_key, status, error, text_chars, created_at) "
+            f"VALUES ('{attachment_id}', '{session_id}', '舊附件.txt', 'text/plain', 'document', 5, "
+            f"'{session_id}/{attachment_id}.txt', 'ready', NULL, 5, '2026-01-02')"
+        ))
+        for job_id, key in (("c" * 32, "job-a.pptx"), ("d" * 32, "job-missing.pptx")):
+            conn.execute(text(
+                "INSERT INTO slide_jobs (id, title, document_ids, slides_count, guidance, tone, status, phase, "
+                "artifact_key, attempts, created_at, updated_at) "
+                f"VALUES ('{job_id}', '簡報 {key}', '[]', 5, '', 'formal', 'completed', 'completed', "
+                f"'{key}', 0, '2026-01-01', '2026-01-01')"
+            ))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    assert "chat_attachments" not in sa.inspect(engine).get_table_names()
+    with engine.connect() as conn:
+        file_row = conn.execute(text(
+            "SELECT id, display_name, storage_key, origin_session_id FROM user_files"
+        )).one()
+        assert file_row == (attachment_id, "舊附件.txt", f"chat_attachments/{session_id}/{attachment_id}.txt", session_id)
+        assert conn.execute(text("SELECT session_id, file_id FROM chat_session_files")).one() == (session_id, attachment_id)
+        artifact = conn.execute(text("SELECT kind, title, storage_key, source_job_id FROM artifacts")).one()
+        assert artifact[0] == "slide_deck" and artifact[3] == "c" * 32
+        assert (documents_root / artifact[2]).read_bytes() == b"deck-bytes"
+    engine.dispose()
+
+    command.downgrade(cfg, "a6294c7e1d30")
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    with engine.connect() as conn:
+        restored = conn.execute(text("SELECT id, session_id, storage_key FROM chat_attachments")).one()
+    assert restored == (attachment_id, session_id, f"{session_id}/{attachment_id}.txt")
+    engine.dispose()

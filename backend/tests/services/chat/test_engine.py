@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -10,7 +11,9 @@ from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
 from agents.tool_context import ToolContext
 
 from app.models.chat import (
-    ChatAttachment,
+    ChatAttachmentSource,
+    ChatAttachmentView,
+    utcnow,
     ChatAttachmentKind,
     ChatAttachmentStatus,
     ChatMessage,
@@ -31,6 +34,15 @@ from app.services.chat.engine import (
     _message_to_input_item,
 )
 from app.services.documents.repository import InMemoryDocumentRepository
+
+
+
+def ChatAttachment(**kwargs):  # noqa: N802 - builds the engine's attachment view
+    kwargs.setdefault("id", uuid4())
+    kwargs.setdefault("error", None)
+    kwargs.setdefault("text_chars", None)
+    kwargs.setdefault("created_at", utcnow())
+    return ChatAttachmentView(**kwargs)
 
 
 def _document(*, display_name: str, status=DocumentStatus.READY, retrieval_enabled=True) -> Document:
@@ -200,7 +212,7 @@ async def test_search_tool_reports_when_the_knowledge_base_is_unavailable(tmp_pa
 async def test_read_attachment_pages_through_saved_text(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     session_id, attachment_id = uuid4(), uuid4()
-    path, storage_key = await storage.save(session_id, attachment_id, ".txt", b"placeholder")
+    path, storage_key = await storage.save(attachment_id, b"placeholder")
     await storage.save_text(path, "0123456789")
     attachment = ChatAttachment(
         id=attachment_id,
@@ -273,7 +285,7 @@ async def test_message_to_input_item_replays_text_only_for_plain_turns():
 async def test_message_to_input_item_reattaches_image_parts(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     session_id, attachment_id = uuid4(), uuid4()
-    path, storage_key = await storage.save(session_id, attachment_id, ".png", b"fake-png-bytes")
+    path, storage_key = await storage.save(attachment_id, b"fake-png-bytes")
     attachment = ChatAttachment(
         id=attachment_id,
         session_id=session_id,
@@ -305,7 +317,7 @@ async def test_message_to_input_item_attaches_pdfs_as_files(tmp_path):
     # The provider reads the PDF itself, scanned pages included.
     storage = ChatAttachmentStorage(tmp_path)
     session_id, attachment_id = uuid4(), uuid4()
-    _, storage_key = await storage.save(session_id, attachment_id, ".pdf", b"%PDF-1.4 fake")
+    _, storage_key = await storage.save(attachment_id, b"%PDF-1.4 fake")
     attachment = ChatAttachment(
         id=attachment_id,
         session_id=session_id,
@@ -412,7 +424,7 @@ async def test_run_turn_yields_an_error_event_when_the_model_run_fails(tmp_path)
 async def test_attachment_expires_after_three_user_messages_and_reopens_by_name_this_turn(tmp_path):
     storage = ChatAttachmentStorage(tmp_path)
     session_id, attachment_id = uuid4(), uuid4()
-    _, storage_key = await storage.save(session_id, attachment_id, ".pdf", b"%PDF-1.4 fake")
+    _, storage_key = await storage.save(attachment_id, b"%PDF-1.4 fake")
     attachment = ChatAttachment(
         id=attachment_id, session_id=session_id, display_name="公文.pdf",
         mime_type="application/pdf", kind=ChatAttachmentKind.DOCUMENT.value,
@@ -452,11 +464,6 @@ async def test_attachment_expires_after_three_user_messages_and_reopens_by_name_
     assert all(tool.name != "open_attachment" for tool in runner.calls[-1][0].tools)
     # No reopening tool exists, so the placeholder must not point the model at one.
     assert "open_attachment" not in EXPIRED_ATTACHMENT_NOTE
-    other_session = ChatMessage(session_id=uuid4(), role=ChatMessageRole.USER.value, content="公文.pdf")
-    await anext(engine.run_turn(history=[], user_message=other_session, attachments=[attachment], model="gpt-6-luna"))
-    last_content = runner.calls[-1][1][-1]["content"]
-    # A plain string means text only: nothing was inlined.
-    assert isinstance(last_content, str) or all(part["type"] != "input_file" for part in last_content)
 
 
 @pytest.mark.asyncio
@@ -609,3 +616,104 @@ def test_ordinary_words_that_look_like_id_prefixes_are_not_redacted():
     text = "採用 file-based 儲存，比較 vs_old 方案"
 
     assert stream.feed(text, final=True) == text
+
+
+# ── Attached knowledge-base documents behave like user files ───────────────
+
+
+def _kb_view(session_id, name, mime_type, storage_key, kind=ChatAttachmentKind.DOCUMENT.value):
+    return ChatAttachment(
+        session_id=session_id, display_name=name, mime_type=mime_type, kind=kind, size_bytes=10,
+        storage_key=storage_key, status=ChatAttachmentStatus.READY.value,
+        source=ChatAttachmentSource.KNOWLEDGE_BASE.value,
+    )
+
+
+@pytest.mark.asyncio
+async def test_attached_kb_pdf_is_inlined_then_expires_like_an_upload(tmp_path):
+    document_dir = tmp_path / str(uuid4())
+    document_dir.mkdir()
+    (document_dir / "rules.pdf").write_bytes(b"%PDF-1.4 kb")
+    session_id = uuid4()
+    attachment = _kb_view(session_id, "給付規則.pdf", "application/pdf", f"{document_dir.name}/rules.pdf")
+    first = ChatMessage(
+        session_id=session_id, role=ChatMessageRole.USER.value, content="請讀給付規則",
+        attachment_ids=[str(attachment.id)],
+    )
+    runner = FakeRunner([])
+    engine = AgentsSdkChatEngine(
+        document_repository=InMemoryDocumentRepository(), vector_store_id_provider=lambda: None,
+        attachment_storage=ChatAttachmentStorage(tmp_path), client=FakeOpenAIClient([]), runner_factory=runner,
+    )
+
+    await anext(engine.run_turn(history=[], user_message=first, attachments=[attachment], model="gpt-6-luna"))
+    content = runner.calls[-1][1][-1]["content"]
+    assert any(part["type"] == "input_file" for part in content)
+    assert "知識庫文件" in content[-1]["text"]
+
+    history = [first]
+    for text in ("第二題", "第三題"):
+        history.append(ChatMessage(session_id=session_id, role=ChatMessageRole.ASSISTANT.value, content="好"))
+        history.append(ChatMessage(session_id=session_id, role=ChatMessageRole.USER.value, content=text))
+    last = ChatMessage(session_id=session_id, role=ChatMessageRole.USER.value, content="第四題")
+    await anext(engine.run_turn(history=history, user_message=last, attachments=[attachment], model="gpt-6-luna"))
+    assert runner.calls[-1][1][0]["content"] == "請讀給付規則" + EXPIRED_ATTACHMENT_NOTE.format(name="給付規則.pdf")
+
+
+@pytest.mark.asyncio
+async def test_attached_kb_docx_is_extracted_once_and_read_through_read_attachment(tmp_path, monkeypatch):
+    from app.services.chat import attachments as attachments_module
+
+    calls = []
+
+    def fake_extract_docx(path, output, document_id):
+        calls.append(path)
+        return [{"text": "第一段"}, {"text": "第二段"}], [], [], []
+
+    monkeypatch.setattr(attachments_module._source_extraction, "extract_docx", fake_extract_docx)
+    document_dir = tmp_path / str(uuid4())
+    document_dir.mkdir()
+    (document_dir / "guide.docx").write_bytes(b"PK\x03\x04rest")
+    attachment = _kb_view(uuid4(), "作業手冊.docx", "application/octet-stream", f"{document_dir.name}/guide.docx")
+    engine = _engine(document_repository=InMemoryDocumentRepository(), storage=ChatAttachmentStorage(tmp_path))
+    tool = engine._read_attachment_tool({attachment.id: attachment}, {})
+    args = {"name": "作業手冊.docx"}
+
+    first = await tool.on_invoke_tool(_tool_context(READ_ATTACHMENT_TOOL_NAME, args), json.dumps(args))
+    second = await tool.on_invoke_tool(_tool_context(READ_ATTACHMENT_TOOL_NAME, args), json.dumps(args))
+
+    assert "第一段\n\n第二段" in first and "第一段\n\n第二段" in second
+    assert len(calls) == 1
+    assert (document_dir / "guide.docx.chat-text").is_file()
+    # The cached text must not break the knowledge-base source lookup.
+    from app.services.documents.storage import LocalDocumentStorage
+
+    assert LocalDocumentStorage(tmp_path).resolve(uuid.UUID(document_dir.name)).name == "guide.docx"
+
+
+def test_litellm_models_request_reasoning_so_thinking_can_stream():
+    from app.services.chat.engine import _model_settings
+
+    assert _model_settings("litellm/gemini/gemini-3.8-flash").reasoning.effort == "medium"
+    assert _model_settings("litellm/anthropic/claude-sonnet-5").reasoning.effort == "medium"
+    assert _model_settings("gpt-6-luna").reasoning.summary == "auto"
+    assert _model_settings("gpt-4o").reasoning is None
+
+
+def test_provider_error_log_redacts_api_keys():
+    from loguru import logger
+
+    from app.services.chat.engine import _log_provider_error
+
+    lines: list[str] = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="WARNING")
+    try:
+        _log_provider_error(
+            "litellm/anthropic/claude-sonnet-5",
+            RuntimeError("credential validation failed for sk-ant-api03-SECRETSECRET and AIzaSyDUMMYKEYDUMMYKEYDUMMY"),
+        )
+    finally:
+        logger.remove(sink)
+
+    assert "credential validation failed" in lines[0]
+    assert "SECRETSECRET" not in lines[0] and "AIzaSyDUMMY" not in lines[0]

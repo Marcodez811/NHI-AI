@@ -32,19 +32,21 @@ from agents.model_settings import ModelSettings, Reasoning
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent, StreamEvent
 from agents.tool import FunctionTool, function_tool
 from agents.tool_context import ToolContext
+from loguru import logger
 from openai import AsyncOpenAI
 from pydantic import SecretStr
 
 from app.models.chat import (
-    ChatAttachment,
     ChatAttachmentKind,
+    ChatAttachmentSource,
     ChatAttachmentStatus,
+    ChatAttachmentView,
     ChatMessage,
     ChatMessageRole,
 )
 from app.models.documents import DocumentCategory, DocumentStatus
 from app.services.agentic.sdk_runner import build_litellm_run_config
-from app.services.chat.attachments import ChatAttachmentStorage
+from app.services.chat.attachments import AttachmentError, ChatAttachmentStorage
 from app.services.documents.repository import DocumentRepository
 
 SEARCH_TOOL_NAME = "search_knowledge_base"
@@ -95,7 +97,7 @@ class ChatEngine(Protocol):
         *,
         history: Sequence[ChatMessage],
         user_message: ChatMessage,
-        attachments: Sequence[ChatAttachment],
+        attachments: Sequence[ChatAttachmentView],
         model: str,
         summary: str | None = None,
     ) -> AsyncIterator[ChatEvent]: ...
@@ -105,7 +107,7 @@ class ChatEngine(Protocol):
         *,
         history: Sequence[ChatMessage],
         previous_summary: str | None,
-        attachments: Sequence[ChatAttachment],
+        attachments: Sequence[ChatAttachmentView],
         model: str,
     ) -> str: ...
 
@@ -157,7 +159,7 @@ def _dedupe_sources(sources: list[dict[str, str]]) -> list[dict[str, str]]:
     return deduped
 
 
-def _summary_safe(text: str, attachments: Sequence[ChatAttachment]) -> str:
+def _summary_safe(text: str, attachments: Sequence[ChatAttachmentView]) -> str:
     """Exclude opaque attachment storage keys and UUIDs from running context."""
     for attachment in attachments:
         if attachment.storage_key:
@@ -168,7 +170,7 @@ def _summary_safe(text: str, attachments: Sequence[ChatAttachment]) -> str:
 class _SafeStream:
     """Hold only possible identifier suffixes so split deltas cannot expose IDs."""
 
-    def __init__(self, attachments: Sequence[ChatAttachment], known_ids: Sequence[str]) -> None:
+    def __init__(self, attachments: Sequence[ChatAttachmentView], known_ids: Sequence[str]) -> None:
         self.pending = ""
         self._dropping = False
         self._secrets = tuple(
@@ -219,21 +221,26 @@ class _SafeStream:
         return self._clean(ready)
 
 
-def _is_pdf(attachment: ChatAttachment) -> bool:
+def _is_pdf(attachment: ChatAttachmentView) -> bool:
     return attachment.mime_type == "application/pdf"
 
 
-def _attachment_note(attachment: ChatAttachment) -> str:
+def _has_readable_text(attachment: ChatAttachmentView) -> bool:
+    # Knowledge-base text is extracted lazily, so its length is not known up front.
+    return attachment.source == ChatAttachmentSource.KNOWLEDGE_BASE.value or (attachment.text_chars or 0) > 0
+
+
+def _attachment_note(attachment: ChatAttachmentView) -> str:
     if attachment.kind == ChatAttachmentKind.IMAGE.value:
         return "圖片"
     if _is_pdf(attachment):
         return "PDF，最近訊息可直接查看，較早附件請在新訊息提及名稱"
-    if (attachment.text_chars or 0) > 0:
+    if _has_readable_text(attachment):
         return "文件，可用 read_attachment 讀取內容"
     return "文件，沒有可讀取的文字內容"
 
 
-def _build_turn_context(attachments: Sequence[ChatAttachment], summary: str | None) -> str | None:
+def _build_turn_context(attachments: Sequence[ChatAttachmentView], summary: str | None) -> str | None:
     """Return the per-turn context block, or ``None`` when there is nothing to say.
 
     It rides on the newest user message (for prompt caching), so it is fenced
@@ -247,7 +254,7 @@ def _build_turn_context(attachments: Sequence[ChatAttachment], summary: str | No
     if attachments:
         lines.append("這個對話目前的附件：")
         lines.extend(
-            f"- {attachment.display_name}（{_attachment_note(attachment) if attachment.status == ChatAttachmentStatus.READY.value else '無法讀取'}；"
+            f"- {attachment.display_name}（{'知識庫文件；' if attachment.source == ChatAttachmentSource.KNOWLEDGE_BASE.value else ''}{_attachment_note(attachment) if attachment.status == ChatAttachmentStatus.READY.value else '無法讀取'}；"
             f"{'可使用' if attachment.status == ChatAttachmentStatus.READY.value else '處理失敗'}）"
             for attachment in attachments
         )
@@ -258,7 +265,7 @@ def _build_turn_context(attachments: Sequence[ChatAttachment], summary: str | No
 
 async def _message_to_input_item(
     message: ChatMessage,
-    attachments_by_id: Mapping[UUID, ChatAttachment],
+    attachments_by_id: Mapping[UUID, ChatAttachmentView],
     storage: ChatAttachmentStorage,
     *,
     inline: bool = True,
@@ -273,8 +280,8 @@ async def _message_to_input_item(
     """
 
     role = "user" if message.role == ChatMessageRole.USER.value else "assistant"
-    inline_attachments: list[ChatAttachment] = []
-    expired: list[ChatAttachment] = []
+    inline_attachments: list[ChatAttachmentView] = []
+    expired: list[ChatAttachmentView] = []
     if role == "user":
         for raw_id in message.attachment_ids:
             attachment = attachments_by_id.get(UUID(raw_id))
@@ -295,7 +302,7 @@ async def _message_to_input_item(
         return {"role": role, "content": text}
     parts: list[dict[str, Any]] = [{"type": "input_text", "text": text}]
     for attachment in inline_attachments:
-        path = storage.resolve(message.session_id, attachment.storage_key)
+        path = storage.resolve(attachment.storage_key)
         data = await asyncio.to_thread(path.read_bytes)
         data_url = f"data:{attachment.mime_type};base64,{base64.b64encode(data).decode('ascii')}"
         if _is_pdf(attachment):
@@ -303,6 +310,39 @@ async def _message_to_input_item(
         else:
             parts.append({"type": "input_image", "image_url": data_url})
     return {"role": role, "content": parts}
+
+
+_OPENAI_REASONING_MODELS = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+# Keys that can appear inside provider error text; never let them reach the log.
+_SECRET_PATTERN = re.compile(r"(sk-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{20,})")
+
+
+def _model_settings(model: str) -> ModelSettings:
+    """Ask every provider for reasoning so the UI can show 「思考過程」.
+
+    OpenAI models stream reasoning *summaries*. LiteLLM models (Gemini, Claude)
+    take a scalar effort instead: the SDK forwards it as ``reasoning_effort``, and
+    LiteLLM turns it into the provider's thinking setting with thoughts included
+    (``includeThoughts`` for Gemini). The SDK then turns the returned
+    ``reasoning_content`` into the same reasoning events.
+
+    "medium", not "low": verified live on 2026-09-29, Gemini 3.8 Flash at
+    ``thinkingLevel: low`` returns no thoughts at all, while LiteLLM 1.83 maps
+    "medium" to ``thinkingLevel: high`` and the thoughts come back.
+    """
+
+    if model.startswith(_OPENAI_REASONING_MODELS):
+        return ModelSettings(reasoning=Reasoning(summary="auto"))
+    if model.startswith("litellm/"):
+        return ModelSettings(reasoning=Reasoning(effort="medium"))
+    return ModelSettings()
+
+
+def _log_provider_error(model: str, exc: Exception) -> None:
+    """Record why a turn failed; the user only ever sees the generic message."""
+
+    detail = _SECRET_PATTERN.sub("[redacted]", str(exc))[:500]
+    logger.warning("chat turn failed on {}: {}: {}", model, type(exc).__name__, detail)
 
 
 class AgentsSdkChatEngine:
@@ -419,9 +459,27 @@ class AgentsSdkChatEngine:
             description_override="搜尋健保署知識庫，尋找與查詢相關的資料段落（不含新聞來源）。",
         )
 
+    async def _read_document_text(
+        self, attachment: ChatAttachmentView, *, start: int, max_chars: int
+    ) -> tuple[str, int]:
+        """Read a slice of a DOCX/TXT/MD attachment's text.
+
+        Knowledge-base documents are extracted on first use and cached beside
+        the stored document.
+        """
+
+        storage = self._attachment_storage
+        path = storage.resolve(attachment.storage_key)
+        text_path = None
+        if attachment.source == ChatAttachmentSource.KNOWLEDGE_BASE.value:
+            text_path = await storage.ensure_kb_text(path)
+        return await asyncio.to_thread(
+            storage.read_text, path, start=start, max_chars=max_chars, text_path=text_path,
+        )
+
     def _read_attachment_tool(
         self,
-        attachments_by_id: Mapping[UUID, ChatAttachment],
+        attachments_by_id: Mapping[UUID, ChatAttachmentView],
         tool_labels: dict[str, str],
     ) -> FunctionTool:
         by_name = {attachment.display_name: attachment for attachment in attachments_by_id.values()}
@@ -452,13 +510,13 @@ class AgentsSdkChatEngine:
             if _is_pdf(attachment):
                 tool_labels[ctx.tool_call_id] = f"讀取附件：{name}"
                 return f"（{name} 是 PDF；若目前訊息中沒有該檔案，請使用者在新訊息提及附件名稱以再次查看。）"
-            path = self._attachment_storage.resolve(attachment.session_id, attachment.storage_key)
-            text, total = await asyncio.to_thread(
-                self._attachment_storage.read_text,
-                path,
-                start=max(0, start),
-                max_chars=max(1, min(20_000, max_chars)),
-            )
+            try:
+                text, total = await self._read_document_text(
+                    attachment, start=max(0, start), max_chars=max(1, min(20_000, max_chars)),
+                )
+            except AttachmentError:
+                tool_labels[ctx.tool_call_id] = "附件無法讀取"
+                return "這個附件目前無法讀取。"
             tool_labels[ctx.tool_call_id] = f"讀取附件：{name}"
             if not text:
                 return f"（{name} 沒有可讀取的文字內容，共 {total} 字元。）"
@@ -475,15 +533,11 @@ class AgentsSdkChatEngine:
         *,
         history: Sequence[ChatMessage],
         user_message: ChatMessage,
-        attachments: Sequence[ChatAttachment],
+        attachments: Sequence[ChatAttachmentView],
         model: str,
         summary: str | None = None,
     ) -> AsyncIterator[ChatEvent]:
-        attachments_by_id = {
-            attachment.id: attachment
-            for attachment in attachments
-            if attachment.session_id == user_message.session_id
-        }
+        attachments_by_id = {attachment.id: attachment for attachment in attachments}
         try:
             session_attachments = tuple(attachments_by_id.values())
             eligible = {
@@ -558,11 +612,7 @@ class AgentsSdkChatEngine:
             name="健保署 AI 助理",
             instructions=BASE_INSTRUCTIONS,
             model=model,
-            model_settings=(
-                ModelSettings(reasoning=Reasoning(summary="auto"))
-                if model.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4"))
-                else ModelSettings()
-            ),
+            model_settings=_model_settings(model),
             tools=[
                 self._search_tool(collected_sources, tool_labels),
                 self._read_attachment_tool(attachments_by_id, tool_labels),
@@ -570,7 +620,8 @@ class AgentsSdkChatEngine:
         )
         try:
             run_config = build_litellm_run_config(model, self._litellm_api_keys) or RunConfig()
-        except Exception:
+        except Exception as exc:
+            _log_provider_error(model, exc)
             yield ChatEvent("error", {"code": "chat_unavailable", "message": "對話服務暫時無法使用，請稍後再試。"})
             return
 
@@ -587,7 +638,8 @@ class AgentsSdkChatEngine:
                             yield ChatEvent(chat_event.type, {"text": safe})
                     else:
                         yield chat_event
-        except Exception:
+        except Exception as exc:
+            _log_provider_error(model, exc)
             for event_type, stream in (("reasoning_delta", reasoning_stream), ("text_delta", text_stream)):
                 if safe := stream.feed("", final=True):
                     yield ChatEvent(event_type, {"text": safe})
@@ -613,7 +665,7 @@ class AgentsSdkChatEngine:
         *,
         history: Sequence[ChatMessage],
         previous_summary: str | None,
-        attachments: Sequence[ChatAttachment],
+        attachments: Sequence[ChatAttachmentView],
         model: str,
     ) -> str:
         """Summarize only newly expired messages, without model-facing identifiers."""
@@ -631,19 +683,15 @@ class AgentsSdkChatEngine:
             lines.append(f"{role}：{message.content}")
             for raw_id in message.attachment_ids:
                 attachment = by_id.get(UUID(raw_id))
-                if attachment is None or attachment.session_id != message.session_id:
+                if attachment is None:
                     continue
                 lines.append(f"附件名稱：{attachment.display_name}（{_attachment_note(attachment)}）")
                 if (
                     attachment.kind == ChatAttachmentKind.DOCUMENT.value
-                    and (attachment.text_chars or 0) > 0
+                    and not _is_pdf(attachment)
+                    and _has_readable_text(attachment)
                 ):
-                    path = self._attachment_storage.resolve(
-                        attachment.session_id, attachment.storage_key,
-                    )
-                    excerpt, _ = await asyncio.to_thread(
-                        self._attachment_storage.read_text, path, start=0, max_chars=2_000,
-                    )
+                    excerpt, _ = await self._read_document_text(attachment, start=0, max_chars=2_000)
                     lines.append(f"附件內容摘錄：{excerpt}")
             for source in message.sources or []:
                 lines.append(f"來源文件：{source['name']}；相關資料：{source['snippet']}")

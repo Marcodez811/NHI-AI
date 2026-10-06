@@ -127,7 +127,7 @@ async def test_get_attachment_content_returns_the_stored_file(tmp_path):
 
     response = await get_chat_attachment_content(session.id, attachment.id, repository, storage)
 
-    assert str(response.path).endswith(".txt")
+    assert response.filename == "note.txt"
     assert response.media_type == "text/plain"
 
 
@@ -138,13 +138,13 @@ async def test_delete_unsent_attachment_succeeds(tmp_path):
     session = await create_chat_session(ChatSessionCreate(), repository)
     attachment = await upload_chat_attachment(session.id, FakeUpload("note.txt", b"hi"), repository, storage)
 
-    content_path = storage.resolve(session.id, (await repository.get_attachment(attachment.id)).storage_key)
-    sidecar_path = storage.text_path(content_path)
-    assert content_path.exists() and sidecar_path.exists()
-    await delete_chat_attachment(session.id, attachment.id, repository, storage)
+    content_path = storage.resolve((await repository.get_file(attachment.id)).storage_key)
+    await delete_chat_attachment(session.id, attachment.id, repository)
 
-    assert await repository.get_attachment(attachment.id) is None
-    assert not content_path.exists() and not sidecar_path.exists()
+    # Removing it from the conversation only unlinks; the file stays in 「我的檔案」.
+    assert await repository.list_session_files(session.id) == []
+    assert await repository.get_file(attachment.id) is not None
+    assert content_path.exists()
 
 
 @pytest.mark.asyncio
@@ -163,7 +163,7 @@ async def test_delete_attachment_already_sent_in_a_message_is_rejected(tmp_path)
     await _collect_sse(response)
 
     with pytest.raises(HTTPException) as error:
-        await delete_chat_attachment(session.id, attachment.id, repository, storage)
+        await delete_chat_attachment(session.id, attachment.id, repository)
     assert error.value.status_code == 409
 
 

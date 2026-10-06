@@ -13,6 +13,7 @@ import { consumeSseStream, invalidStreamError, parseSseBlock, type SseEventTable
 
 export type ChatAttachmentKind = "document" | "image";
 export type ChatAttachmentStatus = "ready" | "failed";
+export type ChatAttachmentSource = "upload" | "knowledge_base";
 export type ChatMessageStatus = "complete" | "interrupted" | "error";
 
 export interface ChatAttachment {
@@ -25,6 +26,8 @@ export interface ChatAttachment {
     error: string | null;
     text_chars: number | null;
     created_at: string;
+    /** Absent on older responses; treated as "upload". */
+    source?: ChatAttachmentSource;
 }
 
 export interface ChatSourceRef {
@@ -153,6 +156,39 @@ export function chatAttachmentContentUrl(sessionId: string, attachmentId: string
 export async function deleteChatAttachment(sessionId: string, attachmentId: string): Promise<void> {
     await request<void>(
         `/chat/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`,
+        { method: "DELETE" },
+    );
+}
+
+async function postIds(path: string, key: string, ids: string[]): Promise<void> {
+    await request<unknown>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [key]: ids }),
+    });
+}
+
+/** Link existing "my files" to a conversation. */
+export function linkChatFiles(sessionId: string, fileIds: string[]): Promise<void> {
+    return postIds(`/chat/sessions/${encodeURIComponent(sessionId)}/files`, "file_ids", fileIds);
+}
+
+/** Unlink only; the file itself is kept. */
+export async function unlinkChatFile(sessionId: string, fileId: string): Promise<void> {
+    await request<void>(
+        `/chat/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}`,
+        { method: "DELETE" },
+    );
+}
+
+/** Attach READY knowledge-base documents to a conversation. */
+export function linkChatDocuments(sessionId: string, documentIds: string[]): Promise<void> {
+    return postIds(`/chat/sessions/${encodeURIComponent(sessionId)}/documents`, "document_ids", documentIds);
+}
+
+export async function unlinkChatDocument(sessionId: string, documentId: string): Promise<void> {
+    await request<void>(
+        `/chat/sessions/${encodeURIComponent(sessionId)}/documents/${encodeURIComponent(documentId)}`,
         { method: "DELETE" },
     );
 }

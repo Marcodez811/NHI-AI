@@ -1,6 +1,7 @@
 "use client";
 
 import { CircleAlert, FileText, Loader2, X } from "lucide-react";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { chatAttachmentContentUrl } from "../../lib/api/chat";
 import type { ComposerAttachment } from "../../lib/hooks/useChatSession";
@@ -15,7 +16,9 @@ export function ChatAttachmentChip({
     item: ComposerAttachment;
     onRemove: () => void;
 }) {
-    const isImage = (item.attachment?.kind ?? (item.file.type.startsWith("image/") ? "image" : "document")) === "image";
+    const name = item.attachment?.display_name ?? item.file?.name ?? "";
+    const isKnowledgeBase = item.attachment?.source === "knowledge_base";
+    const isImage = (item.attachment?.kind ?? (item.file?.type.startsWith("image/") ? "image" : "document")) === "image";
     const thumbnailUrl = item.status === "ready" && isImage && item.attachment && sessionId
         ? chatAttachmentContentUrl(sessionId, item.attachment.id)
         : null;
@@ -32,7 +35,10 @@ export function ChatAttachmentChip({
                 )}
             </div>
             <div className="min-w-0 flex-1">
-                <div className="truncate font-medium text-foreground">{item.file.name}</div>
+                <div className="flex items-center gap-1.5">
+                    <span className="truncate font-medium text-foreground">{name}</span>
+                    {isKnowledgeBase && <Badge variant="secondary" className="shrink-0">知識庫</Badge>}
+                </div>
                 <div className="flex items-center gap-1 text-muted-foreground">
                     {item.status === "uploading" && (
                         <>
@@ -59,7 +65,7 @@ export function ChatAttachmentChip({
                 variant="ghost"
                 size="icon-xs"
                 onClick={onRemove}
-                aria-label={`移除 ${item.file.name}`}
+                aria-label={`移除 ${name}`}
             >
                 <X size={13} />
             </Button>

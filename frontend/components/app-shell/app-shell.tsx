@@ -1,6 +1,6 @@
 "use client"
 
-import { ChevronRight, Library, Plus, Settings, Workflow } from "lucide-react"
+import { ChevronRight, FolderOpen, Library, Plus, Settings, Workflow } from "lucide-react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
@@ -13,6 +13,7 @@ import { ChatSidebarSessions } from "@/components/chat/ChatSidebarSessions"
 const navigation = [
   { href: "/chat", label: "新對話", icon: Plus },
   { href: "/knowledge", label: "知識庫管理", icon: Library },
+  { href: "/files", label: "我的檔案", icon: FolderOpen },
   { href: "/workflows", label: "AI 工作流", icon: Workflow },
   { href: "/settings", label: "設定", icon: Settings },
 ] as const
@@ -99,7 +100,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <main className={cn("min-h-screen pb-20 transition-[margin] md:pb-0", collapsed ? "md:ml-24" : "md:ml-60")}>{children}</main>
 
       <nav
-        className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-4 gap-1 rounded-xl border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur md:hidden"
+        className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-5 gap-1 rounded-xl border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur md:hidden"
         aria-label="主要導覽"
       >
         {navigation.map(({ href, label, icon: Icon }) => {
