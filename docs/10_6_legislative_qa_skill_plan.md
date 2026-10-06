@@ -150,6 +150,26 @@ in `config.yaml`).
 
 ---
 
+### 7. Starting from a previous QA (decided 2026-10-06)
+
+Like building on an earlier artifact in Claude: in 情境觸發 the user can pick 「從先前的 QA 開始」.
+
+- **A QA this system generated (lossless).**
+  - Every generated version stores its structured content next to the .docx: questions, outlines,
+    sections, paragraphs, citations and evidence.
+  - The user picks it from 我的檔案 → 產出的文件 (or 「＋ → 從我的檔案加入」), which pre-fills the
+    QA 工作區. The user then confirms which questions to keep, drop or add, and attaches the new
+    period's documents.
+  - Generation runs in **update mode**: the writer gets the previous text as a baseline and keeps
+    its wording where the evidence still holds. The preview highlights figures and sentences that
+    changed against the previous version.
+- **A pre-system Word QA (best effort).**
+  - An importer splits the .docx into topics (`N. 題目`). It separates 簡答 from 詳答 by font size
+    (26pt / 16pt) or the repeated title, and extracts section headings.
+  - Imported figures carry **no source**, so they are marked 「未附來源」. Each must be matched to
+    new evidence or explicitly confirmed by the user before generation; otherwise the checker
+    reports it as `unsupported`.
+
 ## Phases
 
 1. **Skill mode + workspace + the first four stages.** Skill flag and composer chip, workspace
@@ -157,14 +177,14 @@ in `config.yaml`).
    the end state is a confirmed outline with evidence. *Testable by chatting through a real
    question.*
 2. **Generation.** The `legislative_qa` workflow: writer, numeric check, checker loop, model
-   settings tab, .docx template, report artifact, progress card. *Test: generate the sample's
-   topic 6 from the sample's own figures and compare with the original.*
-3. **Preview + revisions.** Side panel, versions, ⚠ issues, scoped `revise` from chat.
+   settings tab, .docx template, report artifact (**with its structured content stored**, see §7),
+   progress card, and starting from a previously generated QA (update mode). *Test: generate the
+   sample's topic 6 from the sample's own figures and compare with the original.*
+3. **Preview + revisions.** Side panel, versions with change highlighting, ⚠ issues, scoped
+   `revise` from chat, and the importer for pre-system Word QAs.
 
 ## Open questions (not blocking Phase 1)
 
-- Should last session's QA document be reusable as a starting point ("update this QA with new
-  figures")? Not covered by the meeting.
 - Who signs off: the drafter only, or a supervisor review step? Single user for now, so not
   modelled.
 - A 會期 label for the document title: ask in 需求解析, or a setting?
