@@ -60,3 +60,4 @@ graphify-out/
 
 # Deployment tooling
 .vercel/
+snapshot/
