@@ -9,9 +9,16 @@ foreach ($f in "snapshot\db.dump", "snapshot\data.tgz") {
     if (-not (Test-Path $f)) { throw "找不到 $f，請先把 snapshot 資料夾複製到專案根目錄。" }
 }
 if (Test-Path "snapshot\commit.txt") {
+    # Best effort: a ZIP download has no git history, so skip the check then.
     $want = (Get-Content "snapshot\commit.txt").Trim()
-    $have = (git rev-parse HEAD).Trim()
-    if ($want -ne $have) { Write-Warning "程式碼版本不同（snapshot: $($want.Substring(0,8))，這裡: $($have.Substring(0,8))）。建議先 git checkout $want 再匯入。" }
+    $have = $null
+    try { $have = (& git rev-parse HEAD 2>$null) } catch { }
+    if ($have) {
+        $have = "$have".Trim()
+        if ($want -ne $have) { Write-Warning "程式碼版本不同（snapshot: $($want.Substring(0,8))，這裡: $($have.Substring(0,8))）。建議先更新程式碼再匯入。" }
+    } else {
+        Write-Host "（無法確認程式碼版本；請確認這份程式碼是 $($want.Substring(0,8)) 之後的版本）"
+    }
 }
 
 Write-Host "→ stopping the app (database stays up)"
