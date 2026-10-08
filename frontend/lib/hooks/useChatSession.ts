@@ -15,6 +15,9 @@ import {
     uploadChatAttachment,
 } from "../api/chat";
 import type { ChatAttachment, ChatMessageRecord, ChatSourceRef } from "../api/chat";
+import { parseQaCards } from "../api/qa";
+import type { QaCard } from "../api/qa";
+import { useQaSkill } from "./useQaSkill";
 import type { ChatLimits } from "../api/config";
 import { useChatSessions } from "./useChatSessions";
 import { useClientConfig } from "./useClientConfig";
@@ -97,6 +100,8 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
     // `/chat` to `/chat/<id>` right after creation), the load effect must not
     // reset the conversation it is actively streaming into.
     const selfCreatedIds = useRef<Set<string>>(new Set());
+    // Declared below `ensureSession`; the ref lets the load effect reach it.
+    const qaRef = useRef<ReturnType<typeof useQaSkill> | null>(null);
 
     // A model choice already picked for a fresh conversation should not be
     // clobbered once the model list resolves its default asynchronously.
@@ -117,6 +122,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         setAttachmentLookup({});
         setCompactedThroughMessageId(null);
         setLoadError(null);
+        qaRef.current?.reset();
         if (!sessionId) {
             setLoading(false);
             return;
@@ -129,6 +135,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
                 if (cancelled) return;
                 setMessages(detail.messages.map((message) => ({
                     ...message,
+                    cards: parseQaCards(message.cards),
                     localKey: message.id,
                     reasoningStreaming: false,
                     answerStarted: Boolean(message.content),
@@ -136,6 +143,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
                 setAttachmentLookup(Object.fromEntries((detail.attachments ?? []).map((item) => [item.id, item])));
                 setCompactedThroughMessageId(detail.compacted_through_message_id ?? null);
                 setModel(detail.model);
+                qaRef.current?.hydrate(detail);
             } catch (caught) {
                 if (!cancelled) setLoadError(errorText(caught));
             } finally {
@@ -157,6 +165,10 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         router.replace(`/chat/${created.id}`);
         return created.id;
     }, [model, router, sessionsCtx]);
+
+    const qa = useQaSkill(activeSessionId, ensureSession);
+    qaRef.current = qa;
+    const refreshQa = qa.refresh;
 
     const uploadOne = useCallback((targetId: string, file: File, localId: string): Promise<ChatAttachment | null> => {
         return uploadChatAttachment(targetId, file)
@@ -193,8 +205,9 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
             uploads.push(uploadOne(targetId, file, localId));
         }
         const done = await Promise.all(uploads);
+        void refreshQa();
         return done.filter((item): item is ChatAttachment => item !== null);
-    }, [attachments.length, chatLimits, ensureSession, uploadOne]);
+    }, [attachments.length, chatLimits, ensureSession, refreshQa, uploadOne]);
 
     /** Links already-stored files or knowledge-base documents to this conversation. */
     const attachExisting = useCallback(async (
@@ -357,6 +370,10 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
                         next[index] = { ...next[index], label, done: true };
                         return { ...turn, receivedEvent: true, toolSteps: next };
                     }),
+                    onSkillCard: (card: QaCard) => {
+                        updateAssistant((turn) => ({ ...turn, receivedEvent: true, cards: [...(turn.cards ?? []), card] }));
+                        void refreshQa();
+                    },
                     onSources: (sources: ChatSourceRef[]) => updateAssistant((turn) => ({ ...turn, sources, receivedEvent: true })),
                     onDone: (messageId, title) => {
                         updateAssistant((turn) => ({
@@ -383,6 +400,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         } finally {
             controllerRef.current = null;
             setBusy(false);
+            void refreshQa();
         }
         if (compacted) {
             try {
@@ -401,7 +419,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
                 // The stream has finished; a failed marker refresh must not discard its answer.
             }
         }
-    }, [attachments, busy, draft, ensureSession, model, sessionsCtx, uploadsPending]);
+    }, [attachments, busy, draft, ensureSession, model, refreshQa, sessionsCtx, uploadsPending]);
 
     const stop = useCallback(() => {
         controllerRef.current?.abort();
@@ -427,6 +445,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         removeAttachment,
         send,
         stop,
+        qa,
     };
 }
 

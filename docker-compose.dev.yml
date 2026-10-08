@@ -43,6 +43,9 @@ services:
                   path: ./backend/.agents
                   target: /app/.agents
                 - action: sync
+                  path: ./backend/chat_skills
+                  target: /app/chat_skills
+                - action: sync
                   path: ./backend/alembic
                   target: /app/alembic
                 - action: rebuild

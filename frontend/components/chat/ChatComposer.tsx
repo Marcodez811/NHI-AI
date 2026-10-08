@@ -2,12 +2,16 @@
 
 import { useRef, useState } from "react";
 import type { ClipboardEvent, DragEvent } from "react";
-import { ArrowUp, FolderOpen, Library, Paperclip, Plus, Square, Zap } from "lucide-react";
+import { ArrowUp, FolderOpen, Library, Paperclip, Plus, Square, X, Zap } from "lucide-react";
+import { ConfirmDialog } from "../ui/confirm-dialog";
 import { Button } from "../ui/button";
 import {
     DropdownMenu,
     DropdownMenuContent,
+    DropdownMenuGroup,
     DropdownMenuItem,
+    DropdownMenuLabel,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 import { promoteUserFile } from "../../lib/api/files";
@@ -39,6 +43,9 @@ export function ChatComposer({
     uploadsPending,
     onSend,
     onStop,
+    skill = null,
+    onSelectSkill,
+    onExitSkill,
 }: {
     sessionId: string | null;
     draft: string;
@@ -56,11 +63,16 @@ export function ChatComposer({
     uploadsPending: boolean;
     onSend: () => void;
     onStop: () => void;
+    /** Active skill of the conversation; "legislative_qa" shows the 立院QA chip. */
+    skill?: string | null;
+    onSelectSkill?: () => Promise<void> | void;
+    onExitSkill?: () => Promise<void> | void;
 }) {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [dragActive, setDragActive] = useState(false);
     const [picker, setPicker] = useState<PickerSource | null>(null);
     const [pendingUpload, setPendingUpload] = useState<Promise<ChatAttachment[]> | null>(null);
+    const [confirmExit, setConfirmExit] = useState(false);
     const sendBlocked = busy || uploadsPending || !draft.trim();
 
     /** Picked or dropped files: upload now and ask where they should live. Pasted images skip the ask. */
@@ -151,12 +163,28 @@ export function ChatComposer({
                             <DropdownMenuItem onClick={() => setPicker("upload")}>
                                 <FolderOpen /> 從我的檔案加入
                             </DropdownMenuItem>
-                            <DropdownMenuItem disabled>
-                                <Zap /> 使用技能
-                                <span className="ml-auto text-xs text-muted-foreground">即將推出</span>
-                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuGroup>
+                                <DropdownMenuLabel className="flex items-center gap-1.5"><Zap size={13} /> 使用技能</DropdownMenuLabel>
+                                <DropdownMenuItem disabled={!onSelectSkill || skill === "legislative_qa"} onClick={() => void onSelectSkill?.()}>
+                                    立院QA（立法院質詢答題）
+                                </DropdownMenuItem>
+                            </DropdownMenuGroup>
                         </DropdownMenuContent>
                     </DropdownMenu>
+                    {skill === "legislative_qa" && (
+                        <span data-slot="skill-chip" className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/10 py-1 pl-2.5 pr-1 text-xs font-medium text-primary">
+                            立院QA
+                            <button
+                                type="button"
+                                aria-label="離開立院QA模式"
+                                onClick={() => setConfirmExit(true)}
+                                className="inline-flex size-4 items-center justify-center rounded-full hover:bg-primary/20"
+                            >
+                                <X size={11} />
+                            </button>
+                        </span>
+                    )}
                     <input
                         ref={fileInputRef}
                         type="file"
@@ -189,6 +217,14 @@ export function ChatComposer({
                 source={picker}
                 onClose={() => setPicker(null)}
                 onConfirm={async (source, entries) => { await onAttachExisting?.(source, entries); }}
+            />
+            <ConfirmDialog
+                open={confirmExit}
+                title="離開立院QA模式？"
+                description="工作區內容會保留。"
+                confirmLabel="離開"
+                onCancel={() => setConfirmExit(false)}
+                onConfirm={() => { setConfirmExit(false); void onExitSkill?.(); }}
             />
             <UploadDestinationDialog open={pendingUpload !== null} onConfirm={(choice) => void resolveUpload(choice)} />
         </div>

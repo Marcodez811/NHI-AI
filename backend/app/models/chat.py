@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field as PydanticField, field_validator
@@ -64,6 +64,8 @@ class ChatSession(SQLModel, table=True):
     model: str | None = Field(default=None, max_length=128)
     summary: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     summary_through_message_id: UUID | None = Field(default=None, nullable=True)
+    # Sticky skill mode (``legislative_qa``); None is the ordinary chat.
+    skill: str | None = Field(default=None, max_length=32)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=utcnow, nullable=False)
 
@@ -84,7 +86,38 @@ class ChatMessage(SQLModel, table=True):
     model: str | None = Field(default=None, max_length=128)
     usage: dict[str, int] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     reasoning: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # Assistant messages only: skill cards ``[{kind, data}]`` shown under the text.
+    cards: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
+
+
+class ChatQaWorkspace(SQLModel, table=True):
+    """立院QA 工作區: the structured state of one conversation's QA, one row per session.
+
+    Confirmed decisions live here as data so they survive history compaction.
+    Phase 2 stores generated structured content in ``versions`` (newest first)
+    and pre-fills a new workspace from a previous one via ``base_version_id``
+    (docs/10_6_legislative_qa_skill_plan.md section 7).
+    """
+
+    __tablename__ = "chat_qa_workspaces"
+
+    session_id: UUID = Field(foreign_key="chat_sessions.id", primary_key=True, ondelete="CASCADE")
+    stage: str = Field(default="questions", max_length=16)
+    # [{no, text, note}]
+    questions: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    questions_confirmed: bool = Field(default=False)
+    # {confirmed: bool, used: [{id, name, source}]}
+    documents: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    # {"<no>": {figures|aim|status|dispute|next_steps: [{text, source: {id, name}, quote}]}}
+    evidence: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    # {"<no>": {short: [str], detail: [{title, points: [str]}], dispute_requested, confirmed}}
+    outline: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    # Phase 2: generated versions (structured content + artifact id), newest first.
+    versions: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    # Phase 2: the version this workspace was pre-filled from (update mode).
+    base_version_id: str | None = Field(default=None, max_length=64)
+    updated_at: datetime = Field(default_factory=utcnow, nullable=False)
 
 
 class UserFile(SQLModel, table=True):
@@ -181,6 +214,13 @@ class ChatSessionSummary(BaseModel):
     id: UUID
     title: str
     updated_at: datetime
+    skill: str | None = None
+
+
+class ChatSessionSkillUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    skill: Literal["legislative_qa"] | None
 
 
 class ChatSessionCreate(BaseModel):
@@ -279,6 +319,7 @@ class ChatMessageRead(BaseModel):
     model: str | None
     usage: dict[str, int] | None
     reasoning: str | None
+    cards: list[dict[str, Any]] = PydanticField(default_factory=list)
     created_at: datetime
 
 
@@ -286,6 +327,7 @@ class ChatSessionDetail(BaseModel):
     id: UUID
     title: str
     model: str | None
+    skill: str | None = None
     created_at: datetime
     updated_at: datetime
     compacted_through_message_id: UUID | None

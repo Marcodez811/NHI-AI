@@ -1,11 +1,14 @@
 "use client";
 
+import { useState } from "react";
 import { ArrowDown, CircleAlert, LoaderCircle } from "lucide-react";
 import { useChatEngine } from "../../lib/hooks/useChatEngine";
 import { useStickToBottom } from "../../lib/hooks/useStickToBottom";
 import { ChatComposer } from "./ChatComposer";
 import { ChatEmptyState } from "./ChatEmptyState";
 import { ChatMessageList } from "./ChatMessageList";
+import { QaStepper } from "./qa/QaStepper";
+import { ApiError } from "../../lib/api/client";
 
 /**
  * The chat surface for both `/chat` (no session yet) and `/chat/[sessionId]`.
@@ -14,6 +17,16 @@ import { ChatMessageList } from "./ChatMessageList";
  */
 export function ChatPage() {
     const chat = useChatEngine();
+    const qa = chat.qa;
+    const [skillError, setSkillError] = useState<string | null>(null);
+    const skillAction = (action: () => Promise<void>) => async () => {
+        setSkillError(null);
+        try {
+            await action();
+        } catch (caught) {
+            setSkillError(caught instanceof ApiError ? caught.message : "技能切換失敗，請稍後再試。");
+        }
+    };
     let latestUserKey: string | null = null;
     for (let index = chat.messages.length - 1; index >= 0; index--) {
         if (chat.messages[index].role === "user") {
@@ -31,10 +44,10 @@ export function ChatPage() {
 
     const composer = (
         <>
-            {chat.sendError && (
+            {(chat.sendError || skillError) && (
                 <div role="alert" className="mb-2 flex items-center gap-2 text-xs text-red-600">
                     <CircleAlert size={14} />
-                    {chat.sendError}
+                    {chat.sendError ?? skillError}
                 </div>
             )}
             <ChatComposer
@@ -53,6 +66,9 @@ export function ChatPage() {
                 uploadsPending={chat.uploadsPending}
                 onSend={() => void chat.send()}
                 onStop={chat.stop}
+                skill={qa?.skill ?? null}
+                onSelectSkill={qa ? skillAction(qa.enable) : undefined}
+                onExitSkill={qa ? skillAction(qa.disable) : undefined}
             />
         </>
     );
@@ -77,7 +93,11 @@ export function ChatPage() {
                                 {chat.loadError}
                             </div>
                         ) : (
-                            <ChatMessageList messages={chat.messages} sessionId={chat.sessionId} attachmentLookup={chat.attachmentLookup} compactedThroughMessageId={chat.compactedThroughMessageId} />
+                            <>
+                                {qa?.skill && <QaStepper stage={qa.workspace?.stage ?? "questions"} />}
+                                <ChatMessageList messages={chat.messages} sessionId={chat.sessionId} attachmentLookup={chat.attachmentLookup} compactedThroughMessageId={chat.compactedThroughMessageId}
+                                    qa={qa} onUploadFiles={chat.attachFiles} />
+                            </>
                         )}
                     </div>
                     {!chat.loadError && (

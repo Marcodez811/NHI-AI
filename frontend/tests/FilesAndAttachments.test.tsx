@@ -67,13 +67,14 @@ describe("composer plus menu and upload modal", () => {
     });
     afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-    it("shows four menu items with 使用技能 disabled", async () => {
+    it("lists the attach items plus the 立院QA skill", async () => {
         renderComposer();
         await userEvent.click(screen.getByRole("button", { name: "附加檔案" }));
         const items = await screen.findAllByRole("menuitem");
         expect(items.map((item) => item.textContent?.trim())).toEqual([
-            "上傳檔案", "從知識庫加入", "從我的檔案加入", "使用技能即將推出",
+            "上傳檔案", "從知識庫加入", "從我的檔案加入", "立院QA（立法院質詢答題）",
         ]);
+        // No onSelectSkill wired in this harness, so the skill item is inert.
         expect(items[3]).toHaveAttribute("aria-disabled", "true");
     });
 

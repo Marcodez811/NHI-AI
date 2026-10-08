@@ -481,3 +481,41 @@ def test_user_files_migration_moves_attachments_and_backfills_artifacts(tmp_path
         restored = conn.execute(text("SELECT id, session_id, storage_key FROM chat_attachments")).one()
     assert restored == (attachment_id, session_id, f"{session_id}/{attachment_id}.txt")
     engine.dispose()
+
+
+def test_chat_skill_migration_adds_skill_cards_and_workspace_table(tmp_path):
+    from alembic import command
+
+    db_path = str(tmp_path / "chat_skill.db")
+    cfg = _alembic_config(db_path)
+    command.upgrade(cfg, "c3a1f0e7d2b4")
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO chat_sessions (id, title, model, created_at, updated_at) "
+            "VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '既有對話', 'gpt-6-astra', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(text(
+            "INSERT INTO chat_messages "
+            "(id, session_id, role, content, attachment_ids, sources, status, model, usage, created_at) "
+            "VALUES ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
+            "'assistant', '既有回答', '[]', '[]', 'complete', 'gpt-6-astra', NULL, '2026-01-01')"
+        ))
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    inspector = sa.inspect(engine)
+    assert "skill" in {c["name"] for c in inspector.get_columns("chat_sessions")}
+    assert "cards" in {c["name"] for c in inspector.get_columns("chat_messages")}
+    assert {"session_id", "stage", "questions", "questions_confirmed", "documents", "evidence", "outline",
+            "versions", "base_version_id"} <= {c["name"] for c in inspector.get_columns("chat_qa_workspaces")}
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT skill FROM chat_sessions")).scalar() is None
+        assert conn.execute(text("SELECT cards FROM chat_messages")).scalar() == "[]"
+    engine.dispose()
+
+    command.downgrade(cfg, "c3a1f0e7d2b4")
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    assert "chat_qa_workspaces" not in sa.inspect(engine).get_table_names()
+    engine.dispose()

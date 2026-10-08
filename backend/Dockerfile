@@ -46,6 +46,7 @@ RUN uv sync --frozen --no-dev
 
 COPY ./app ./app
 COPY ./.agents ./.agents
+COPY ./chat_skills ./chat_skills
 COPY ./config.yaml ./config.yaml
 COPY ./alembic.ini ./alembic.ini
 COPY ./alembic ./alembic

@@ -9,6 +9,7 @@ import {
     request,
     stringValue,
 } from "./client";
+import { parseQaCard, type QaCard } from "./qa";
 import { consumeSseStream, invalidStreamError, parseSseBlock, type SseEventTable } from "./sse";
 
 export type ChatAttachmentKind = "document" | "image";
@@ -45,12 +46,15 @@ export interface ChatMessageRecord {
     status: ChatMessageStatus;
     model?: string | null;
     created_at: string;
+    /** Skill cards produced by this turn (立院QA). */
+    cards?: QaCard[] | null;
 }
 
 export interface ChatSessionSummary {
     id: string;
     title: string;
     updated_at: string;
+    skill?: string | null;
 }
 
 export interface ChatSessionDetail extends ChatSessionSummary {
@@ -198,6 +202,7 @@ export type ChatEvent =
     | { type: "tool_started"; tool: string; label: string }
     | { type: "tool_finished"; tool: string; label: string }
     | { type: "sources"; sources: ChatSourceRef[] }
+    | { type: "skill_card"; card: QaCard }
     | { type: "done"; message_id: string; title: string }
     | { type: "error"; message: string; code?: string };
 
@@ -248,6 +253,11 @@ const CHAT_EVENTS: SseEventTable<ChatEvent> = {
                   .filter((item): item is ChatSourceRef => item !== null)
             : [],
     }),
+    skill_card: (payload) => {
+        const card = parseQaCard({ kind: payload.kind, data: payload.data });
+        if (!card) throw invalidStreamError();
+        return { type: "skill_card", card };
+    },
     done: (payload) => ({
         type: "done",
         message_id: stringValue(payload.message_id) ?? "",
@@ -278,6 +288,7 @@ export interface ChatStreamHandlers {
     onToolStarted?: (tool: string, label: string) => void;
     onToolFinished?: (tool: string, label: string) => void;
     onSources?: (sources: ChatSourceRef[]) => void;
+    onSkillCard?: (card: QaCard) => void;
     onDone?: (messageId: string, title: string) => void;
 }
 
@@ -303,6 +314,7 @@ export async function sendChatMessage(
             else if (event.type === "tool_started") handlers.onToolStarted?.(event.tool, event.label);
             else if (event.type === "tool_finished") handlers.onToolFinished?.(event.tool, event.label);
             else if (event.type === "sources") handlers.onSources?.(event.sources);
+            else if (event.type === "skill_card") handlers.onSkillCard?.(event.card);
             else if (event.type === "done") {
                 finished = true;
                 handlers.onDone?.(event.message_id, event.title);

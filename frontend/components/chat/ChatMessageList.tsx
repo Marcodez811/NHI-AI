@@ -6,6 +6,8 @@ import { MessageResponse } from "../ai-elements/message";
 import { Badge } from "../ui/badge";
 import { chatAttachmentContentUrl, type ChatAttachment } from "../../lib/api/chat";
 import type { ChatTurn, ToolStep } from "../../lib/hooks/useChatSession";
+import { QaCardView, qaCardKey } from "./qa/QaCards";
+import type { QaController } from "./qa/QaCards";
 
 const TOOL_NAMES: Record<string, { action: string; unit: string }> = {
     search_knowledge_base: { action: "搜尋知識庫", unit: "次" },
@@ -143,12 +145,23 @@ function MessageAttachments({ ids, lookup, sessionId }: {
 
 const NO_ATTACHMENTS: Record<string, ChatAttachment> = {};
 
-export function ChatMessageList({ messages, compactedThroughMessageId, attachmentLookup = NO_ATTACHMENTS, sessionId }: {
+export function ChatMessageList({ messages, compactedThroughMessageId, attachmentLookup = NO_ATTACHMENTS, sessionId, qa, onUploadFiles }: {
+    /** 立院QA workspace controller; without it skill cards are not drawn. */
+    qa?: QaController;
+    onUploadFiles?: (files: File[]) => Promise<unknown> | void;
     attachmentLookup?: Record<string, ChatAttachment>;
     sessionId?: string | null;
     messages: ChatTurn[];
     compactedThroughMessageId?: string | null;
 }) {
+    // Only the newest card of a kind (per question) is actionable; earlier snapshots are compact.
+    const newestCard = new Map<string, string>();
+    let newestOutline = "";
+    messages.forEach((message) => (message.cards ?? []).forEach((card, index) => {
+        const where = `${message.localKey}:${index}`;
+        newestCard.set(qaCardKey(card), where);
+        if (card.kind === "outline") newestOutline = where;
+    }));
     return (
         <div className="flex w-full min-w-0 flex-col gap-10">
             {messages.map((message) => (
@@ -178,6 +191,14 @@ export function ChatMessageList({ messages, compactedThroughMessageId, attachmen
                                     </div>
                                 ) : null}
                                 <SourceChips sources={message.sources} />
+                                {qa && message.cards?.map((card, index) => {
+                                    const where = `${message.localKey}:${index}`;
+                                    return (
+                                        <QaCardView key={where} card={card} qa={qa} live={qa.workspace} onUploadFiles={onUploadFiles}
+                                            readOnly={newestCard.get(qaCardKey(card)) !== where}
+                                            showConfirmAll={newestOutline === where} />
+                                    );
+                                })}
                                 {message.status === "interrupted" && (
                                     <div className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
                                         <CircleAlert size={13} aria-hidden="true" />已中止回覆

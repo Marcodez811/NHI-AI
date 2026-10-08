@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field as PydanticField
 
 from app.config import settings
 from app.models.chat import (
@@ -31,9 +32,11 @@ from app.models.chat import (
     ChatMessageStatus,
     ChatModelOption,
     ChatModelsResponse,
+    ChatQaWorkspace,
     ChatSession,
     ChatSessionCreate,
     ChatSessionDetail,
+    ChatSessionSkillUpdate,
     ChatSessionSummary,
     ChatSessionUpdate,
     LinkDocumentsRequest,
@@ -50,6 +53,7 @@ from app.services.chat import models as chat_models
 from app.models.documents import Document, DocumentStatus
 from app.services.chat.attachments import AttachmentError, ChatAttachmentStorage, process_upload
 from app.services.chat.engine import AgentsSdkChatEngine, ChatEngine
+from app.services.chat.skills import legislative_qa as qa
 from app.services.chat.repository import ChatRepository, InMemoryChatRepository
 from app.services.documents.repository import DocumentRepository
 from app.services.streaming import SSE_RESPONSE_HEADERS, _stream_with_heartbeat
@@ -198,6 +202,7 @@ async def create_chat_session(
         id=session.id,
         title=session.title,
         model=session.model,
+        skill=session.skill,
         created_at=session.created_at,
         updated_at=session.updated_at,
         compacted_through_message_id=session.summary_through_message_id,
@@ -221,6 +226,7 @@ async def get_chat_session(
         id=session.id,
         title=session.title,
         model=session.model,
+        skill=session.skill,
         created_at=session.created_at,
         updated_at=session.updated_at,
         compacted_through_message_id=session.summary_through_message_id,
@@ -401,6 +407,167 @@ async def detach_chat_document(
     await repository.unlink_document(session_id, document_id)
 
 
+# ── Skill mode and the 立院QA workspace ─────────────────────────────────────
+
+
+@router.put("/chat/sessions/{session_id}/skill", response_model=ChatSessionSummary)
+async def set_chat_session_skill(
+    session_id: UUID,
+    payload: ChatSessionSkillUpdate,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+) -> ChatSessionSummary:
+    """Enter (``{"skill": "legislative_qa"}``) or leave (``{"skill": null}``) a skill mode.
+
+    Leaving keeps the workspace, so entering again resumes where the user left off.
+    """
+
+    session = await repository.get_session(session_id)
+    if session is None:
+        raise _session_not_found_error()
+    session.skill = payload.skill
+    session = await repository.update_session(session)
+    return ChatSessionSummary.model_validate(session)
+
+
+class QaWorkspaceRead(BaseModel):
+    stage: str
+    questions: dict[str, Any]
+    documents: dict[str, Any]
+    evidence: dict[str, Any]
+    outline: dict[str, Any]
+    versions: list[dict[str, Any]]
+    base_version_id: str | None
+    updated_at: Any
+
+
+class QaQuestionsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    questions: list[qa.QuestionEdit] = PydanticField(min_length=1)
+    confirm: bool = True
+
+
+class QaDocumentsConfirm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attachment_ids: list[UUID] = PydanticField(min_length=1)
+
+
+class QaOutlineUpdate(qa.OutlineInput):
+    confirm: bool = False
+
+
+_QA_CONFLICT_CODES = {"qa_steps_unconfirmed", "qa_outline_missing"}
+
+
+def _qa_http_error(error: qa.QaError) -> HTTPException:
+    code = status.HTTP_409_CONFLICT if error.code in _QA_CONFLICT_CODES else status.HTTP_422_UNPROCESSABLE_CONTENT
+    return HTTPException(status_code=code, detail={"code": error.code, "message": error.message})
+
+
+async def _load_qa(session_id: UUID, repository: ChatRepository) -> ChatQaWorkspace:
+    if await repository.get_session(session_id) is None:
+        raise _session_not_found_error()
+    stored = await repository.get_qa_workspace(session_id)
+    return qa.clone(stored) if stored is not None else qa.new_workspace(session_id)
+
+
+async def _save_qa(workspace: ChatQaWorkspace, repository: ChatRepository) -> QaWorkspaceRead:
+    qa.recompute_stage(workspace)
+    saved = await repository.save_qa_workspace(workspace)
+    return QaWorkspaceRead(**qa.to_read(saved))
+
+
+@router.get("/chat/sessions/{session_id}/qa", response_model=QaWorkspaceRead)
+async def get_qa_workspace(
+    session_id: UUID,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+) -> QaWorkspaceRead:
+    workspace = await _load_qa(session_id, repository)
+    qa.recompute_stage(workspace)
+    return QaWorkspaceRead(**qa.to_read(workspace))
+
+
+@router.put("/chat/sessions/{session_id}/qa/questions", response_model=QaWorkspaceRead)
+async def update_qa_questions(
+    session_id: UUID,
+    payload: QaQuestionsUpdate,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+) -> QaWorkspaceRead:
+    """Confirm (``confirm: true``, the default) or just edit the question list."""
+
+    workspace = await _load_qa(session_id, repository)
+    try:
+        qa.apply_questions(workspace, payload.questions, confirmed=payload.confirm)
+    except qa.QaError as error:
+        raise _qa_http_error(error) from error
+    return await _save_qa(workspace, repository)
+
+
+@router.post("/chat/sessions/{session_id}/qa/documents/confirm", response_model=QaWorkspaceRead)
+async def confirm_qa_documents(
+    session_id: UUID,
+    payload: QaDocumentsConfirm,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+    document_repository: Annotated[DocumentRepository, Depends(get_chat_document_repository)] = None,
+) -> QaWorkspaceRead:
+    workspace = await _load_qa(session_id, repository)
+    attachments = await _session_attachments(session_id, repository, document_repository)
+    try:
+        qa.confirm_documents(workspace, attachments, payload.attachment_ids)
+    except qa.QaError as error:
+        raise _qa_http_error(error) from error
+    return await _save_qa(workspace, repository)
+
+
+@router.put("/chat/sessions/{session_id}/qa/outlines/{question_no}", response_model=QaWorkspaceRead)
+async def update_qa_outline(
+    session_id: UUID,
+    question_no: int,
+    payload: QaOutlineUpdate,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+) -> QaWorkspaceRead:
+    """Edit one question's outline; it needs re-confirming unless ``confirm`` is true."""
+
+    workspace = await _load_qa(session_id, repository)
+    try:
+        qa.apply_outline(
+            workspace, question_no,
+            qa.OutlineInput(short=payload.short, detail=payload.detail, dispute_requested=payload.dispute_requested),
+            confirmed=payload.confirm,
+        )
+    except qa.QaError as error:
+        raise _qa_http_error(error) from error
+    return await _save_qa(workspace, repository)
+
+
+@router.post("/chat/sessions/{session_id}/qa/outlines/confirm-all", response_model=QaWorkspaceRead)
+async def confirm_all_qa_outlines(
+    session_id: UUID,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+) -> QaWorkspaceRead:
+    workspace = await _load_qa(session_id, repository)
+    try:
+        qa.confirm_all_outlines(workspace)
+    except qa.QaError as error:
+        raise _qa_http_error(error) from error
+    return await _save_qa(workspace, repository)
+
+
+@router.post("/chat/sessions/{session_id}/qa/outlines/{question_no}/confirm", response_model=QaWorkspaceRead)
+async def confirm_qa_outline(
+    session_id: UUID,
+    question_no: int,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+) -> QaWorkspaceRead:
+    workspace = await _load_qa(session_id, repository)
+    try:
+        qa.confirm_outline(workspace, question_no)
+    except qa.QaError as error:
+        raise _qa_http_error(error) from error
+    return await _save_qa(workspace, repository)
+
+
 @router.post("/chat/sessions/{session_id}/messages")
 async def send_chat_message(
     session_id: UUID,
@@ -446,6 +613,7 @@ async def send_chat_message(
         reasoning_parts: list[str] = []
         reasoning_length = 0
         sources: list[dict[str, str]] = []
+        cards: list[dict[str, Any]] = []
         usage: dict[str, int] | None = None
         had_error = False
         completed = False
@@ -497,12 +665,19 @@ async def send_chat_message(
                     replay_history = history
                     turn_summary = None
                     yield _sse("compacted", {"ok": False})
+            # Only a skill turn passes ``skill``, so plain chat keeps the original engine call.
+            skill_kwargs: dict[str, Any] = (
+                {"skill": qa.SkillRuntime(skill=session.skill, session_id=session_id, repository=repository)}
+                if session.skill == qa.SKILL_ID
+                else {}
+            )
             async for event in engine.run_turn(
                 history=replay_history,
                 user_message=user_message,
                 attachments=all_attachments,
                 model=payload.model,
                 summary=turn_summary,
+                **skill_kwargs,
             ):
                 if event.type == "text_delta":
                     text_parts.append(str(event.data.get("text", "")))
@@ -516,6 +691,9 @@ async def send_chat_message(
                     yield _sse("reasoning_delta", {"text": delta})
                 elif event.type in ("tool_started", "tool_finished"):
                     yield _sse(event.type, event.data)
+                elif event.type == "skill_card":
+                    cards.append(event.data)
+                    yield _sse("skill_card", event.data)
                 elif event.type == "sources":
                     sources = list(event.data.get("sources", []))
                     yield _sse("sources", event.data)
@@ -553,6 +731,7 @@ async def send_chat_message(
                     model=payload.model,
                     usage=usage,
                     reasoning="".join(reasoning_parts) or None,
+                    cards=cards,
                 )
             )
             session.model = payload.model

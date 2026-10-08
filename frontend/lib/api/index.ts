@@ -7,6 +7,7 @@ export * from "./config";
 export * from "./documents";
 export * from "./files";
 export * from "./artifacts";
+export * from "./qa";
 export * from "./retrieval";
 export * from "./settings";
 export * from "./slides";

@@ -16,6 +16,7 @@ from sqlmodel import Session, col, select
 from app.models.artifacts import Artifact
 from app.models.chat import (
     ChatMessage,
+    ChatQaWorkspace,
     ChatSession,
     ChatSessionDocument,
     ChatSessionFile,
@@ -74,6 +75,10 @@ class ChatRepository(Protocol):
 
     async def list_session_document_ids(self, session_id: UUID) -> list[UUID]: ...
 
+    async def get_qa_workspace(self, session_id: UUID) -> ChatQaWorkspace | None: ...
+
+    async def save_qa_workspace(self, workspace: ChatQaWorkspace) -> ChatQaWorkspace: ...
+
 
 class InMemoryChatRepository:
     """Small async repository used by the default API dependency and tests."""
@@ -84,6 +89,7 @@ class InMemoryChatRepository:
         self.files: dict[UUID, UserFile] = {}
         self.file_links: dict[tuple[UUID, UUID], object] = {}
         self.document_links: dict[tuple[UUID, UUID], object] = {}
+        self.qa_workspaces: dict[UUID, ChatQaWorkspace] = {}
 
     async def create_session(self, session: ChatSession) -> ChatSession:
         self.sessions[session.id] = session
@@ -109,6 +115,7 @@ class InMemoryChatRepository:
         self.messages = {k: v for k, v in self.messages.items() if v.session_id != session_id}
         self.file_links = {k: v for k, v in self.file_links.items() if k[0] != session_id}
         self.document_links = {k: v for k, v in self.document_links.items() if k[0] != session_id}
+        self.qa_workspaces.pop(session_id, None)
         for file in self.files.values():
             if file.origin_session_id == session_id:
                 file.origin_session_id = None
@@ -163,6 +170,14 @@ class InMemoryChatRepository:
         linked = [(created, did) for (sid, did), created in self.document_links.items() if sid == session_id]
         return [did for _created, did in sorted(linked, key=lambda pair: pair[0])]
 
+    async def get_qa_workspace(self, session_id: UUID) -> ChatQaWorkspace | None:
+        return self.qa_workspaces.get(session_id)
+
+    async def save_qa_workspace(self, workspace: ChatQaWorkspace) -> ChatQaWorkspace:
+        workspace.updated_at = utcnow()
+        self.qa_workspaces[workspace.session_id] = workspace
+        return workspace
+
 
 class SQLModelChatRepository(InMemoryChatRepository):
     """SQLModel repository backed by an injected synchronous ``Session``."""
@@ -212,6 +227,9 @@ class SQLModelChatRepository(InMemoryChatRepository):
             select(ChatSessionDocument).where(ChatSessionDocument.session_id == session_id)
         ).all():
             self.session.delete(doc_link)
+        workspace = self.session.get(ChatQaWorkspace, session_id)
+        if workspace is not None:
+            self.session.delete(workspace)
         for file in self.session.exec(select(UserFile).where(UserFile.origin_session_id == session_id)).all():
             file.origin_session_id = None
             self.session.add(file)
@@ -305,6 +323,15 @@ class SQLModelChatRepository(InMemoryChatRepository):
                 .order_by(col(ChatSessionDocument.created_at))
             ).all()
         )
+
+    async def get_qa_workspace(self, session_id: UUID) -> ChatQaWorkspace | None:
+        return self.session.get(ChatQaWorkspace, session_id)
+
+    async def save_qa_workspace(self, workspace: ChatQaWorkspace) -> ChatQaWorkspace:
+        workspace.updated_at = utcnow()
+        self.session.merge(workspace)
+        self.session.commit()
+        return (await self.get_qa_workspace(workspace.session_id)) or workspace
 
 
 __all__ = [

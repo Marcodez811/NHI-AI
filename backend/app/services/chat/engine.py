@@ -47,6 +47,8 @@ from app.models.chat import (
 from app.models.documents import DocumentCategory, DocumentStatus
 from app.services.agentic.sdk_runner import build_litellm_run_config
 from app.services.chat.attachments import AttachmentError, ChatAttachmentStorage
+from app.services.chat.skills import legislative_qa as qa_skill
+from app.services.chat.skills.legislative_qa import SkillRuntime
 from app.services.documents.repository import DocumentRepository
 
 SEARCH_TOOL_NAME = "search_knowledge_base"
@@ -100,6 +102,7 @@ class ChatEngine(Protocol):
         attachments: Sequence[ChatAttachmentView],
         model: str,
         summary: str | None = None,
+        skill: SkillRuntime | None = None,
     ) -> AsyncIterator[ChatEvent]: ...
 
     async def summarize(
@@ -145,6 +148,8 @@ def _tool_started_label(tool_name: str, item: Any, attachment_names: set[str]) -
     if tool_name == READ_ATTACHMENT_TOOL_NAME:
         name = arguments.get("name")
         return f"讀取附件：{name}" if name in attachment_names else "讀取附件"
+    if tool_name in qa_skill.SKILL_TOOL_LABELS:
+        return qa_skill.SKILL_TOOL_LABELS[tool_name]
     return "執行工具"
 
 
@@ -240,7 +245,9 @@ def _attachment_note(attachment: ChatAttachmentView) -> str:
     return "文件，沒有可讀取的文字內容"
 
 
-def _build_turn_context(attachments: Sequence[ChatAttachmentView], summary: str | None) -> str | None:
+def _build_turn_context(
+    attachments: Sequence[ChatAttachmentView], summary: str | None, skill_context: str | None = None
+) -> str | None:
     """Return the per-turn context block, or ``None`` when there is nothing to say.
 
     It rides on the newest user message (for prompt caching), so it is fenced
@@ -258,6 +265,8 @@ def _build_turn_context(attachments: Sequence[ChatAttachmentView], summary: str 
             f"{'可使用' if attachment.status == ChatAttachmentStatus.READY.value else '處理失敗'}）"
             for attachment in attachments
         )
+    if skill_context:
+        lines.append(skill_context)
     if not lines:
         return None
     return "\n".join((TURN_CONTEXT_OPEN, *lines, TURN_CONTEXT_CLOSE))
@@ -459,6 +468,35 @@ class AgentsSdkChatEngine:
             description_override="搜尋健保署知識庫，尋找與查詢相關的資料段落（不含新聞來源）。",
         )
 
+    async def _search_documents(self, query: str, max_results: int) -> list[dict[str, Any]]:
+        """Knowledge-base hits as ``{document_id, name, snippet}``, ready and retrieval-enabled only."""
+
+        vector_store_id = self._vector_store_id_provider()
+        if not vector_store_id:
+            return []
+        client = await self._search_client()
+        try:
+            page = await client.vector_stores.search(
+                vector_store_id,
+                query=query,
+                filters=_search_filters(None),
+                max_num_results=max(1, min(20, max_results)),
+            )
+        except Exception:
+            return []
+        hits: list[dict[str, Any]] = []
+        for result in page.data:
+            try:
+                document_id = UUID(str((result.attributes or {}).get("document_id")))
+            except ValueError:
+                continue
+            document = await self._document_repository.get_document(document_id)
+            if document is None or document.status != DocumentStatus.READY.value or not document.retrieval_enabled:
+                continue
+            snippet = " ".join(part.text for part in result.content if getattr(part, "text", None)).strip()
+            hits.append({"document_id": document_id, "name": document.display_name, "snippet": snippet})
+        return hits
+
     async def _read_document_text(
         self, attachment: ChatAttachmentView, *, start: int, max_chars: int
     ) -> tuple[str, int]:
@@ -536,6 +574,7 @@ class AgentsSdkChatEngine:
         attachments: Sequence[ChatAttachmentView],
         model: str,
         summary: str | None = None,
+        skill: SkillRuntime | None = None,
     ) -> AsyncIterator[ChatEvent]:
         attachments_by_id = {attachment.id: attachment for attachment in attachments}
         try:
@@ -583,9 +622,13 @@ class AgentsSdkChatEngine:
                         if isinstance(current, str):
                             current = [{"type": "input_text", "text": current}]
                         input_items[-1]["content"] = [*current, *parts[1:]]
+            skill_context = None
+            if skill is not None:
+                skill_context = qa_skill.render_context(await skill.repository.get_qa_workspace(skill.session_id))
             context_text = _build_turn_context(
                 session_attachments,
                 _summary_safe(summary, session_attachments) if summary else None,
+                skill_context,
             )
             if context_text is not None:
                 turn_context = {"type": "input_text", "text": context_text}
@@ -608,15 +651,27 @@ class AgentsSdkChatEngine:
         ] + [str(user_message.session_id)]
         text_stream = _SafeStream(session_attachments, known_ids)
         reasoning_stream = _SafeStream(session_attachments, known_ids)
+        tools = [
+            self._search_tool(collected_sources, tool_labels),
+            self._read_attachment_tool(attachments_by_id, tool_labels),
+        ]
+        instructions = BASE_INSTRUCTIONS
+        pending_cards: list[ChatEvent] = []
+        if skill is not None:
+            instructions = f"{BASE_INSTRUCTIONS}\n\n{qa_skill.load_instructions()}"
+            tools.extend(qa_skill.build_tools(
+                skill,
+                session_attachments,
+                self._search_documents,
+                lambda kind, data: pending_cards.append(ChatEvent("skill_card", {"kind": kind, "data": data})),
+                tool_labels,
+            ))
         agent = Agent(
             name="健保署 AI 助理",
-            instructions=BASE_INSTRUCTIONS,
+            instructions=instructions,
             model=model,
             model_settings=_model_settings(model),
-            tools=[
-                self._search_tool(collected_sources, tool_labels),
-                self._read_attachment_tool(attachments_by_id, tool_labels),
-            ],
+            tools=tools,
         )
         try:
             run_config = build_litellm_run_config(model, self._litellm_api_keys) or RunConfig()
@@ -638,6 +693,8 @@ class AgentsSdkChatEngine:
                             yield ChatEvent(chat_event.type, {"text": safe})
                     else:
                         yield chat_event
+                while pending_cards:
+                    yield pending_cards.pop(0)
         except Exception as exc:
             _log_provider_error(model, exc)
             for event_type, stream in (("reasoning_delta", reasoning_stream), ("text_delta", text_stream)):
@@ -649,6 +706,8 @@ class AgentsSdkChatEngine:
         for event_type, stream in (("reasoning_delta", reasoning_stream), ("text_delta", text_stream)):
             if safe := stream.feed("", final=True):
                 yield ChatEvent(event_type, {"text": safe})
+        while pending_cards:
+            yield pending_cards.pop(0)
         yield ChatEvent("sources", {"sources": _dedupe_sources(collected_sources)})
         usage = streamed.context_wrapper.usage
         yield ChatEvent(
@@ -729,7 +788,7 @@ def _translate_stream_event(
         item = event.item
         tool_name = item.tool_name
         call_id = item.call_id
-        if tool_name not in (SEARCH_TOOL_NAME, READ_ATTACHMENT_TOOL_NAME) or not call_id:
+        if tool_name not in (SEARCH_TOOL_NAME, READ_ATTACHMENT_TOOL_NAME, *qa_skill.SKILL_TOOL_NAMES) or not call_id:
             return
         tool_call_names[call_id] = tool_name
         yield ChatEvent(
