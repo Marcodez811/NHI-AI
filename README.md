@@ -119,6 +119,10 @@ Open:
 
 The backend waits for healthy PostgreSQL and Redis. Keep both workers and the scheduler running for uploads, cleanup recovery, and agent jobs to finish.
 
+### Windows without a terminal
+
+With Docker Desktop installed, double-click `Start NHI-AI.bat` in the repository root. It starts Docker Desktop if needed, creates `.env` and `backend/.env` from the examples, asks once for the OpenAI API key, runs `docker compose up --build -d`, and opens <http://localhost:3000>. `Stop NHI-AI.bat` runs `docker compose down` (data is kept), and `Import Snapshot.bat` wraps `scripts/snapshot_import.ps1`.
+
 ### Edit the frontend with Docker
 
 To run the full stack while developing the frontend, use the development Compose override from the repository root:
