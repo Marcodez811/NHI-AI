@@ -2,8 +2,8 @@
 # Secrets and deployment values (keys, URLs, paths, workers, queues) live in .env.
 # Resolution order: .env (environment) > this file > code default.
 models:                       # the model catalog; order = picker order
-  - id: litellm/anthropic/claude-fable-5-1
-    label: Claude Fable 5.1
+  - id: litellm/anthropic/claude-fable-5-2
+    label: Claude Fable 5.2
     provider: anthropic
     context_window: 128000    # conservative until verified per model
     use: [chat, agents]       # chat | agents | codex
@@ -17,18 +17,18 @@ models:                       # the model catalog; order = picker order
     provider: anthropic
     context_window: 128000
     use: [chat, agents]
-  - id: litellm/anthropic/claude-haiku-4-5
-    label: Claude Haiku 4.5
+  - id: litellm/anthropic/claude-haiku-5-5
+    label: Claude Haiku 5.5
     provider: anthropic
     context_window: 128000
     use: [chat, agents]
-  - id: gpt-6-astra           # OpenAI models use plain ids
-    label: GPT-6 Astra
+  - id: gpt-6.2-astra         # OpenAI models use plain ids
+    label: GPT-6.2 Astra
     provider: openai
     context_window: 128000
     use: [chat, agents, codex]
-  - id: gpt-6.1-sol
-    label: GPT-6.1 Sol
+  - id: gpt-6.2-sol
+    label: GPT-6.2 Sol
     provider: openai
     context_window: 128000
     use: [chat, agents, codex]
@@ -47,8 +47,8 @@ models:                       # the model catalog; order = picker order
     provider: gemini
     context_window: 128000
     use: [chat, agents]
-  - id: litellm/gemini/gemini-3.1-pro-preview
-    label: Gemini 3.1 Pro Preview
+  - id: litellm/gemini/gemini-4-hydrogen
+    label: Gemini 4 Hydrogen
     provider: gemini
     context_window: 128000
     use: [chat, agents]
@@ -64,7 +64,7 @@ agents:
     extraction: {runner: codex, model: null, reasoning_effort: null}
     planner:    {runner: codex, model: null, reasoning_effort: null, enabled: false}
     author:     {runner: codex, model: gpt-6-luna, reasoning_effort: high}
-    reviewer:   {runner: codex, model: gpt-6.1-sol, reasoning_effort: high}
+    reviewer:   {runner: codex, model: gpt-6.2-sol, reasoning_effort: high}
   limits:
     timeout_minutes: 60
     heartbeat_seconds: 10

@@ -25,7 +25,7 @@ async def test_list_chat_models_reports_availability_and_default(monkeypatch):
     response = await list_chat_models()
 
     by_id = {model.id: model for model in response.models}
-    assert by_id["gpt-6-astra"].available is True
+    assert by_id["gpt-6.2-astra"].available is True
     assert by_id["litellm/gemini/gemini-3.8-flash"].available is False
     assert response.default
 

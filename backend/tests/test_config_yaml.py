@@ -42,7 +42,7 @@ def env(monkeypatch):
 def test_shipped_yaml_loads_with_ten_models_in_order(env):
     settings = Settings(_env_file=None)
     ids = [m.id for m in settings.catalog_models]
-    assert len(ids) == 10 and ids[0] == "litellm/anthropic/claude-fable-5-1" and ids[-1].endswith("gemini-3.1-pro-preview")
+    assert len(ids) == 10 and ids[0] == "litellm/anthropic/claude-fable-5-2" and ids[-1].endswith("gemini-4-hydrogen")
     assert DEFAULT_CONFIG_FILE.is_file()
 
 
@@ -117,7 +117,7 @@ def client(monkeypatch):
 
 def test_models_endpoint_filters_by_use(client):
     codex = client.get("/models", params={"use": "codex"}).json()
-    assert [m["id"] for m in codex] == ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]
+    assert [m["id"] for m in codex] == ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-luna"]
     assert set(codex[0]) == {"id", "label", "provider", "available"}
     agents = client.get("/models", params={"use": "agents"}).json()
     assert len(agents) == 10

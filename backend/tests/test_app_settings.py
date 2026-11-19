@@ -99,7 +99,7 @@ def test_dev_keys_are_403_and_hidden_when_disabled(client, monkeypatch):
     keys = {s["key"] for g in body["groups"] for s in g["settings"]}
     assert keys == {"chat.default_model", "chat.hidden_models"}
     # user keys still work
-    assert client.put("/api/v1/app-settings/chat.default_model", json={"value": "gpt-6.1-sol"}).status_code == 200
+    assert client.put("/api/v1/app-settings/chat.default_model", json={"value": "gpt-6.2-sol"}).status_code == 200
 
 
 def test_delete_resets_to_default(client):

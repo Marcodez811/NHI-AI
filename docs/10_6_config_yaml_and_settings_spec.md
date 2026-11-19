@@ -63,7 +63,7 @@ today's code defaults and `.env.example` values.
 ```yaml
 # Global product configuration. Secrets and deployment values live in .env.
 models:                       # the model catalog; order = picker order
-  - id: litellm/anthropic/claude-fable-5-1
+  - id: litellm/anthropic/claude-fable-5-2
     label: Claude Fable 5.1
     provider: anthropic
     context_window: 128000    # conservative until verified per model
@@ -82,7 +82,7 @@ agents:
     extraction: {runner: …, model: null, reasoning_effort: null}
     planner:    {runner: agents, model: litellm/gemini/gemini-3.8-flash, enabled: true}
     author:     {runner: …, model: gpt-6-luna, reasoning_effort: high}
-    reviewer:   {runner: …, model: gpt-6.1-sol, reasoning_effort: high}
+    reviewer:   {runner: …, model: gpt-6.2-sol, reasoning_effort: high}
   limits:
     timeout_minutes: 60
     heartbeat_seconds: 10

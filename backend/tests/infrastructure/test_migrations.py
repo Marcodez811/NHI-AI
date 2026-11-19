@@ -394,14 +394,14 @@ def test_chat_context_migration_preserves_existing_rows(tmp_path):
     with engine.begin() as conn:
         conn.execute(text(
             "INSERT INTO chat_sessions (id, title, model, created_at, updated_at) "
-            "VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '既有對話', 'gpt-6-astra', "
+            "VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '既有對話', 'gpt-6.2-astra', "
             "'2026-01-01', '2026-01-01')"
         ))
         conn.execute(text(
             "INSERT INTO chat_messages "
             "(id, session_id, role, content, attachment_ids, sources, status, model, usage, created_at) "
             "VALUES ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
-            "'assistant', '既有回答', '[]', '[]', 'complete', 'gpt-6-astra', NULL, '2026-01-01')"
+            "'assistant', '既有回答', '[]', '[]', 'complete', 'gpt-6.2-astra', NULL, '2026-01-01')"
         ))
     engine.dispose()
 
@@ -443,7 +443,7 @@ def test_user_files_migration_moves_attachments_and_backfills_artifacts(tmp_path
     with engine.begin() as conn:
         conn.execute(text(
             "INSERT INTO chat_sessions (id, title, model, created_at, updated_at) "
-            f"VALUES ('{session_id}', '既有對話', 'gpt-6-astra', '2026-01-01', '2026-01-01')"
+            f"VALUES ('{session_id}', '既有對話', 'gpt-6.2-astra', '2026-01-01', '2026-01-01')"
         ))
         conn.execute(text(
             "INSERT INTO chat_attachments (id, session_id, display_name, mime_type, kind, size_bytes, "
@@ -493,13 +493,13 @@ def test_chat_skill_migration_adds_skill_cards_and_workspace_table(tmp_path):
     with engine.begin() as conn:
         conn.execute(text(
             "INSERT INTO chat_sessions (id, title, model, created_at, updated_at) "
-            "VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '既有對話', 'gpt-6-astra', '2026-01-01', '2026-01-01')"
+            "VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '既有對話', 'gpt-6.2-astra', '2026-01-01', '2026-01-01')"
         ))
         conn.execute(text(
             "INSERT INTO chat_messages "
             "(id, session_id, role, content, attachment_ids, sources, status, model, usage, created_at) "
             "VALUES ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
-            "'assistant', '既有回答', '[]', '[]', 'complete', 'gpt-6-astra', NULL, '2026-01-01')"
+            "'assistant', '既有回答', '[]', '[]', 'complete', 'gpt-6.2-astra', NULL, '2026-01-01')"
         ))
     engine.dispose()
 

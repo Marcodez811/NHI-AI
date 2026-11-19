@@ -166,7 +166,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_AUTHOR_MODEL"),
     )
     agent_reviewer_model: str | None = Field(
-        default="gpt-6.1-sol",
+        default="gpt-6.2-sol",
         min_length=1,
         validation_alias=AliasChoices("AGENT_REVIEWER_MODEL"),
     )

@@ -156,7 +156,7 @@ async def test_delete_attachment_already_sent_in_a_message_is_rejected(tmp_path)
     engine = FakeChatEngine([ChatEvent("sources", {"sources": []}), ChatEvent("usage", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})])
     response = await send_chat_message(
         session.id,
-        ChatMessageCreate(content="這是什麼", attachment_ids=[attachment.id], model="gpt-6-astra"),
+        ChatMessageCreate(content="這是什麼", attachment_ids=[attachment.id], model="gpt-6.2-astra"),
         repository,
         engine,
     )
@@ -200,7 +200,7 @@ async def test_message_with_an_unready_attachment_422s():
     with pytest.raises(HTTPException) as error:
         await send_chat_message(
             session.id,
-            ChatMessageCreate(content="哈囉", attachment_ids=[uuid4()], model="gpt-6-astra"),
+            ChatMessageCreate(content="哈囉", attachment_ids=[uuid4()], model="gpt-6.2-astra"),
             repository,
             engine,
         )
@@ -224,7 +224,7 @@ async def test_message_stream_order_and_persistence():
     )
 
     response = await send_chat_message(
-        session.id, ChatMessageCreate(content="健保給付規定？", model="gpt-6-astra"), repository, engine
+        session.id, ChatMessageCreate(content="健保給付規定？", model="gpt-6.2-astra"), repository, engine
     )
     chunks = await _collect_sse(response)
     events = _events_of(chunks)
@@ -258,7 +258,7 @@ async def test_assistant_message_content_and_sources_are_persisted():
     )
 
     response = await send_chat_message(
-        session.id, ChatMessageCreate(content="健保給付規定？", model="gpt-6-astra"), repository, engine
+        session.id, ChatMessageCreate(content="健保給付規定？", model="gpt-6.2-astra"), repository, engine
     )
     await _collect_sse(response)
 
@@ -267,7 +267,7 @@ async def test_assistant_message_content_and_sources_are_persisted():
     assert assistant.content == "健保給付規定如下"
     assert assistant.sources == [{"name": "白皮書", "snippet": "..."}]
     assert assistant.status == "complete"
-    assert assistant.model == "gpt-6-astra"
+    assert assistant.model == "gpt-6.2-astra"
     assert assistant.usage == {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
 
     session_detail = await repository.get_session(session.id)
@@ -281,7 +281,7 @@ async def test_error_event_marks_the_message_error_and_skips_done():
     engine = FakeChatEngine([ChatEvent("error", {"code": "chat_unavailable", "message": "對話服務暫時無法使用，請稍後再試。"})])
 
     response = await send_chat_message(
-        session.id, ChatMessageCreate(content="哈囉", model="gpt-6-astra"), repository, engine
+        session.id, ChatMessageCreate(content="哈囉", model="gpt-6.2-astra"), repository, engine
     )
     chunks = await _collect_sse(response)
     events = _events_of(chunks)
@@ -299,11 +299,11 @@ async def test_history_is_rebuilt_in_order_across_turns():
     engine = FakeChatEngine([ChatEvent("text_delta", {"text": "回覆"}), ChatEvent("sources", {"sources": []}), ChatEvent("usage", {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})])
 
     first_response = await send_chat_message(
-        session.id, ChatMessageCreate(content="第一個問題", model="gpt-6-astra"), repository, engine
+        session.id, ChatMessageCreate(content="第一個問題", model="gpt-6.2-astra"), repository, engine
     )
     await _collect_sse(first_response)
     second_response = await send_chat_message(
-        session.id, ChatMessageCreate(content="第二個問題", model="gpt-6-astra"), repository, engine
+        session.id, ChatMessageCreate(content="第二個問題", model="gpt-6.2-astra"), repository, engine
     )
     await _collect_sse(second_response)
 
@@ -331,7 +331,7 @@ async def test_client_disconnect_persists_an_interrupted_message():
                 yield event
 
     response = await send_chat_message(
-        session.id, ChatMessageCreate(content="問題", model="gpt-6-astra"), repository, SlowEngine()
+        session.id, ChatMessageCreate(content="問題", model="gpt-6.2-astra"), repository, SlowEngine()
     )
     iterator = response.body_iterator.__aiter__()
     first = await iterator.__anext__()
@@ -373,7 +373,7 @@ async def test_compaction_folds_only_newly_old_history_and_exposes_marker(monkey
     engine = FakeChatEngine([ChatEvent("text_delta", {"text": "回覆"}), ChatEvent("usage", {"input_tokens": 100})])
 
     response = await send_chat_message(
-        session.id, ChatMessageCreate(content="新的問題", model="gpt-6-astra"), repository, engine,
+        session.id, ChatMessageCreate(content="新的問題", model="gpt-6.2-astra"), repository, engine,
     )
     events = _events_of(await _collect_sse(response))
     assert [event["type"] for event in events] == [
@@ -397,7 +397,7 @@ async def test_compaction_folds_only_newly_old_history_and_exposes_marker(monkey
     all_messages = await repository.list_messages(session.id)
     expected_newly_old = all_messages[4:-6]
     response = await send_chat_message(
-        session.id, ChatMessageCreate(content="後續問題", model="gpt-6-astra"), repository, engine,
+        session.id, ChatMessageCreate(content="後續問題", model="gpt-6.2-astra"), repository, engine,
     )
     await _collect_sse(response)
     assert engine.summaries[1]["previous_summary"] == "先前討論的健保規定與附件內容。"
@@ -415,7 +415,7 @@ async def test_compaction_below_threshold_does_not_call_summary(monkeypatch):
     monkeypatch.setattr(chat_models, "find_available_model", lambda _: type("Model", (), {"context_window": 100})())
     engine = FakeChatEngine([])
     response = await send_chat_message(
-        session.id, ChatMessageCreate(content="後續問題", model="gpt-6-astra"), repository, engine,
+        session.id, ChatMessageCreate(content="後續問題", model="gpt-6.2-astra"), repository, engine,
     )
     assert [event["type"] for event in _events_of(await _collect_sse(response))] == ["message_start", "done"]
     assert engine.summaries == []
@@ -437,7 +437,7 @@ async def test_failed_compaction_replays_full_history_and_completes(monkeypatch)
     engine = FakeChatEngine([ChatEvent("text_delta", {"text": "完成"})])
     engine.summary_error = RuntimeError("model failed")
     response = await send_chat_message(
-        session.id, ChatMessageCreate(content="後續問題", model="gpt-6-astra"), repository, engine,
+        session.id, ChatMessageCreate(content="後續問題", model="gpt-6.2-astra"), repository, engine,
     )
     events = _events_of(await _collect_sse(response))
     assert [item["type"] for item in events] == ["message_start", "compacting", "compacted", "text_delta", "done"]
@@ -476,7 +476,7 @@ async def test_failed_summary_persistence_does_not_save_a_new_marker(monkeypatch
     engine = FakeChatEngine([ChatEvent("text_delta", {"text": "繼續回答"})])
 
     response = await send_chat_message(
-        session.id, ChatMessageCreate(content="新問題", model="gpt-6-astra"), repository, engine,
+        session.id, ChatMessageCreate(content="新問題", model="gpt-6.2-astra"), repository, engine,
     )
     events = _events_of(await _collect_sse(response))
     assert [event["type"] for event in events] == ["message_start", "compacting", "compacted", "text_delta", "done"]
@@ -498,7 +498,7 @@ async def test_reasoning_is_forwarded_and_persisted_with_cap():
         ChatEvent("text_delta", {"text": "答案"}),
     ])
     response = await send_chat_message(
-        session.id, ChatMessageCreate(content="問題", model="gpt-6-astra"), repository, engine,
+        session.id, ChatMessageCreate(content="問題", model="gpt-6.2-astra"), repository, engine,
     )
     events = _events_of(await _collect_sse(response))
     assert [event["type"] for event in events] == ["message_start", "reasoning_delta", "text_delta", "done"]

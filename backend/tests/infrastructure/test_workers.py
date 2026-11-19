@@ -76,7 +76,7 @@ def test_agent_model_settings_have_role_defaults_and_legacy_fallback(monkeypatch
     settings = Settings(_env_file=None)
     assert settings.agent_default_model == "gpt-6-luna"
     assert settings.agent_author_model == "gpt-6-luna"
-    assert settings.agent_reviewer_model == "gpt-6.1-sol"
+    assert settings.agent_reviewer_model == "gpt-6.2-sol"
     assert settings.agent_default_reasoning_effort.value == "high"
     assert settings.agent_author_reasoning_effort.value == "high"
     assert settings.agent_reviewer_reasoning_effort.value == "high"
