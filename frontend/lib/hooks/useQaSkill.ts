@@ -9,6 +9,7 @@ import {
     confirmAllQaOutlines,
     confirmQaDocuments,
     confirmQaOutline,
+    createQaDocument,
     fetchQaWorkspace,
     putChatSkill,
     putQaOutline,
@@ -106,6 +107,14 @@ export function useQaSkill(
         onConfirmed?.({ label: "✓ 已確認全部大綱", instruction: "使用者已在卡片上確認了全部題目的答題大綱，請進行下一步。" });
     }, [act, onConfirmed]);
 
+    /** Produces the Word file, then re-reads the workspace so its versions list shows it. */
+    const createDocument = useCallback(async (sessionLabel?: string) => {
+        const id = activeSessionId.current;
+        if (!id) return;
+        await createQaDocument(id, sessionLabel);
+        setWorkspace(await fetchQaWorkspace(id));
+    }, [activeSessionId]);
+
     /** Confirms the kept session attachments (uploads and knowledge-base documents alike). */
     const confirmDocuments = useCallback(async () => {
         const id = activeSessionId.current;
@@ -137,6 +146,7 @@ export function useQaSkill(
         saveOutline,
         confirmOutline,
         confirmAllOutlines,
+        createDocument,
         confirmDocuments,
         toggleDocument,
     };

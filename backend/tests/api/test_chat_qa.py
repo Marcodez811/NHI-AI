@@ -187,3 +187,40 @@ async def test_skill_cards_stream_and_persist_with_the_assistant_message():
     detail = await get_chat_session(session_id, repository)
     assistants = [m for m in detail.messages if m.role == "assistant"]
     assert assistants[0].cards == [] and assistants[1].cards == [card]
+
+
+@pytest.mark.asyncio
+async def test_create_qa_document_stores_the_file_and_records_the_version(tmp_path):
+    from app.api.routes.chat import QaDocumentRequest, create_qa_document
+    from app.services.artifacts import ArtifactStorage, InMemoryArtifactRepository
+
+    repository = InMemoryChatRepository()
+    artifacts = InMemoryArtifactRepository()
+    storage = ArtifactStorage(tmp_path)
+    session_id = await _session(repository)
+    await update_qa_questions(session_id, QaQuestionsUpdate(questions=[qa.QuestionEdit(text="甲題")]), repository)
+
+    with pytest.raises(HTTPException) as early:
+        await create_qa_document(session_id, QaDocumentRequest(), repository, artifacts, storage)
+    assert early.value.status_code == 409
+
+    file = await _attach_file(repository, session_id)
+    await confirm_qa_documents(session_id, QaDocumentsConfirm(attachment_ids=[file.id]), repository)
+    stored = await repository.get_qa_workspace(session_id)
+    work = qa.clone(stored)
+    qa.apply_outline(work, 1, qa.OutlineInput(short=["要點【資料甲.txt】"]), confirmed=True)
+    await repository.save_qa_workspace(work)
+
+    result = await create_qa_document(session_id, QaDocumentRequest(session_label="11-5"), repository, artifacts, storage)
+    assert result.title == "11-5 立法院QA（1 題）" and result.kind == "report"
+    assert result.download_url == f"/api/v1/artifacts/{result.id}/download"
+    path = storage.resolve(f"artifacts/{result.id}.docx")
+    assert path.stat().st_size == result.size_bytes
+    assert (tmp_path / "artifacts" / f"{result.id}.json").exists()
+    assert (await artifacts.get(result.id)).session_id == session_id
+
+    again = await create_qa_document(session_id, QaDocumentRequest(), repository, artifacts, storage)
+    versions = (await get_qa_workspace(session_id, repository)).versions
+    assert [v["artifact_id"] for v in versions] == [str(again.id), str(result.id)]
+    storage.delete(f"artifacts/{result.id}.docx")
+    assert not (tmp_path / "artifacts" / f"{result.id}.json").exists()

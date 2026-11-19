@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field as PydanticField
 
+from app.api.routes.artifacts import get_artifact_repository, get_artifact_storage
 from app.config import settings
 from app.models.chat import (
     ChatAttachmentRead,
@@ -51,6 +52,10 @@ from app.models.chat import (
 from app.services import app_settings
 from app.services.chat import models as chat_models
 from app.models.documents import Document, DocumentStatus
+from app.models.artifacts import ArtifactRead
+from app.services.artifacts import ArtifactRepository, ArtifactStorage
+from app.services.legislative_qa.document import build_document
+from app.services.legislative_qa.publish import publish_document, record_version
 from app.services.chat.attachments import AttachmentError, ChatAttachmentStorage, process_upload
 from app.services.chat.engine import AgentsSdkChatEngine, ChatEngine
 from app.services.chat.skills import legislative_qa as qa
@@ -457,7 +462,7 @@ class QaOutlineUpdate(qa.OutlineInput):
     confirm: bool = False
 
 
-_QA_CONFLICT_CODES = {"qa_steps_unconfirmed", "qa_outline_missing"}
+_QA_CONFLICT_CODES = {"qa_steps_unconfirmed", "qa_outline_missing", "qa_outline_unconfirmed"}
 
 
 def _qa_http_error(error: qa.QaError) -> HTTPException:
@@ -555,6 +560,38 @@ async def confirm_all_qa_outlines(
     except qa.QaError as error:
         raise _qa_http_error(error) from error
     return await _save_qa(workspace, repository)
+
+
+class QaDocumentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_label: str | None = PydanticField(default=None, max_length=64)
+
+
+class QaDocumentRead(ArtifactRead):
+    download_url: str
+
+
+@router.post("/chat/sessions/{session_id}/qa/document", response_model=QaDocumentRead)
+async def create_qa_document(
+    session_id: UUID,
+    payload: QaDocumentRequest,
+    repository: Annotated[ChatRepository, Depends(get_chat_repository)],
+    artifacts: Annotated[ArtifactRepository, Depends(get_artifact_repository)],
+    storage: Annotated[ArtifactStorage, Depends(get_artifact_storage)],
+) -> QaDocumentRead:
+    workspace = await _load_qa(session_id, repository)
+    try:
+        document = build_document(workspace, payload.session_label)
+    except qa.QaError as error:
+        raise _qa_http_error(error) from error
+    artifact = await publish_document(document, session_id=session_id, repository=artifacts, storage=storage)
+    record_version(workspace, artifact)
+    await _save_qa(workspace, repository)
+    return QaDocumentRead(
+        **ArtifactRead.model_validate(artifact).model_dump(),
+        download_url=f"/api/v1/artifacts/{artifact.id}/download",
+    )
 
 
 @router.post("/chat/sessions/{session_id}/qa/outlines/{question_no}/confirm", response_model=QaWorkspaceRead)

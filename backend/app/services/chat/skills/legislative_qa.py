@@ -38,7 +38,7 @@ STAGE_LABELS = {
     "documents": "資料輸入（挑選資料）",
     "evidence": "資訊整理（數據、目的、現況、爭議、後續）",
     "outline": "答題架構（確認大綱）",
-    "ready": "大綱已全部確認（產製功能尚未開放）",
+    "ready": "大綱已全部確認（使用者可按「產生 Word 文件」下載）",
 }
 EVIDENCE_FIELDS = ("figures", "aim", "status", "dispute", "next_steps")
 EVIDENCE_LABELS = {

@@ -32,6 +32,7 @@ function controller(overrides: Partial<QaController> = {}, ws: QaWorkspace | nul
         saveOutline: vi.fn().mockResolvedValue(undefined),
         confirmOutline: vi.fn().mockResolvedValue(undefined),
         confirmAllOutlines: vi.fn().mockResolvedValue(undefined),
+        createDocument: vi.fn().mockResolvedValue(undefined),
         confirmDocuments: vi.fn().mockResolvedValue(undefined),
         toggleDocument: vi.fn().mockResolvedValue(undefined),
         ...overrides,
@@ -248,10 +249,21 @@ describe("outline card", () => {
         expect(qa.confirmAllOutlines).toHaveBeenCalled();
     });
 
-    it("notes that generation is coming once the stage is ready", () => {
-        const ws = workspace({ stage: "ready", outline: { "1": outline(true) } });
-        render(<ChatMessageList messages={[turn([card(1)])]} qa={controller({}, ws)} />);
-        expect(screen.getByText("大綱已全部確認，產製功能即將開放。")).toBeInTheDocument();
+    it("offers the Word export once the stage is ready and lists produced versions", async () => {
+        const versions = [
+            { artifact_id: "a2", title: "11-5 立法院QA（1 題）", created_at: "", download_url: "/x" },
+            { artifact_id: "a1", title: "立法院QA（1 題）", created_at: "", download_url: "/y" },
+        ];
+        const ws = workspace({ stage: "ready", outline: { "1": outline(true) }, versions });
+        const qa = controller({ createDocument: vi.fn().mockResolvedValue(undefined) }, ws);
+        render(<ChatMessageList messages={[turn([card(1)])]} qa={qa} />);
         expect(screen.queryByRole("button", { name: "全部確認" })).not.toBeInTheDocument();
+        const links = screen.getAllByRole("link");
+        expect(links.map((link) => link.getAttribute("href"))).toEqual([
+            "/api/v1/artifacts/a2/download", "/api/v1/artifacts/a1/download",
+        ]);
+        await userEvent.type(screen.getByPlaceholderText("會期（例如 11-5）"), "11-5");
+        await userEvent.click(screen.getByRole("button", { name: "產生 Word 文件" }));
+        expect(qa.createDocument).toHaveBeenCalledWith("11-5");
     });
 });

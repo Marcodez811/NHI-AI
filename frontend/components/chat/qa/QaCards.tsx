@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Check, ChevronDown, CircleAlert, FileText, Plus, Trash2, Upload } from "lucide-react";
 import { ApiError } from "../../../lib/api/client";
+import { artifactDownloadUrl } from "../../../lib/api/artifacts";
 import { QA_EVIDENCE_GROUPS } from "../../../lib/api/qa";
 import type {
     QaCard,
@@ -14,6 +15,7 @@ import type {
     QaOutlineCardData,
     QaQuestion,
     QaQuestionsCardData,
+    QaVersion,
     QaWorkspace,
 } from "../../../lib/api/qa";
 import type { useQaSkill } from "../../../lib/hooks/useQaSkill";
@@ -410,6 +412,35 @@ function OutlineEditor({ no, outline, qa, onDone }: {
     );
 }
 
+function DocumentExport({ versions, qa }: { versions: QaVersion[]; qa: QaController }) {
+    const [label, setLabel] = useState("");
+    const { busy, error, run } = useRun();
+    return (
+        <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+                <Input aria-label="會期" className="h-8 w-44" placeholder="會期（例如 11-5）" value={label}
+                    onChange={(event) => setLabel(event.target.value)} />
+                <Button type="button" size="sm" disabled={busy} onClick={() => void run(() => qa.createDocument(label))}>
+                    {busy ? "產生中…" : "產生 Word 文件"}
+                </Button>
+            </div>
+            {versions.length > 0 && (
+                <ul className="flex flex-col gap-1">
+                    {versions.map((version) => (
+                        <li key={version.artifact_id}>
+                            <a href={artifactDownloadUrl(version.artifact_id)} download
+                                className="inline-flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-0.5 text-xs hover:bg-muted">
+                                <FileText size={13} aria-hidden="true" />{version.title}
+                            </a>
+                        </li>
+                    ))}
+                </ul>
+            )}
+            <ErrorLine message={error} />
+        </div>
+    );
+}
+
 function OutlineCard({ data, live, readOnly, qa, showConfirmAll }: {
     data: QaOutlineCardData; live: QaWorkspace | null; readOnly: boolean; qa: QaController; showConfirmAll: boolean;
 }) {
@@ -446,7 +477,7 @@ function OutlineCard({ data, live, readOnly, qa, showConfirmAll }: {
                 </div>
             )}
             {!readOnly && showConfirmAll && live?.stage === "ready" && (
-                <p className="text-xs text-muted-foreground">大綱已全部確認，產製功能即將開放。</p>
+                <DocumentExport versions={live.versions ?? []} qa={qa} />
             )}
             <ErrorLine message={error} />
         </CardShell>

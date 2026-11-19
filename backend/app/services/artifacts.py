@@ -20,6 +20,7 @@ from app.models.artifacts import Artifact, ArtifactKind, ArtifactWorkflow
 
 logger = logging.getLogger(__name__)
 
+DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 ARTIFACTS_DIR = "artifacts"
 
@@ -48,6 +49,16 @@ class ArtifactStorage:
             raise ArtifactStorageError("artifact could not be stored") from exc
         return f"{ARTIFACTS_DIR}/{destination.name}", destination.stat().st_size
 
+    def write_bytes(self, data: bytes, artifact_id: UUID, extension: str) -> tuple[str, int]:
+        directory = self._base()
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / f"{artifact_id}{extension}"
+        try:
+            destination.write_bytes(data)
+        except OSError as exc:
+            raise ArtifactStorageError("artifact could not be stored") from exc
+        return f"{ARTIFACTS_DIR}/{destination.name}", len(data)
+
     def resolve(self, storage_key: str) -> Path:
         root = self.root.resolve()
         path = (root / storage_key).resolve()
@@ -61,7 +72,9 @@ class ArtifactStorage:
 
     def delete(self, storage_key: str) -> None:
         try:
-            self.resolve(storage_key).unlink(missing_ok=True)
+            path = self.resolve(storage_key)
+            path.unlink(missing_ok=True)
+            path.with_suffix(".json").unlink(missing_ok=True)  # structured content stored next to the file
         except ArtifactStorageError:
             return
 

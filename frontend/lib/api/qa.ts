@@ -49,13 +49,27 @@ export interface QaOutline {
     confirmed: boolean;
 }
 
+/** One produced Word file, newest first in `QaWorkspace.versions`. */
+export interface QaVersion {
+    artifact_id: string;
+    title: string;
+    created_at: string;
+    download_url: string;
+}
+
+export interface QaDocumentResult {
+    id: string;
+    title: string;
+    download_url: string;
+}
+
 export interface QaWorkspace {
     stage: QaStage;
     questions: { items: QaQuestion[]; confirmed: boolean };
     documents: { confirmed: boolean; used: QaUsedDocument[] };
     evidence: Record<string, QaEvidence>;
     outline: Record<string, QaOutline>;
-    versions?: unknown[];
+    versions?: QaVersion[];
     base_version_id?: string | null;
     updated_at?: string;
 }
@@ -156,4 +170,13 @@ export function confirmQaOutline(sessionId: string, no: number): Promise<QaWorks
 
 export function confirmAllQaOutlines(sessionId: string): Promise<QaWorkspace> {
     return request<QaWorkspace>(qaPath(sessionId, "/outlines/confirm-all"), { method: "POST" });
+}
+
+/** Builds the .docx from the confirmed outlines; the server records it in the workspace versions. */
+export function createQaDocument(sessionId: string, sessionLabel?: string): Promise<QaDocumentResult> {
+    const label = sessionLabel?.trim();
+    return request<QaDocumentResult>(qaPath(sessionId, "/document"), {
+        method: "POST",
+        ...json(label ? { session_label: label } : {}),
+    });
 }
