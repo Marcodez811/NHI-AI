@@ -11,6 +11,7 @@ file id under its own ``user_files/`` tree.
 from __future__ import annotations
 
 import asyncio
+import glob
 import importlib.util
 import os
 import tempfile
@@ -26,7 +27,11 @@ from pypdf import PdfReader
 from app.config import settings
 from app.services import app_settings
 from app.models.chat import ChatAttachmentKind, ChatAttachmentStatus
+from app.services.documents.pdf_text import extract_pdf_text
 from app.services.documents.storage import CHAT_TEXT_SUFFIX
+
+# Bump when extraction output changes; older caches are ignored and rebuilt.
+TEXT_EXTRACTION_VERSION = 2
 
 # Size/page limits come from config.yaml (uploads.chat.*) and are read per call.
 
@@ -134,7 +139,7 @@ class ChatAttachmentStorage:
 
     @staticmethod
     def kb_text_path(content_path: Path) -> Path:
-        return content_path.with_name(content_path.name + CHAT_TEXT_SUFFIX)
+        return content_path.with_name(f"{content_path.name}.v{TEXT_EXTRACTION_VERSION}{CHAT_TEXT_SUFFIX}")
 
     async def save(self, file_id: UUID, data: bytes) -> tuple[Path, str]:
         directory = self._files_dir()
@@ -181,13 +186,20 @@ class ChatAttachmentStorage:
         end = total if max_chars is None else min(total, start + max_chars)
         return full_text[start:end], total
 
-    async def ensure_kb_text(self, content_path: Path) -> Path:
-        """Extract a knowledge-base DOCX/TXT/MD once and cache it beside the document."""
+    async def ensure_kb_text(self, content_path: Path, extension: str | None = None) -> Path:
+        """Extract a DOCX/TXT/MD/PDF once and cache it beside the document.
+
+        ``extension`` overrides the file suffix (uploaded files have none).
+        """
 
         cached = self.kb_text_path(content_path)
         if cached.is_file():
             return cached
-        extension = content_path.suffix.lower()
+        # Drop caches from older extraction versions (and the unversioned one).
+        for old in content_path.parent.glob(glob.escape(content_path.name) + "*" + CHAT_TEXT_SUFFIX):
+            if old != cached:
+                old.unlink(missing_ok=True)
+        extension = (extension or content_path.suffix).lower()
         text, _status, _error = await asyncio.to_thread(
             _extract_document_text, content_path, extension, uuid5(NAMESPACE_URL, str(content_path))
         )
@@ -213,6 +225,8 @@ class ChatAttachmentStorage:
         def _delete() -> None:
             content_path.unlink(missing_ok=True)
             self.text_path(content_path).unlink(missing_ok=True)
+            for cache in content_path.parent.glob(glob.escape(content_path.name) + "*" + CHAT_TEXT_SUFFIX):
+                cache.unlink(missing_ok=True)
 
         try:
             await asyncio.to_thread(_delete)
@@ -409,12 +423,29 @@ def _validate_document_magic_bytes(extension: str, data: bytes) -> None:
             raise AttachmentError("這個檔案不是有效的文字檔。") from exc
 
 
+def _extract_pdf_text(path: Path) -> str:
+    """Extract a PDF's text layer with tables as Markdown; scanned PDFs yield ""."""
+
+    try:
+        reader = PdfReader(str(path))
+        if reader.is_encrypted:
+            return ""
+    except Exception:
+        return ""
+    try:
+        return extract_pdf_text(path)
+    except Exception:
+        return ""
+
+
 def _extract_document_text(path: Path, extension: str, attachment_id: UUID) -> tuple[str, str, str | None]:
     """Return ``(text, status, error)`` for a validated, stored document."""
 
     if extension == ".docx":
         text = _extract_docx_text(path, attachment_id)
         return text, ChatAttachmentStatus.READY.value, None
+    if extension == ".pdf":
+        return _extract_pdf_text(path), ChatAttachmentStatus.READY.value, None
     # .txt / .md: already validated as UTF-8 text.
     return path.read_text(encoding="utf-8"), ChatAttachmentStatus.READY.value, None
 

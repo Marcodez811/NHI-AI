@@ -471,6 +471,7 @@ class OpenAIDocumentIngestionService:
             if not promoted:
                 await _cleanup_candidate_resources(client, candidate_remote_file_id=cand_file_id, candidate_remote_vector_store_file_id=cand_vs_file_id, vector_store_id=candidate_store_id)
                 return
+            await _prebuild_chat_text(source)
             # Promotion is the durable commit point.  Old resources are
             # cleaned by a separate idempotent task so a provider outage can
             # never turn the newly promoted document back into FAILED.
@@ -497,6 +498,20 @@ class OpenAIDocumentIngestionService:
             await _cleanup_candidate_resources(client, candidate_remote_file_id=cand_file_id, candidate_remote_vector_store_file_id=cand_vs_file_id, vector_store_id=candidate_store_id)
             await asyncio.to_thread(_mark_ingestion_failed, payload, lease_token=lease_token, message="Document indexing failed.")
             raise
+
+async def _prebuild_chat_text(source: Path) -> None:
+    """Warm the chat text cache so chat never pays extraction cost.
+
+    Best effort: any failure is logged and the lazy path still works.
+    """
+
+    try:
+        from app.services.chat.attachments import ChatAttachmentStorage
+
+        await ChatAttachmentStorage().ensure_kb_text(source)
+    except Exception:
+        logger.warning("Could not pre-extract chat text for %s", source.name, exc_info=True)
+
 
 async def _enqueue_cleanup_task(payload: DocumentCleanupTaskPayload) -> None:
     """Publish cleanup immediately; retries use the durable schedule source."""
