@@ -1,5 +1,7 @@
 "use client";
 
+import { PageContainer, PageHeader } from "@/components/app-shell/page-layout";
+
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { CircleAlert, LoaderCircle } from "lucide-react";
@@ -28,8 +30,8 @@ export function SlideJobView({
 
     if (slideJob.phase === "expired") {
         return (
-            <section className="px-5 py-10 lg:px-10" aria-labelledby="slide-job-not-found-title">
-                <div className="mx-auto max-w-[720px] rounded-xl border border-border bg-card p-6">
+            <PageContainer aria-labelledby="slide-job-not-found-title">
+                <div className="rounded-xl border border-border bg-card p-6">
                     <CircleAlert className="text-muted-foreground" size={22} aria-hidden="true" />
                     <h1 id="slide-job-not-found-title" className="mt-4 text-xl font-semibold">找不到簡報工作</h1>
                     <p className="mt-2 text-sm text-muted-foreground">這個工作可能已移除，或連結有誤。請返回簡報列表選擇其他工作。</p>
@@ -37,7 +39,7 @@ export function SlideJobView({
                         返回簡報列表
                     </Link>
                 </div>
-            </section>
+        </PageContainer>
         );
     }
 
@@ -54,23 +56,22 @@ export function SlideJobView({
     }
 
     return (
-        <section className="px-5 py-8 lg:px-10 lg:py-10" aria-labelledby="slide-job-title">
-            <div className="mx-auto max-w-[720px]">
-                <Link href="/slides" className="mb-5 inline-flex items-center text-xs text-info hover:text-info/80">
+        <PageContainer aria-labelledby="slide-job-title">
+            <div>
+                <Link href="/slides" className="mb-5 inline-flex items-center text-xs text-muted-foreground hover:text-foreground">
                     ← 返回簡報列表
                 </Link>
-                <div className="mb-7">
-                    <h1 id="slide-job-title" className="text-[24px] font-semibold tracking-tight">
-                        {job?.brief?.title ?? "簡報工作"}
-                    </h1>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                        {awaitingOutline
+                <PageHeader
+                    titleId="slide-job-title"
+                    title={job?.brief?.title ?? "簡報工作"}
+                    description={
+                        awaitingOutline
                             ? "請檢閱大綱並核准，簡報才會繼續生成。"
                             : job?.status === "failed"
                               ? "這次生成未完成；您可以返回列表重新建立簡報。"
-                              : "工作會在背景繼續執行，您可以稍後從簡報列表回到這裡。"}
-                    </p>
-                </div>
+                              : "工作會在背景繼續執行，您可以稍後從簡報列表回到這裡。"
+                    }
+                />
 
                 {awaitingOutline && job ? (
                     <OutlineReview jobId={jobId} onApproved={slideJob.resumePolling} />
@@ -103,6 +104,6 @@ export function SlideJobView({
                     </div>
                 )}
             </div>
-        </section>
+        </PageContainer>
     );
 }

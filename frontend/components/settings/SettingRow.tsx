@@ -101,13 +101,13 @@ export function SettingRow({ setting, models, onSave, onReset, error }: SettingR
             <div className="w-full space-y-4" aria-labelledby={`${id}-label`} role="group">
                 {groupByProvider(models).map((group) => (
                     <div key={group.provider} className="space-y-1.5">
-                        <div className="text-xs font-medium text-muted-foreground">{providerLabel(group.provider)}</div>
-                        <ul className="divide-y divide-border rounded-lg border border-border">
+                        <div className="px-1 text-xs font-medium text-muted-foreground">{providerLabel(group.provider)}</div>
+                        <ul className="divide-y divide-border/60 rounded-lg bg-muted/40">
                             {group.models.map((model) => {
                                 const visible = !hiddenIds.includes(model.id);
                                 return (
                                     <li key={model.id}>
-                                        <label className="flex min-h-11 items-center gap-2.5 px-3 text-sm">
+                                        <label className="flex h-10 items-center gap-2.5 px-3 text-sm">
                                             <ProviderIcon provider={model.provider} disabled={!model.available} />
                                             <span className="min-w-0 flex-1 truncate">{model.label}</span>
                                             {!model.available && <span className="shrink-0 text-xs text-muted-foreground">未設定金鑰</span>}
@@ -136,17 +136,17 @@ export function SettingRow({ setting, models, onSave, onReset, error }: SettingR
         <div
             className={
                 stacked
-                    ? "flex flex-col gap-3 border-b border-border py-4 last:border-b-0"
-                    : "flex flex-col gap-3 border-b border-border py-4 last:border-b-0 sm:flex-row sm:items-start sm:justify-between sm:gap-6"
+                    ? "flex flex-col gap-4 px-5 py-4"
+                    : "flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6"
             }
         >
-            <div className="min-w-0 space-y-1 sm:max-w-sm">
+            <div className={stacked ? "min-w-0 space-y-1" : "min-w-0 space-y-1 sm:max-w-md"}>
                 <div className="flex flex-wrap items-center gap-2">
                     <span id={`${id}-label`} className="text-sm font-medium">{setting.label_zh}</span>
-                    <Badge variant="secondary" data-source={setting.source}>{SOURCE_BADGES[setting.source]}</Badge>
-                    {setting.restart_required && <Badge variant="outline">需重新啟動</Badge>}
+                    <Badge variant="outline" data-source={setting.source} className="h-5 px-1.5 text-xs font-normal text-muted-foreground">{SOURCE_BADGES[setting.source]}</Badge>
+                    {setting.restart_required && <Badge variant="outline" className="h-5 px-1.5 text-xs font-normal text-muted-foreground">需重新啟動</Badge>}
                 </div>
-                <p className="text-sm leading-6 text-muted-foreground">{setting.description_zh}</p>
+                <p className="text-sm text-muted-foreground">{setting.description_zh}</p>
                 {setting.restart_required && (
                     <p className="text-xs text-muted-foreground">此設定需重新啟動服務後才會生效。</p>
                 )}

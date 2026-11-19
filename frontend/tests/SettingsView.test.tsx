@@ -61,7 +61,7 @@ it("hides the developer tab when dev settings are disabled", async () => {
     api.fetch.mockResolvedValue(payload(false));
     render(<SettingsView />);
     expect(await screen.findByText("預設對話模型")).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "一般" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab")).toBeNull();
     expect(screen.queryByRole("tab", { name: "開發者" })).toBeNull();
     expect(screen.getByRole("radio", { name: "淺色" })).toBeInTheDocument();
 });

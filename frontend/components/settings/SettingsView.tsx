@@ -1,4 +1,5 @@
 "use client";
+import { PageContainer, PageHeader } from "@/components/app-shell/page-layout";
 
 import { useState } from "react";
 
@@ -16,10 +17,9 @@ export function SettingsView() {
     const tabs: { id: Tab; label: string }[] = [{ id: "general", label: "一般" }, ...(devEnabled ? [{ id: "dev" as const, label: "開發者" }] : [])];
 
     return (
-        <div className="mx-auto w-full max-w-3xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
-            <header className="space-y-2">
-                <h1 className="text-2xl font-semibold tracking-tight">設定</h1>
-            </header>
+        <PageContainer className="space-y-10">
+            <PageHeader title="設定" />
+            {tabs.length > 1 && (
             <div role="tablist" aria-label="設定分類" className="flex gap-6 border-b border-border">
                 {tabs.map(({ id, label }) => (
                     <button
@@ -40,8 +40,9 @@ export function SettingsView() {
                     </button>
                 ))}
             </div>
+            )}
             {active === "general" ? (
-                <div role="tabpanel" id="settings-panel-general" aria-labelledby="settings-tab-general" className="space-y-8">
+                <div role="tabpanel" id="settings-panel-general" aria-labelledby={tabs.length > 1 ? "settings-tab-general" : undefined} aria-label={tabs.length > 1 ? undefined : "一般"} className="space-y-10">
                     <AppearanceSetting />
                     <SettingsPanel state={state} level="user" />
                 </div>
@@ -50,6 +51,6 @@ export function SettingsView() {
                     <SettingsPanel state={state} level="dev" />
                 </div>
             )}
-        </div>
+        </PageContainer>
     );
 }

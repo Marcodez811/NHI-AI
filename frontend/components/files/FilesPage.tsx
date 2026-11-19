@@ -1,4 +1,5 @@
 "use client";
+import { PageContainer, PageHeader } from "@/components/app-shell/page-layout";
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
@@ -90,9 +91,8 @@ export function FilesPage() {
         `-mb-px border-b-2 pb-2 text-sm font-medium transition-colors ${active ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`;
 
     return (
-        <section className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6">
-            <h1 className="mb-1 text-2xl font-semibold">我的檔案</h1>
-            <p className="mb-6 text-sm text-muted-foreground">管理你上傳的檔案，以及 AI 為你產出的文件。</p>
+        <PageContainer width="wide">
+            <PageHeader title="我的檔案" description="管理你上傳的檔案，以及 AI 為你產出的文件。" />
             <div role="tablist" aria-label="我的檔案" className="mb-6 flex gap-6 border-b border-border">
                 <button type="button" role="tab" aria-selected={tab === "files"} className={tabClass(tab === "files")} onClick={() => selectTab("files")}>
                     上傳的檔案
@@ -193,6 +193,6 @@ export function FilesPage() {
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
-        </section>
+        </PageContainer>
     );
 }

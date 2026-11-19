@@ -52,7 +52,7 @@ export function SlideSettings({
                     onChange={(event) =>
                         setCount(Math.min(25, Math.max(5, Number(event.target.value) || 5)))
                     }
-                    className="font-normal"
+                    className="w-32 font-normal"
                 />
             </label>
             <div className="flex flex-col gap-2 text-sm font-medium">
@@ -68,7 +68,7 @@ export function SlideSettings({
                     正式
                 </Button>
                 <Select value={tone} onValueChange={(value) => value && setTone(value as Tone)}>
-                    <SelectTrigger aria-label={TONE_LABELS[tone]} aria-pressed={tone === "formal"}>
+                    <SelectTrigger className="w-32" aria-label={TONE_LABELS[tone]} aria-pressed={tone === "formal"}>
                         <SelectValue>{TONE_LABELS[tone]}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>

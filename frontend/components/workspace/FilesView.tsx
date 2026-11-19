@@ -1,5 +1,7 @@
 "use client";
 
+import { PageContainer, PageHeader } from "@/components/app-shell/page-layout";
+
 import { useEffect, useMemo, useState } from "react";
 import {
     ChevronDown,
@@ -302,6 +304,18 @@ function FolderManager({
     );
 }
 
+const normalizeName = (value: string) =>
+    value.replace(/\.[A-Za-z0-9]{1,5}$/, "").replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+
+/** True when the grey filename line would only repeat the document title. */
+function sameAsTitle(doc: DocumentRead): boolean {
+    const title = documentDisplayName(doc);
+    return (
+        title === doc.original_filename ||
+        normalizeName(title) === normalizeName(doc.original_filename)
+    );
+}
+
 export function FilesView({
     docs,
     folders,
@@ -387,29 +401,18 @@ export function FilesView({
         closeDetails();
     };
     return (
-        <section className="px-5 py-8 lg:px-10 lg:py-10">
-            <div className="mx-auto max-w-[1100px]">
-            <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
-                <div>
-                    <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
-                        知識庫 <ChevronRight size={13} /> {folderName}
-                    </div>
-                    <h1 className="text-[24px] font-semibold tracking-tight">
-                        知識庫管理
-                    </h1>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                        管理文件、分類資料，並供生成工作流程使用。
-                    </p>
-                </div>
-            <Button
-                type="button"
-                onClick={onUpload}
-                className="gap-2"
-            >
-                <Upload size={16} />
-                上傳文件
-            </Button>
-            </div>
+        <PageContainer width="wide">
+            <PageHeader
+                title="知識庫管理"
+                description="管理文件、分類資料，並供生成工作流程使用。"
+                breadcrumb={<>知識庫 <ChevronRight size={13} /> {folderName}</>}
+                actions={
+                    <Button type="button" onClick={onUpload} className="gap-2">
+                        <Upload size={16} />
+                        上傳文件
+                    </Button>
+                }
+            />
             {(error || actionError) && (
                 <div className="mb-4 flex items-center justify-between rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                     <span>{error || actionError}</span>
@@ -486,8 +489,8 @@ export function FilesView({
                                                 key={doc.id}
                                                 className="border-b border-border last:border-0 hover:bg-muted/30"
                                             >
-                                                <td className="px-3 py-3 align-top">
-                                                    <div className="flex items-start gap-3">
+                                                <td className="px-3 py-3 align-middle">
+                                                    <div className="flex items-center gap-3">
                                                         <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-secondary">
                                                             <FileText
                                                                 size={16}
@@ -499,11 +502,11 @@ export function FilesView({
                                                                     doc,
                                                                 )}
                                                             </div>
-                                                            <div className="truncate text-xs text-muted-foreground">
-                                                                {
-                                                                    doc.original_filename
-                                                                }
-                                                            </div>
+                                                            {!sameAsTitle(doc) && (
+                                                                <div className="truncate text-xs text-muted-foreground">
+                                                                    {doc.original_filename}
+                                                                </div>
+                                                            )}
                                                             {(doc.status ===
                                                                 "failed" ||
                                                                 doc.status ===
@@ -528,19 +531,19 @@ export function FilesView({
                                                         </div>
                                                     </div>
                                                 </td>
-                                                <td className="px-3 py-3 align-top text-xs text-muted-foreground">
+                                                <td className="px-3 py-3 align-middle text-xs text-muted-foreground">
                                                     {modes.find((mode) => mode.mode === doc.category)?.label || doc.category}
                                                 </td>
-                                                <td className="px-3 py-3 align-top text-xs text-muted-foreground">
+                                                <td className="px-3 py-3 align-middle text-xs text-muted-foreground">
                                                     {doc.folder_id ? folders.find((folder) => folder.id === doc.folder_id)?.name || "資料夾" : "未分類"}
                                                 </td>
-                                                <td className="px-3 py-3 align-top text-xs text-muted-foreground">
+                                                <td className="px-3 py-3 align-middle text-xs text-muted-foreground">
                                                     {formatDate(
                                                         doc.updated_at ||
                                                             doc.created_at,
                                                     )}
                                                 </td>
-                                                <td className="px-3 py-3 align-top">
+                                                <td className="px-3 py-3 align-middle">
                                                     <Button
                                                         type="button"
                                                         onClick={() =>
@@ -579,12 +582,12 @@ export function FilesView({
                                                         )}
                                                     </Button>
                                                 </td>
-                                                <td className="px-3 py-3 align-top">
+                                                <td className="px-3 py-3 align-middle">
                                                     <DropdownMenu>
                                                         <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label={`更多操作：${documentDisplayName(doc)}`} />}>
                                                             <MoreHorizontal size={15} />
                                                         </DropdownMenuTrigger>
-                                                        <DropdownMenuContent align="end" className="w-40">
+                                                        <DropdownMenuContent align="end">
                                                             <DropdownMenuItem onClick={() => openDetails(doc)}><Pencil size={14} />編輯文件</DropdownMenuItem>
                                                             <DropdownMenuItem onClick={() => setExpanded(expandedRow ? null : doc.id)}><FileText size={14} />索引詳情</DropdownMenuItem>
                                                             <DropdownMenuItem disabled={deleting} onClick={() => onDownload(doc)}><Download size={14} />下載文件</DropdownMenuItem>
@@ -654,7 +657,6 @@ export function FilesView({
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
-            </div>
-        </section>
+        </PageContainer>
     );
 }

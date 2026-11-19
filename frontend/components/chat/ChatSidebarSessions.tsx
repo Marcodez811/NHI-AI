@@ -12,9 +12,27 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useChatSessions } from "@/lib/hooks/useChatSessions"
+
+const UNTITLED = "未命名對話"
+
+function isMeaningfulTitle(title: string | null | undefined): title is string {
+  const value = (title ?? "").trim()
+  return value !== "" && value !== "新對話" && /[\p{L}\p{N}]/u.test(value)
+}
+
+function shortDate(iso: string | undefined): string {
+  const date = iso ? new Date(iso) : null
+  if (!date || Number.isNaN(date.getTime())) return ""
+  const days = Math.floor((Date.now() - date.getTime()) / 86_400_000)
+  if (days < 1) return "今天"
+  if (days < 2) return "昨天"
+  if (days < 7) return `${days} 天前`
+  return `${date.getMonth() + 1}/${date.getDate()}`
+}
 
 /** The recent-conversation list shown under the sidebar's 「最近對話」 section header. */
 export function ChatSidebarSessions() {
@@ -33,16 +51,17 @@ export function ChatSidebarSessions() {
   }
 
   return (
-    <div className="mt-1 flex flex-col gap-0.5">
+    <div className="flex flex-col gap-px">
       {sessions.map((session) => {
         const href = `/chat/${session.id}`
         const current = pathname === href
+        const named = isMeaningfulTitle(session.title)
+        const label = named ? session.title.trim() : UNTITLED
 
         if (renamingId === session.id) {
-          // Same row geometry as a normal item: the input takes the link's
-          // width and a spacer holds the ⋯ button's place, so nothing jumps.
+          // Same row height as a normal item, so nothing jumps while renaming.
           return (
-            <div key={session.id} className="flex items-center gap-1">
+            <div key={session.id} className="flex h-8 items-center">
               <input
                 autoFocus
                 onFocus={(event) => event.currentTarget.select()}
@@ -53,27 +72,28 @@ export function ChatSidebarSessions() {
                   if (event.key === "Enter") void commitRename(session.id)
                   if (event.key === "Escape") setRenamingId(null)
                 }}
-                className="h-8 min-w-0 flex-1 rounded-lg border border-ring bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
+                className="h-8 min-w-0 flex-1 rounded-lg border border-ring bg-background px-2 text-sm text-foreground outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
                 aria-label="重新命名對話"
               />
-              <span className="size-6 shrink-0" aria-hidden="true" />
             </div>
           )
         }
 
         return (
-          <div key={session.id} className="group/session flex items-center gap-1">
+          <div
+            key={session.id}
+            className={cn(
+              "group/session relative flex h-8 items-center rounded-lg transition-colors",
+              current ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/70 has-[[data-popup-open]]:bg-sidebar-accent/70",
+            )}
+          >
             <Link
               href={href}
               aria-current={current ? "page" : undefined}
-              className={cn(
-                "flex h-8 min-w-0 flex-1 items-center rounded-lg px-3 text-sm transition-colors",
-                current
-                  ? "bg-accent text-foreground"
-                  : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
-              )}
+              className="flex h-full min-w-0 flex-1 items-center rounded-lg pr-8 pl-2 text-sm text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
             >
-              <span className="truncate">{session.title}</span>
+              <span className={cn("min-w-0 flex-1 truncate", !named && "text-muted-foreground")}>{label}</span>
+              {!named && <span className="ml-2 shrink-0 text-xs text-muted-foreground/70 group-hover/session:hidden">{shortDate(session.updated_at)}</span>}
             </Link>
             <DropdownMenu>
               <DropdownMenuTrigger
@@ -82,27 +102,28 @@ export function ChatSidebarSessions() {
                     type="button"
                     variant="ghost"
                     size="icon-xs"
-                    aria-label={`「${session.title}」的更多操作`}
-                    className="shrink-0 opacity-0 focus-visible:opacity-100 group-hover/session:opacity-100 data-[popup-open]:opacity-100"
+                    aria-label={`「${label}」的更多操作`}
+                    className="absolute right-1 shrink-0 text-muted-foreground opacity-0 hover:bg-transparent hover:text-foreground focus-visible:opacity-100 group-hover/session:opacity-100 data-[popup-open]:opacity-100"
                   />
                 }
               >
-                <MoreHorizontal size={13} />
+                <MoreHorizontal size={15} />
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-36">
+              <DropdownMenuContent side="bottom" align="end">
                 <DropdownMenuItem
                   onClick={() => {
                     setRenamingId(session.id)
-                    setRenameValue(session.title)
+                    setRenameValue(named ? session.title : "")
                   }}
                 >
-                  <Pencil size={13} />重新命名
+                  <Pencil size={14} />重新命名
                 </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem
                   variant="destructive"
-                  onClick={() => setPendingDelete({ id: session.id, title: session.title })}
+                  onClick={() => setPendingDelete({ id: session.id, title: label })}
                 >
-                  <Trash2 size={13} />刪除
+                  <Trash2 size={14} />刪除
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

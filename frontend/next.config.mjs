@@ -5,6 +5,7 @@ const nextConfig = {
   experimental: {
     proxyClientMaxBodySize: '300mb',
   },
+  devIndicators: { position: "bottom-right" },
   output: "standalone",
   images: {
     unoptimized: true,

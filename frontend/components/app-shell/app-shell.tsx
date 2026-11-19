@@ -1,6 +1,6 @@
 "use client"
 
-import { ChevronRight, FolderOpen, Library, Plus, Settings, Workflow } from "lucide-react"
+import { ChevronDown, FolderOpen, Library, PanelLeftClose, PanelLeftOpen, Plus, Settings, Workflow } from "lucide-react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
@@ -16,6 +16,11 @@ const navigation = [
   { href: "/workflows", label: "AI 工作流", icon: Workflow },
 ] as const
 
+const sidebarRow =
+  "group/row flex items-center gap-2.5 rounded-lg text-sm text-sidebar-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+const sidebarIconButton =
+  "inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+
 function isCurrentPath(pathname: string, href: string): boolean {
   if (href === "/workflows" && (pathname === "/slides" || pathname.startsWith("/slides/"))) return true
   // "新對話" only highlights on the fresh /chat composer, not on a saved
@@ -29,6 +34,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() ?? ""
   const [collapsed, setCollapsed] = useState(false)
   const [preferenceReady, setPreferenceReady] = useState(false)
+  const [recentsOpen, setRecentsOpen] = useState(true)
 
   useEffect(() => {
     try {
@@ -51,53 +57,77 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <aside className={cn("fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-sidebar-border bg-sidebar transition-[width] md:flex", collapsed ? "w-24" : "w-60")}>
-        <div className={cn("relative flex h-16 shrink-0 items-center", collapsed ? "justify-center px-3" : "gap-3 px-5")}>
-          <Link href="/chat" aria-label="健保署 AI" className="min-w-0 text-sidebar-foreground">
-            <NhiBrand compact={collapsed} />
-          </Link>
-          <button type="button" aria-label={collapsed ? "展開側邊欄" : "收合側邊欄"} onClick={() => setCollapsed((value) => !value)} className={cn("rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground", collapsed ? "absolute right-2 size-7" : "ml-auto")}>
-            <ChevronRight className={cn("size-4 transition-transform", collapsed ? "" : "rotate-180")} />
+      <aside className={cn("fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-[width] duration-200 md:flex", collapsed ? "w-14" : "w-64")}>
+        <div className={cn("flex h-14 shrink-0 items-center", collapsed ? "justify-center" : "gap-2 pr-2 pl-4")}>
+          {!collapsed && (
+            <Link href="/chat" aria-label="健保署 AI" className="min-w-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              <NhiBrand />
+            </Link>
+          )}
+          <button
+            type="button"
+            aria-label={collapsed ? "展開側邊欄" : "收合側邊欄"}
+            title={collapsed ? "展開側邊欄" : "收合側邊欄"}
+            onClick={() => setCollapsed((value) => !value)}
+            className={cn(sidebarIconButton, !collapsed && "ml-auto")}
+          >
+            {collapsed ? <PanelLeftOpen className="size-[18px]" /> : <PanelLeftClose className="size-[18px]" />}
           </button>
         </div>
-        <nav className="flex shrink-0 flex-col gap-1 px-3 pt-2 pb-1" aria-label="主要導覽">
+        <nav className={cn("flex shrink-0 flex-col gap-0.5 pt-1 pb-2", collapsed ? "items-center px-2" : "px-2")} aria-label="主要導覽">
           {navigation.map(({ href, label, icon: Icon }) => {
             const current = isCurrentPath(pathname, href)
             return (
               <Link key={href} href={href} aria-label={collapsed ? label : undefined} title={collapsed ? label : undefined} aria-current={current ? "page" : undefined} className={cn(
-                "flex h-10 items-center gap-3 rounded-lg text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                collapsed ? "justify-center px-0" : "px-3",
-                current ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                sidebarRow,
+                collapsed ? "size-9 justify-center px-0" : "h-9 px-2",
+                current ? "bg-sidebar-accent font-medium" : "hover:bg-sidebar-accent/70",
               )}>
-                <Icon className="size-4" aria-hidden="true" />
-                {!collapsed && label}
+                <span className="flex size-6 shrink-0 items-center justify-center">
+                  <Icon className="size-[18px]" aria-hidden="true" />
+                </span>
+                {!collapsed && <span className="truncate">{label}</span>}
               </Link>
             )
           })}
         </nav>
-        {!collapsed && (
-          <div className="flex min-h-0 flex-1 flex-col px-3 pb-2">
-            <div className="px-3 pt-3 pb-1 text-xs font-medium text-muted-foreground">最近對話</div>
-            <div className="flex-1 overflow-y-auto">
+        {!collapsed ? (
+          <div className="flex min-h-0 flex-1 flex-col px-2">
+            <button
+              type="button"
+              aria-expanded={recentsOpen}
+              onClick={() => setRecentsOpen((value) => !value)}
+              className="group/recents flex h-7 w-fit items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+            >
+              最近對話
+              <ChevronDown className={cn("size-3 opacity-0 transition group-hover/recents:opacity-100", !recentsOpen && "-rotate-90 opacity-100")} aria-hidden="true" />
+            </button>
+            <div className={cn("-mx-2 flex-1 overflow-y-auto px-2 pb-2", !recentsOpen && "hidden")}>
               <ChatSidebarSessions />
             </div>
           </div>
-        )}
-        {collapsed && <div className="flex-1" />}
-        <div className="mt-auto shrink-0 border-t border-sidebar-border p-3">
+        ) : <div className="flex-1" />}
+        <div className={cn("shrink-0 p-2", collapsed && "flex justify-center")}>
           <Link
             href="/settings"
-            aria-label={collapsed ? "設定" : undefined}
+            aria-label="設定"
             title={collapsed ? "設定" : undefined}
             aria-current={isCurrentPath(pathname, "/settings") ? "page" : undefined}
             className={cn(
-              "flex h-10 items-center gap-3 rounded-lg text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              collapsed ? "justify-center px-0" : "px-3",
-              isCurrentPath(pathname, "/settings") ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+              sidebarRow,
+              collapsed ? "size-9 justify-center px-0" : "h-11 px-2",
+              isCurrentPath(pathname, "/settings") ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/70",
             )}
           >
-            <Settings className="size-4" aria-hidden="true" />
-            {!collapsed && "設定"}
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-sidebar-accent-foreground ring-1 ring-sidebar-border">
+              <Settings className="size-4" aria-hidden="true" />
+            </span>
+            {!collapsed && (
+              <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                <span className="truncate font-medium">設定</span>
+                <span className="truncate text-xs text-muted-foreground">模型、外觀</span>
+              </span>
+            )}
           </Link>
         </div>
       </aside>
@@ -111,7 +141,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Settings className="size-4" aria-hidden="true" />
         </Link>
       </header>
-      <main className={cn("min-h-screen pb-20 transition-[margin] md:pb-0", collapsed ? "md:ml-24" : "md:ml-60")}>{children}</main>
+      <main className={cn("min-h-screen pb-20 transition-[margin] md:pb-0", collapsed ? "md:ml-14" : "md:ml-64")}>{children}</main>
 
       <nav
         className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-4 gap-1 rounded-xl border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur md:hidden"

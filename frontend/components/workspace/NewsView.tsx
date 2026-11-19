@@ -1,5 +1,7 @@
 "use client";
 
+import { PageContainer, PageHeader } from "@/components/app-shell/page-layout";
+
 import { useCallback, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -54,14 +56,15 @@ export function NewsView({ docs, onBrowseSources }: { docs: DocumentRead[]; onBr
     };
 
     return (
-        <section className="px-5 py-8 lg:px-10 lg:py-10">
-            <div className="mx-auto max-w-[720px]">
-                <Link href="/workflows" className="mb-5 inline-flex items-center text-xs text-info hover:text-info/80">← 返回 AI 工作流</Link>
+        <PageContainer>
+            <div>
+                <Link href="/workflows" className="mb-5 inline-flex items-center text-xs text-muted-foreground hover:text-foreground">← 返回 AI 工作流</Link>
                 {activeTab === "new" && (
-                    <div className="mb-7 flex items-start gap-3">
-                        <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Newspaper size={20} /></span>
-                        <div><h1 className="text-[24px] font-semibold tracking-tight">生成新聞稿</h1><p className="mt-1 text-sm text-muted-foreground">從來源文件擷取事實，撰寫健保署風格的新聞稿。</p></div>
-                    </div>
+                    <PageHeader
+                        title="生成新聞稿"
+                        description="從來源文件擷取事實，撰寫健保署風格的新聞稿。"
+                        icon={<span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Newspaper size={20} /></span>}
+                    />
                 )}
 
                 <div role="tablist" aria-label="新聞稿作業" className="mb-7 flex gap-6 border-b border-border">
@@ -132,6 +135,6 @@ export function NewsView({ docs, onBrowseSources }: { docs: DocumentRead[]; onBr
                     {activeTab === "settings" && <WorkflowModelSettings workflow="news" />}
                 </div>
             </div>
-        </section>
+        </PageContainer>
     );
 }

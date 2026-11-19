@@ -1,6 +1,7 @@
 "use client";
 
-import { BarChart3, ChevronRight, ClipboardList, Newspaper, Presentation } from "lucide-react";
+import { PageContainer, PageHeader } from "@/components/app-shell/page-layout";
+import { ChevronRight, ClipboardList, Newspaper, Presentation } from "lucide-react";
 import Link from "next/link";
 
 const workflows = [
@@ -28,12 +29,9 @@ const workflows = [
 
 export function WorkflowList() {
     return (
-        <section className="px-5 py-8 lg:px-10 lg:py-12">
-            <div className="mx-auto max-w-2xl">
-                <div className="mb-8">
-                    <h1 className="text-[24px] font-semibold tracking-tight">AI 工作流</h1>
-                    <p className="mt-2 text-sm text-muted-foreground">選擇工作流，以知識庫文件產生結構化輸出。</p>
-                </div>
+        <PageContainer>
+            <PageHeader title="AI 工作流" description="選擇工作流，以知識庫文件產生結構化輸出。" />
+            <div>
                 <div className="divide-y divide-border border-y border-border">
                     {workflows.map((workflow) => {
                         const { label, description, icon: Icon, available } = workflow;
@@ -50,13 +48,13 @@ export function WorkflowList() {
                                     </span>
                                     <span className="mt-1 block text-sm text-muted-foreground">{description}</span>
                                 </span>
-                                {available ? <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" /> : <BarChart3 className="size-4 shrink-0 text-muted-foreground/50" aria-hidden="true" />}
+                                {available ? <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
                             </div>
                         );
                         return available && href ? <Link href={href} key={label}>{content}</Link> : <div key={label} aria-disabled="true">{content}</div>;
                     })}
                 </div>
             </div>
-        </section>
+        </PageContainer>
     );
 }

@@ -1,5 +1,7 @@
 "use client";
 
+import { PageContainer, PageHeader } from "@/components/app-shell/page-layout";
+
 import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -165,21 +167,12 @@ export function SlidesView({
     }
 
     return (
-        <section className="px-5 py-8 lg:px-10 lg:py-10">
-            <div className="mx-auto max-w-[720px]">
-                <div className="mb-7">
-                    <Link href="/workflows" className="mb-5 inline-flex items-center text-xs text-info hover:text-info/80">← 返回 AI 工作流</Link>
-                    {activeTab !== "settings" && (
-                        <>
-                            <h1 className="text-[24px] font-semibold tracking-tight">
-                                {pageHeader.title}
-                            </h1>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                                {pageHeader.subtitle}
-                            </p>
-                        </>
-                    )}
-                </div>
+        <PageContainer>
+            <div>
+                <Link href="/workflows" className="mb-5 inline-flex items-center text-xs text-muted-foreground hover:text-foreground">← 返回 AI 工作流</Link>
+                {activeTab !== "settings" && (
+                    <PageHeader title={pageHeader.title} description={pageHeader.subtitle} />
+                )}
 
                 <div role="tablist" aria-label="簡報作業" className="mb-7 flex gap-6 border-b border-border">
                     <button
@@ -577,6 +570,6 @@ export function SlidesView({
                     {activeTab === "settings" && <WorkflowModelSettings workflow="slides" />}
                 </div>
             </div>
-        </section>
+        </PageContainer>
     );
 }

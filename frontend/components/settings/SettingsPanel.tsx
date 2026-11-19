@@ -83,11 +83,11 @@ export function SettingsPanel({ state, level }: { state: AppSettingsState; level
     );
     const groups: AppSettingGroup[] = data.groups.filter((group) => group.level === level);
     return (
-        <div className="space-y-8">
+        <div className="space-y-10">
             {groups.map((group) => (
-                <section key={group.id} aria-labelledby={`group-${group.id}`} className="space-y-1">
-                    <h2 id={`group-${group.id}`} className="text-base font-semibold">{group.label_zh}</h2>
-                    <div>
+                <section key={group.id} aria-labelledby={`group-${group.id}`} className="space-y-3">
+                    <h2 id={`group-${group.id}`} className="text-lg font-semibold">{group.label_zh}</h2>
+                    <div className="divide-y divide-border rounded-xl border bg-card">
                         {group.settings.map((setting) => (
                             <SettingRow
                                 key={setting.key}

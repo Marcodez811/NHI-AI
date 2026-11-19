@@ -10,10 +10,10 @@ export function NhiBrand({ compact = false }: { compact?: boolean }) {
         alt=""
         width={32}
         height={32}
-        className="size-8 shrink-0 object-contain"
+        className="size-7 shrink-0 object-contain"
         priority
       />
-      {!compact && <span className="truncate text-[15px] font-semibold tracking-tight">健保署 AI</span>}
+      {!compact && <span className="truncate text-[17px] font-semibold tracking-tight">健保署 AI</span>}
     </span>
   )
 }
