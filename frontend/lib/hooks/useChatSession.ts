@@ -18,6 +18,7 @@ import type { ChatAttachment, ChatMessageRecord, ChatSourceRef } from "../api/ch
 import { parseQaCards } from "../api/qa";
 import type { QaCard } from "../api/qa";
 import { useQaSkill } from "./useQaSkill";
+import type { QaContinuation } from "./useQaSkill";
 import type { ChatLimits } from "../api/config";
 import { useChatSessions } from "./useChatSessions";
 import { useClientConfig } from "./useClientConfig";
@@ -79,6 +80,100 @@ function validateFile(file: File, limits: ChatLimits): string | null {
  * The session is created lazily on first send/attach, then the caller
  * navigates to `/chat/<id>` via the router replace triggered here.
  */
+/** Stops the thinking timer, recording how long it ran (at least 1 s). */
+function finishReasoning(turn: ChatTurn): ChatTurn {
+    return {
+        ...turn,
+        reasoningStreaming: false,
+        reasoningDurationSeconds: turn.reasoningStartedAt !== undefined && turn.reasoningDurationSeconds === undefined
+            ? Math.max(1, Math.round((Date.now() - turn.reasoningStartedAt) / 1000))
+            : turn.reasoningDurationSeconds,
+    };
+}
+
+/** Marks the oldest unfinished step of `tool` done, or appends a finished step if none is open. */
+function finishToolStep(turn: ChatTurn, tool: string, label: string): ChatTurn {
+    const steps = turn.toolSteps ?? [];
+    const index = steps.findIndex((step) => step.tool === tool && !step.done);
+    if (index === -1) return { ...turn, receivedEvent: true, toolSteps: [...steps, { tool, label, done: true }] };
+    const next = steps.slice();
+    next[index] = { ...next[index], label, done: true };
+    return { ...turn, receivedEvent: true, toolSteps: next };
+}
+
+type TurnInput = { content: string; attachmentIds: string[]; displayText: string | null };
+
+/**
+ * What a turn sends, or null when it can't start. A continuation (automatic
+ * follow-up after a card confirm) ignores the composer and pending uploads.
+ */
+function turnInput(
+    continuation: QaContinuation | undefined,
+    draft: string,
+    attachments: ComposerAttachment[],
+    blockers: { busy: boolean; uploadsPending: boolean },
+): TurnInput | null {
+    if (blockers.busy) return null;
+    if (continuation) return { content: continuation.instruction, attachmentIds: [], displayText: continuation.label };
+    const content = draft.trim();
+    if (!content || blockers.uploadsPending) return null;
+    return { content, attachmentIds: readyAttachmentIds(attachments), displayText: null };
+}
+
+function messageRequest(input: TurnInput, model: string | null | undefined) {
+    return {
+        content: input.content,
+        attachment_ids: input.attachmentIds,
+        model: model ?? "",
+        ...(input.displayText ? { display_text: input.displayText } : {}),
+    };
+}
+
+/** Ids of the composer attachments that finished uploading. */
+function readyAttachmentIds(attachments: ComposerAttachment[]): string[] {
+    return attachments
+        .filter((item): item is ComposerAttachment & { attachment: ChatAttachment } =>
+            item.status === "ready" && Boolean(item.attachment))
+        .map((item) => item.attachment.id);
+}
+
+/** The optimistic user turn and the pending assistant turn that a send appends. */
+function newTurnPair(content: string, attachmentIds: string[], displayText: string | null): [ChatTurn, ChatTurn] {
+    const userLocalId = newLocalId("user");
+    const assistantLocalId = newLocalId("assistant");
+    const now = new Date().toISOString();
+    return [
+        {
+            id: userLocalId,
+            localKey: userLocalId,
+            role: "user",
+            content,
+            attachment_ids: attachmentIds,
+            display_text: displayText,
+            status: "complete",
+            created_at: now,
+        },
+        {
+            id: assistantLocalId,
+            localKey: assistantLocalId,
+            role: "assistant",
+            content: "",
+            status: "complete",
+            created_at: now,
+            toolSteps: [],
+            pending: true,
+            // Thinking starts when the message is sent, not when the first
+            // reasoning chunk arrives: summaries often land in one burst just
+            // before the answer, which would otherwise read as 0 seconds.
+            reasoningStartedAt: Date.now(),
+            reasoningStreaming: false,
+            answerStarted: false,
+            compacting: false,
+            receivedEvent: false,
+        },
+    ];
+}
+
 export function useChatSession(sessionId: string | null, defaultModel?: string) {
     const router = useRouter();
     const sessionsCtx = useChatSessions();
@@ -166,7 +261,10 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         return created.id;
     }, [model, router, sessionsCtx]);
 
-    const qa = useQaSkill(activeSessionId, ensureSession);
+    // Filled in below `startTurn`; confirms on a card continue the flow through it.
+    const continueRef = useRef<((continuation: QaContinuation) => void) | null>(null);
+    const onQaConfirmed = useCallback((continuation: QaContinuation) => continueRef.current?.(continuation), []);
+    const qa = useQaSkill(activeSessionId, ensureSession, onQaConfirmed);
     qaRef.current = qa;
     const refreshQa = qa.refresh;
 
@@ -254,16 +352,11 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
 
     const uploadsPending = attachments.some((item) => item.status === "uploading");
 
-    const send = useCallback(async () => {
-        const content = draft.trim();
-        if (!content || busy || uploadsPending) return;
-        const attachmentIds = attachments
-            .filter((item): item is ComposerAttachment & { attachment: ChatAttachment } =>
-                item.status === "ready" && Boolean(item.attachment))
-            .map((item) => item.attachment.id);
+    // Synchronous guard: `busy` state lags a render behind, so two quick triggers could both pass it.
+    const turnRunning = useRef(false);
 
-        setSendError(null);
-        setBusy(true);
+    /** Empties the composer after a send, remembering the sent attachments for their chips. */
+    const clearComposer = useCallback((attachmentIds: string[]) => {
         setDraft("");
         const sentAttachments = attachments
             .map((item) => item.attachment)
@@ -275,6 +368,39 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
             }));
         }
         setAttachments([]);
+    }, [attachments]);
+
+    /** After a compacting turn: fetch where the summary ends and adopt the persisted message ids. */
+    const syncCompactionMarker = useCallback(async (targetId: string) => {
+        try {
+            const detail = await fetchChatSession(targetId);
+            if (activeSessionId.current !== targetId) return;
+            setCompactedThroughMessageId(detail.compacted_through_message_id ?? null);
+            // Earlier locally echoed user turns need their persisted ids so
+            // the compaction divider can sit beside them without a reload.
+            setMessages((items) => items.length === detail.messages.length
+                && items.every((item, index) =>
+                    item.role === detail.messages[index].role && item.content === detail.messages[index].content)
+                ? items.map((item, index) => ({ ...item, id: detail.messages[index].id }))
+                : items);
+        } catch {
+            // The stream has finished; a failed marker refresh must not discard its answer.
+        }
+    }, []);
+
+    /**
+     * Runs one turn. A `continuation` is an automatic follow-up (e.g. after a card confirm):
+     * it never touches the composer draft or attachments and renders as a status line.
+     */
+    const startTurn = useCallback(async (continuation?: QaContinuation) => {
+        const input = turnInput(continuation, draft, attachments, { busy: busy || turnRunning.current, uploadsPending });
+        if (!input) return;
+        const { content, attachmentIds, displayText } = input;
+        turnRunning.current = true;
+
+        setSendError(null);
+        setBusy(true);
+        if (!continuation) clearComposer(attachmentIds);
 
         let targetId: string;
         try {
@@ -282,38 +408,12 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         } catch (caught) {
             setSendError(errorText(caught));
             setBusy(false);
+            turnRunning.current = false;
             return;
         }
 
-        const userLocalId = newLocalId("user");
-        const userTurn: ChatTurn = {
-            id: userLocalId,
-            localKey: userLocalId,
-            role: "user",
-            content,
-            attachment_ids: attachmentIds,
-            status: "complete",
-            created_at: new Date().toISOString(),
-        };
-        const assistantLocalId = newLocalId("assistant");
-        const assistantTurn: ChatTurn = {
-            id: assistantLocalId,
-            localKey: assistantLocalId,
-            role: "assistant",
-            content: "",
-            status: "complete",
-            created_at: new Date().toISOString(),
-            toolSteps: [],
-            pending: true,
-            // Thinking starts when the message is sent, not when the first
-            // reasoning chunk arrives: summaries often land in one burst just
-            // before the answer, which would otherwise read as 0 seconds.
-            reasoningStartedAt: Date.now(),
-            reasoningStreaming: false,
-            answerStarted: false,
-            compacting: false,
-            receivedEvent: false,
-        };
+        const [userTurn, assistantTurn] = newTurnPair(content, attachmentIds, displayText);
+        const assistantLocalId = assistantTurn.localKey;
         setMessages((items) => [...items, userTurn, assistantTurn]);
 
         // Matches by `localKey`, which never changes, because `onMessageStart`
@@ -321,13 +421,6 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         const updateAssistant = (update: (turn: ChatTurn) => ChatTurn) => {
             setMessages((items) => items.map((item) => (item.localKey === assistantLocalId ? update(item) : item)));
         };
-        const finishReasoning = (turn: ChatTurn): ChatTurn => ({
-            ...turn,
-            reasoningStreaming: false,
-            reasoningDurationSeconds: turn.reasoningStartedAt !== undefined && turn.reasoningDurationSeconds === undefined
-                ? Math.max(1, Math.round((Date.now() - turn.reasoningStartedAt) / 1000))
-                : turn.reasoningDurationSeconds,
-        });
 
         const controller = new AbortController();
         controllerRef.current = controller;
@@ -336,7 +429,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
         try {
             await sendChatMessage(
                 targetId,
-                { content, attachment_ids: attachmentIds, model: model ?? "" },
+                messageRequest(input, model),
                 {
                     onMessageStart: (messageId) => updateAssistant((turn) => ({ ...turn, id: messageId, receivedEvent: true })),
                     onReasoningDelta: (text) => updateAssistant((turn) => ({
@@ -362,14 +455,7 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
                         receivedEvent: true,
                         toolSteps: [...(turn.toolSteps ?? []), { tool, label, done: false }],
                     })),
-                    onToolFinished: (tool, label) => updateAssistant((turn) => {
-                        const steps = turn.toolSteps ?? [];
-                        const index = steps.findIndex((step) => step.tool === tool && !step.done);
-                        if (index === -1) return { ...turn, receivedEvent: true, toolSteps: [...steps, { tool, label, done: true }] };
-                        const next = steps.slice();
-                        next[index] = { ...next[index], label, done: true };
-                        return { ...turn, receivedEvent: true, toolSteps: next };
-                    }),
+                    onToolFinished: (tool, label) => updateAssistant((turn) => finishToolStep(turn, tool, label)),
                     onSkillCard: (card: QaCard) => {
                         updateAssistant((turn) => ({ ...turn, receivedEvent: true, cards: [...(turn.cards ?? []), card] }));
                         void refreshQa();
@@ -399,27 +485,15 @@ export function useChatSession(sessionId: string | null, defaultModel?: string) 
             }
         } finally {
             controllerRef.current = null;
+            turnRunning.current = false;
             setBusy(false);
             void refreshQa();
         }
-        if (compacted) {
-            try {
-                const detail = await fetchChatSession(targetId);
-                if (activeSessionId.current === targetId) {
-                    setCompactedThroughMessageId(detail.compacted_through_message_id ?? null);
-                    // Earlier locally echoed user turns need their persisted ids so
-                    // the compaction divider can sit beside them without a reload.
-                    setMessages((items) => items.length === detail.messages.length
-                        && items.every((item, index) =>
-                            item.role === detail.messages[index].role && item.content === detail.messages[index].content)
-                        ? items.map((item, index) => ({ ...item, id: detail.messages[index].id }))
-                        : items);
-                }
-            } catch {
-                // The stream has finished; a failed marker refresh must not discard its answer.
-            }
-        }
-    }, [attachments, busy, draft, ensureSession, model, refreshQa, sessionsCtx, uploadsPending]);
+        if (compacted) await syncCompactionMarker(targetId);
+    }, [attachments, busy, clearComposer, draft, ensureSession, model, refreshQa, sessionsCtx, syncCompactionMarker, uploadsPending]);
+
+    const send = useCallback(() => startTurn(), [startTurn]);
+    continueRef.current = (continuation) => { void startTurn(continuation); };
 
     const stop = useCallback(() => {
         controllerRef.current?.abort();

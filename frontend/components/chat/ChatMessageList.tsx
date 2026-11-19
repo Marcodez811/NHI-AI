@@ -12,6 +12,7 @@ import type { QaController } from "./qa/QaCards";
 const TOOL_NAMES: Record<string, { action: string; unit: string }> = {
     search_knowledge_base: { action: "搜尋知識庫", unit: "次" },
     read_attachment: { action: "讀取附件", unit: "個" },
+    find_in_attachment: { action: "搜尋附件", unit: "次" },
     open_attachment: { action: "重新開啟附件", unit: "個" },
 };
 
@@ -166,8 +167,10 @@ export function ChatMessageList({ messages, compactedThroughMessageId, attachmen
         <div className="flex w-full min-w-0 flex-col gap-10">
             {messages.map((message) => (
                 <Fragment key={message.localKey}>
-                    <div className={`chat-arrival flex min-w-0 ${message.role === "user" ? "justify-end" : "justify-start"}`}>
-                        {message.role === "user" ? (
+                    <div className={`chat-arrival flex min-w-0 ${message.display_text ? "justify-center -mb-6" : message.role === "user" ? "justify-end" : "justify-start"}`}>
+                        {message.role === "user" && message.display_text ? (
+                            <div role="status" data-skill-action="true" className="text-xs text-muted-foreground">{message.display_text}</div>
+                        ) : message.role === "user" ? (
                             <div className="flex min-w-0 max-w-[85%] flex-col items-end sm:max-w-[70%]">
                                 <MessageAttachments ids={message.attachment_ids} lookup={attachmentLookup} sessionId={sessionId} />
                                 <div className="min-w-0 rounded-3xl bg-primary/10 px-4 py-2.5 text-base leading-relaxed text-foreground">

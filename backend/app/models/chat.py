@@ -88,6 +88,9 @@ class ChatMessage(SQLModel, table=True):
     reasoning: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     # Assistant messages only: skill cards ``[{kind, data}]`` shown under the text.
     cards: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    # User messages only: set for an automatic skill continuation (e.g. after a card confirm).
+    # ``content`` is what the model sees; this short line is what the UI shows instead of a bubble.
+    display_text: str | None = Field(default=None, max_length=120)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
 
 
@@ -320,6 +323,7 @@ class ChatMessageRead(BaseModel):
     usage: dict[str, int] | None
     reasoning: str | None
     cards: list[dict[str, Any]] = PydanticField(default_factory=list)
+    display_text: str | None = None
     created_at: datetime
 
 
@@ -341,6 +345,8 @@ class ChatMessageCreate(BaseModel):
     content: str = PydanticField(min_length=1)
     attachment_ids: list[UUID] = PydanticField(default_factory=list)
     model: str
+    # Marks an automatic continuation turn; shown as a muted status line instead of a user bubble.
+    display_text: str | None = PydanticField(default=None, max_length=120)
 
     @field_validator("content")
     @classmethod

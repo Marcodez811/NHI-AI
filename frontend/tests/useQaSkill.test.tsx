@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
     fetchChatSession: vi.fn(),
     linkChatDocuments: vi.fn(),
     unlinkChatDocument: vi.fn(),
+    sendChatMessage: vi.fn(),
 }));
 vi.mock("../lib/api/chat", async (importOriginal) => ({
     ...(await importOriginal<typeof import("../lib/api/chat")>()),
@@ -21,6 +22,9 @@ const qaApi = vi.hoisted(() => ({
     putChatSkill: vi.fn(),
     fetchQaWorkspace: vi.fn(),
     confirmQaDocuments: vi.fn(),
+    putQaQuestions: vi.fn(),
+    putQaOutline: vi.fn(),
+    confirmQaOutline: vi.fn(),
 }));
 vi.mock("../lib/api/qa", async (importOriginal) => ({
     ...(await importOriginal<typeof import("../lib/api/qa")>()),
@@ -82,5 +86,59 @@ describe("useChatSession skill mode", () => {
         await act(async () => { await result.current.qa.disable(); });
         expect(qaApi.putChatSkill).toHaveBeenCalledWith("s1", null);
         expect(result.current.qa.skill).toBeNull();
+    });
+
+    describe("auto-continue after a confirm", () => {
+        const setup = async () => {
+            api.fetchChatSession.mockResolvedValue(detail({ skill: "legislative_qa" }));
+            qaApi.fetchQaWorkspace.mockResolvedValue(workspace);
+            const hook = renderHook(() => useChatSession("s1"));
+            await waitFor(() => expect(hook.result.current.qa.skill).toBe("legislative_qa"));
+            return hook;
+        };
+
+        it("sends a hidden continuation turn after confirming the questions", async () => {
+            api.sendChatMessage.mockResolvedValue(undefined);
+            qaApi.putQaQuestions.mockResolvedValue(workspace);
+            const { result } = await setup();
+            await act(async () => { await result.current.qa.saveQuestions([{ text: "題" }], true); });
+            await waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(1));
+            expect(api.sendChatMessage.mock.calls[0][1]).toMatchObject({
+                content: "使用者已在卡片上確認了題目清單，請進行下一個階段。",
+                display_text: "✓ 已確認題目清單",
+                attachment_ids: [],
+            });
+            expect(result.current.messages[0]).toMatchObject({ role: "user", display_text: "✓ 已確認題目清單" });
+        });
+
+        it("labels outline confirms and documents confirms", async () => {
+            api.sendChatMessage.mockResolvedValue(undefined);
+            qaApi.confirmQaOutline.mockResolvedValue(workspace);
+            qaApi.confirmQaDocuments.mockResolvedValue(workspace);
+            const { result } = await setup();
+            await act(async () => { await result.current.qa.confirmOutline(2); });
+            await waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(1));
+            expect(api.sendChatMessage.mock.calls[0][1].display_text).toBe("✓ 已確認第 2 題大綱");
+            await act(async () => { await result.current.qa.confirmDocuments(); });
+            await waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(2));
+            expect(api.sendChatMessage.mock.calls[1][1].display_text).toBe("✓ 已確認參考資料");
+        });
+
+        it("does not continue on edits and never starts a second turn while streaming", async () => {
+            let finish: () => void = () => {};
+            api.sendChatMessage.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+            qaApi.putQaQuestions.mockResolvedValue(workspace);
+            qaApi.putQaOutline.mockResolvedValue(workspace);
+            qaApi.confirmQaOutline.mockResolvedValue(workspace);
+            const { result } = await setup();
+            await act(async () => { await result.current.qa.saveQuestions([{ text: "題" }], false); });
+            await act(async () => { await result.current.qa.saveOutline(1, { short: ["a"], detail: [], dispute_requested: false, confirm: false }); });
+            expect(api.sendChatMessage).not.toHaveBeenCalled();
+            await act(async () => { await result.current.qa.confirmOutline(1); });
+            await waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(1));
+            await act(async () => { await result.current.qa.confirmOutline(2); });
+            expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+            await act(async () => { finish(); });
+        });
     });
 });

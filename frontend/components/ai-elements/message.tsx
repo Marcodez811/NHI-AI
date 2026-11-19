@@ -29,6 +29,7 @@ import {
   useState,
 } from "react";
 import { Streamdown } from "streamdown";
+import { escapeUnderscores } from "@/lib/escapeUnderscores";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"];
@@ -324,7 +325,7 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 const streamdownPlugins = { cjk, code, math, mermaid };
 
 export const MessageResponse = memo(
-  ({ className, ...props }: MessageResponseProps) => (
+  ({ className, children, ...props }: MessageResponseProps) => (
     <Streamdown
       className={cn(
         "w-full min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
@@ -332,7 +333,9 @@ export const MessageResponse = memo(
       )}
       plugins={streamdownPlugins}
       {...props}
-    />
+    >
+      {typeof children === "string" ? escapeUnderscores(children) : children}
+    </Streamdown>
   ),
   (prevProps, nextProps) =>
     prevProps.children === nextProps.children &&

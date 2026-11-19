@@ -167,9 +167,9 @@ function QuestionsCard({ data, live, readOnly, qa }: {
                     ))}
                 </ol>
             )}
-            {!readOnly && !editing && (
+            {!readOnly && !editing && !confirmed && (
                 <div className="flex flex-wrap gap-2">
-                    <Button type="button" size="sm" disabled={busy || confirmed || !items.length}
+                    <Button type="button" size="sm" disabled={busy || !items.length}
                         onClick={() => void run(() => qa.saveQuestions(payload(items), true))}>
                         確認
                     </Button>
@@ -195,6 +195,9 @@ function DocumentsCard({ data, live, readOnly, qa, onUploadFiles }: {
     const fileInput = useRef<HTMLInputElement>(null);
     const { busy, error, run } = useRun();
     const candidateIds = new Set(data.items.flatMap((item) => item.candidates.map((c) => c.id)));
+    const questionsOf = new Map<string, number[]>();
+    data.items.forEach((item) => item.candidates.forEach((c) =>
+        questionsOf.set(c.id, [...(questionsOf.get(c.id) ?? []), item.question_no])));
     const uploads = qa.sessionAttachments.filter((item) => !candidateIds.has(item.id));
 
     return (
@@ -213,6 +216,11 @@ function DocumentsCard({ data, live, readOnly, qa, onUploadFiles }: {
                                     className="mt-0.5" />
                                 <span className="min-w-0">
                                     <span className="block break-words font-medium">{candidate.name}</span>
+                                    {(questionsOf.get(candidate.id) ?? []).length > 1 && (
+                                        <span data-shared-document="true" className="block text-xs text-muted-foreground">
+                                            同一份資料，也出現在第 {(questionsOf.get(candidate.id) ?? []).filter((no) => no !== item.question_no).join("、")} 題（勾選會同時套用）
+                                        </span>
+                                    )}
                                     {candidate.snippet && (
                                         <span className="line-clamp-2 break-words text-xs text-muted-foreground">{candidate.snippet}</span>
                                     )}
@@ -232,9 +240,9 @@ function DocumentsCard({ data, live, readOnly, qa, onUploadFiles }: {
                     ))}
                 </div>
             )}
-            {!readOnly && (
+            {!readOnly && !confirmed && (
                 <div className="flex flex-wrap gap-2">
-                    <Button type="button" variant="outline" size="sm" disabled={confirmed || busy || !onUploadFiles}
+                    <Button type="button" variant="outline" size="sm" disabled={busy || !onUploadFiles}
                         onClick={() => fileInput.current?.click()}>
                         <Upload /> 上傳檔案
                     </Button>
@@ -245,7 +253,7 @@ function DocumentsCard({ data, live, readOnly, qa, onUploadFiles }: {
                             if (files.length) void run(async () => { await onUploadFiles?.(files); });
                             event.target.value = "";
                         }} />
-                    <Button type="button" size="sm" disabled={busy || confirmed || qa.sessionAttachments.length === 0}
+                    <Button type="button" size="sm" disabled={busy || qa.sessionAttachments.length === 0}
                         onClick={() => void run(() => qa.confirmDocuments())}>
                         確認使用這些資料
                     </Button>
@@ -323,6 +331,14 @@ function OutlineView({ outline }: { outline: QaOutline }) {
                     ))}
                 </div>
             </div>
+            {outline.notes && outline.notes.length > 0 && (
+                <div className="rounded-lg bg-muted/50 p-3">
+                    <div className="mb-1 text-xs text-muted-foreground">備註／待補（不會放入答詢內容）</div>
+                    <ul className="list-disc space-y-0.5 pl-5 text-sm text-muted-foreground">
+                        {outline.notes.map((note, index) => <li key={index} className="break-words">{note}</li>)}
+                    </ul>
+                </div>
+            )}
         </div>
     );
 }
@@ -333,6 +349,7 @@ function OutlineEditor({ no, outline, qa, onDone }: {
     no: number; outline: QaOutline; qa: QaController; onDone: () => void;
 }) {
     const [short, setShort] = useState(outline.short.join("\n"));
+    const [notes, setNotes] = useState((outline.notes ?? []).join("\n"));
     const [dispute, setDispute] = useState(outline.dispute_requested);
     const [sections, setSections] = useState(outline.detail.map((s) => ({ title: s.title, points: s.points.join("\n") })));
     const { busy, error, run } = useRun();
@@ -343,6 +360,11 @@ function OutlineEditor({ no, outline, qa, onDone }: {
             <label className="flex flex-col gap-1 text-xs font-semibold text-muted-foreground">
                 簡答要點（一行一點）
                 <Textarea value={short} rows={4} onChange={(event) => setShort(event.target.value)}
+                    className="text-sm font-normal text-foreground" />
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-semibold text-muted-foreground">
+                備註／待補（一行一點，不會放入答詢內容）
+                <Textarea value={notes} rows={2} onChange={(event) => setNotes(event.target.value)}
                     className="text-sm font-normal text-foreground" />
             </label>
             <div className="flex items-center gap-2 text-sm">
@@ -374,6 +396,7 @@ function OutlineEditor({ no, outline, qa, onDone }: {
                             short: lines(short),
                             detail: sections.filter((s) => s.title.trim()).map((s) => ({ title: s.title.trim(), points: lines(s.points) })),
                             dispute_requested: dispute,
+                            notes: lines(notes),
                             confirm: false,
                         }));
                         if (ok) onDone();
@@ -407,10 +430,12 @@ function OutlineCard({ data, live, readOnly, qa, showConfirmAll }: {
             )}
             {!readOnly && !editing && (
                 <div className="flex flex-wrap gap-2">
-                    <Button type="button" size="sm" disabled={busy || outline.confirmed}
-                        onClick={() => void run(() => qa.confirmOutline(no))}>
-                        確認
-                    </Button>
+                    {!outline.confirmed && (
+                        <Button type="button" size="sm" disabled={busy}
+                            onClick={() => void run(() => qa.confirmOutline(no))}>
+                            確認
+                        </Button>
+                    )}
                     <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setEditing(true)}>修改</Button>
                     {showConfirmAll && allHave && !allConfirmed && (
                         <Button type="button" variant="secondary" size="sm" disabled={busy}

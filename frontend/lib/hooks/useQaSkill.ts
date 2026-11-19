@@ -21,7 +21,14 @@ import type { QaOutlineInput, QaQuestionInput, QaWorkspace } from "../api/qa";
  * workspace, and the session's attachments (candidate ticks read from these).
  * Card actions throw `ApiError`; the card that triggered one shows its message.
  */
-export function useQaSkill(activeSessionId: MutableRefObject<string | null>, ensureSession: () => Promise<string>) {
+export type QaContinuation = { label: string; instruction: string };
+
+export function useQaSkill(
+    activeSessionId: MutableRefObject<string | null>,
+    ensureSession: () => Promise<string>,
+    /** Called after a confirm succeeded, so the conversation can move on to the next stage. */
+    onConfirmed?: (continuation: QaContinuation) => void,
+) {
     const [skill, setSkill] = useState<string | null>(null);
     const [workspace, setWorkspace] = useState<QaWorkspace | null>(null);
     const [sessionAttachments, setSessionAttachments] = useState<ChatAttachment[]>([]);
@@ -79,12 +86,25 @@ export function useQaSkill(activeSessionId: MutableRefObject<string | null>, ens
         setWorkspace(await run(id));
     }, [activeSessionId]);
 
-    const saveQuestions = useCallback((items: QaQuestionInput[], confirm = true) =>
-        act((id) => putQaQuestions(id, items, confirm)), [act]);
+    const saveQuestions = useCallback(async (items: QaQuestionInput[], confirm = true) => {
+        await act((id) => putQaQuestions(id, items, confirm));
+        if (confirm) {
+            onConfirmed?.({ label: "✓ 已確認題目清單", instruction: "使用者已在卡片上確認了題目清單，請進行下一個階段。" });
+        }
+    }, [act, onConfirmed]);
     const saveOutline = useCallback((no: number, body: QaOutlineInput) =>
         act((id) => putQaOutline(id, no, body)), [act]);
-    const confirmOutline = useCallback((no: number) => act((id) => confirmQaOutline(id, no)), [act]);
-    const confirmAllOutlines = useCallback(() => act((id) => confirmAllQaOutlines(id)), [act]);
+    const confirmOutline = useCallback(async (no: number) => {
+        await act((id) => confirmQaOutline(id, no));
+        onConfirmed?.({
+            label: `✓ 已確認第 ${no} 題大綱`,
+            instruction: `使用者已在卡片上確認了第 ${no} 題的答題大綱，請進行下一步（若還有未確認的題目，請提醒使用者）。`,
+        });
+    }, [act, onConfirmed]);
+    const confirmAllOutlines = useCallback(async () => {
+        await act((id) => confirmAllQaOutlines(id));
+        onConfirmed?.({ label: "✓ 已確認全部大綱", instruction: "使用者已在卡片上確認了全部題目的答題大綱，請進行下一步。" });
+    }, [act, onConfirmed]);
 
     /** Confirms the kept session attachments (uploads and knowledge-base documents alike). */
     const confirmDocuments = useCallback(async () => {
@@ -92,7 +112,8 @@ export function useQaSkill(activeSessionId: MutableRefObject<string | null>, ens
         if (!id) return;
         const ids = sessionAttachments.map((item) => item.id);
         setWorkspace(await confirmQaDocuments(id, ids));
-    }, [activeSessionId, sessionAttachments]);
+        onConfirmed?.({ label: "✓ 已確認參考資料", instruction: "使用者已在卡片上確認了參考資料，請進行下一個階段。" });
+    }, [activeSessionId, onConfirmed, sessionAttachments]);
 
     /** Ticks (attach) or unticks (unlink) one knowledge-base candidate. */
     const toggleDocument = useCallback(async (documentId: string, attach: boolean) => {

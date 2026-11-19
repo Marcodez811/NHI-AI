@@ -533,7 +533,10 @@ async def update_qa_outline(
     try:
         qa.apply_outline(
             workspace, question_no,
-            qa.OutlineInput(short=payload.short, detail=payload.detail, dispute_requested=payload.dispute_requested),
+            qa.OutlineInput(
+                short=payload.short, detail=payload.detail,
+                dispute_requested=payload.dispute_requested, notes=payload.notes,
+            ),
             confirmed=payload.confirm,
         )
     except qa.QaError as error:
@@ -604,6 +607,7 @@ async def send_chat_message(
             role=ChatMessageRole.USER.value,
             content=payload.content,
             attachment_ids=[str(item) for item in payload.attachment_ids],
+            display_text=payload.display_text,
         )
     )
     message_id = uuid4()

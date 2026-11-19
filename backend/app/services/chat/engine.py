@@ -53,11 +53,15 @@ from app.services.documents.repository import DocumentRepository
 
 SEARCH_TOOL_NAME = "search_knowledge_base"
 READ_ATTACHMENT_TOOL_NAME = "read_attachment"
+FIND_IN_ATTACHMENT_TOOL_NAME = "find_in_attachment"
 INLINE_USER_MESSAGE_WINDOW = 3
-# Replaces an expired PDF or image in replayed history. There is no tool to
-# reopen it: the file comes back only when the user names it in a new message,
-# so the model is told to ask for exactly that.
-EXPIRED_ATTACHMENT_NOTE = "\n（附件：{name}，已於先前訊息提供，目前未附上；如需再次查看，請使用者在新訊息中提及此檔名）"
+# Replaces an expired PDF or image in replayed history. A PDF's text stays
+# readable through read_attachment; an image only returns when the user names
+# it in a new message.
+EXPIRED_ATTACHMENT_NOTE = (
+    "\n（附件：{name}，已於先前訊息提供，目前未附上；PDF 可用 read_attachment 讀取文字內容，"
+    "圖片如需再次查看，請使用者在新訊息中提及此檔名）"
+)
 _INTERNAL_ID = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
@@ -77,8 +81,8 @@ TURN_CONTEXT_CLOSE = "〈/系統提供的對話背景〉"
 
 BASE_INSTRUCTIONS = (
     "你是健保署的 AI 助理。回答必須根據 search_knowledge_base 工具找到的知識庫資料，"
-    "或這個對話中的附件（文件可用 read_attachment 讀取）；如需再次查看先前的 PDF 或圖片，"
-    "請使用者在新訊息提及附件名稱。禁止臆測或使用未經查證的內部知識。"
+    "或這個對話中的附件（文件與 PDF 可用 read_attachment 讀取文字內容）；如需再次查看先前的圖片，"
+    "請使用者在新訊息提及圖片名稱。禁止臆測或使用未經查證的內部知識。"
     "在答案中以【文件名稱】的格式標註引用來源；若知識庫與附件都沒有相關資料，請明確說明找不到答案。"
     "絕對不要透露任何內部識別碼、檔案路徑或系統代碼，使用者只能看到文件與附件的名稱。"
     "請一律使用繁體中文回答。"
@@ -148,6 +152,9 @@ def _tool_started_label(tool_name: str, item: Any, attachment_names: set[str]) -
     if tool_name == READ_ATTACHMENT_TOOL_NAME:
         name = arguments.get("name")
         return f"讀取附件：{name}" if name in attachment_names else "讀取附件"
+    if tool_name == FIND_IN_ATTACHMENT_TOOL_NAME:
+        name = arguments.get("name")
+        return f"搜尋附件：{name}" if name in attachment_names else "搜尋附件"
     if tool_name in qa_skill.SKILL_TOOL_LABELS:
         return qa_skill.SKILL_TOOL_LABELS[tool_name]
     return "執行工具"
@@ -239,10 +246,76 @@ def _attachment_note(attachment: ChatAttachmentView) -> str:
     if attachment.kind == ChatAttachmentKind.IMAGE.value:
         return "圖片"
     if _is_pdf(attachment):
-        return "PDF，最近訊息可直接查看，較早附件請在新訊息提及名稱"
+        return "PDF，可用 read_attachment 讀取文字內容（掃描檔可能沒有文字）"
     if _has_readable_text(attachment):
         return "文件，可用 read_attachment 讀取內容"
     return "文件，沒有可讀取的文字內容"
+
+
+def find_passages(text: str, query: str, *, max_hits: int = 8, window: int = 400) -> list[tuple[int, str]]:
+    """Whitespace-insensitive keyword search: ``[(offset, passage)]``, best first.
+
+    PDF text often has stray spaces ("113 年"), so matching ignores whitespace
+    in both the text and the keywords. Passages are ranked by how many distinct
+    keywords they contain, then by position; overlapping passages are merged.
+    """
+
+    terms = [re.sub(r"\s+", "", term) for term in query.split()]
+    terms = [term for term in dict.fromkeys(terms) if term]
+    if not terms:
+        return []
+    index = [i for i, ch in enumerate(text) if not ch.isspace()]
+    compact = "".join(text[i] for i in index)
+    positions = sorted({(m.start(), term) for term in terms for m in re.finditer(re.escape(term), compact)})
+    scored: list[tuple[int, int, int]] = []  # (-distinct terms, start, end) in original offsets
+    for pos, _term in positions:
+        start = index[pos]
+        lo, hi = max(0, start - window // 2), min(len(text), start + window // 2)
+        chunk = re.sub(r"\s+", "", text[lo:hi])
+        scored.append((-sum(1 for term in terms if term in chunk), lo, hi))
+    scored.sort()
+    chosen: list[tuple[int, int]] = []
+    for _score, lo, hi in scored:
+        if any(lo < c_hi and hi > c_lo for c_lo, c_hi in chosen):
+            continue
+        chosen.append((lo, hi))
+        if len(chosen) >= max_hits:
+            break
+    return [_render_passage(text, lo, hi) for lo, hi in chosen]
+
+
+_PAGE_MARKER = re.compile(r"— 第 (\d+) 頁 —")
+_TABLE_SEPARATOR = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$", re.MULTILINE)
+
+
+def _render_passage(text: str, lo: int, hi: int) -> tuple[int, str]:
+    """Snap a hit window to whole lines and keep the line breaks.
+
+    Extracted PDFs hold tables as Markdown rows, so a hit inside a table gets
+    that table's header row (and the page number) prepended; without it the
+    numbers can't be told apart by column.
+    """
+
+    lo = text.rfind("\n", 0, lo) + 1
+    end = text.find("\n", hi)
+    hi = len(text) if end == -1 else end
+    body = "\n".join(re.sub(r"[ \t　]+", " ", line).strip() for line in text[lo:hi].splitlines())
+    body = re.sub(r"\n{2,}", "\n", body).strip()
+    prefix: list[str] = []
+    pages = list(_PAGE_MARKER.finditer(text, 0, lo + 1))
+    if pages:
+        prefix.append(f"（第 {pages[-1].group(1)} 頁）")
+    if text[lo:lo + 1] == "|":
+        separators = list(_TABLE_SEPARATOR.finditer(text, 0, lo))
+        if separators:
+            separator = separators[-1]
+            between = text[separator.end():lo]
+            if "\n\n" not in between and all(line.startswith("|") for line in between.split("\n") if line):
+                header_start = text.rfind("\n", 0, max(0, separator.start() - 1)) + 1
+                header = text[header_start:separator.start()].strip()
+                if header.startswith("|") and not body.startswith(header):
+                    prefix.extend((header, separator.group(0).strip()))
+    return lo, "\n".join((*prefix, body))
 
 
 def _build_turn_context(
@@ -285,7 +358,7 @@ async def _message_to_input_item(
     earlier tool calls are not replayed). Image attachments sent with a user
     turn are attached only while eligible. Older ones use a stable text
     placeholder. The provider reads a PDF natively, scanned pages included;
-    DOCX/TXT/MD are read through ``read_attachment`` instead.
+    DOCX/TXT/MD (and PDF text) are read through ``read_attachment``.
     """
 
     role = "user" if message.role == ChatMessageRole.USER.value else "assistant"
@@ -485,20 +558,30 @@ class AgentsSdkChatEngine:
         except Exception:
             return []
         hits: list[dict[str, Any]] = []
+        documents: dict[UUID, Any] = {}
         for result in page.data:
             try:
                 document_id = UUID(str((result.attributes or {}).get("document_id")))
             except ValueError:
                 continue
-            document = await self._document_repository.get_document(document_id)
+            if document_id not in documents:
+                documents[document_id] = await self._document_repository.get_document(document_id)
+            document = documents[document_id]
             if document is None or document.status != DocumentStatus.READY.value or not document.retrieval_enabled:
                 continue
             snippet = " ".join(part.text for part in result.content if getattr(part, "text", None)).strip()
-            hits.append({"document_id": document_id, "name": document.display_name, "snippet": snippet})
+            hits.append(
+                {
+                    "document_id": document_id,
+                    "name": document.display_name,
+                    "snippet": snippet,
+                    "score": getattr(result, "score", None),
+                }
+            )
         return hits
 
     async def _read_document_text(
-        self, attachment: ChatAttachmentView, *, start: int, max_chars: int
+        self, attachment: ChatAttachmentView, *, start: int, max_chars: int | None
     ) -> tuple[str, int]:
         """Read a slice of a DOCX/TXT/MD attachment's text.
 
@@ -509,7 +592,10 @@ class AgentsSdkChatEngine:
         storage = self._attachment_storage
         path = storage.resolve(attachment.storage_key)
         text_path = None
-        if attachment.source == ChatAttachmentSource.KNOWLEDGE_BASE.value:
+        if _is_pdf(attachment):
+            # PDFs are extracted once (in a thread) and cached beside the file.
+            text_path = await storage.ensure_kb_text(path, ".pdf")
+        elif attachment.source == ChatAttachmentSource.KNOWLEDGE_BASE.value:
             text_path = await storage.ensure_kb_text(path)
         return await asyncio.to_thread(
             storage.read_text, path, start=start, max_chars=max_chars, text_path=text_path,
@@ -545,9 +631,6 @@ class AgentsSdkChatEngine:
             if attachment.status != ChatAttachmentStatus.READY.value:
                 tool_labels[ctx.tool_call_id] = "附件無法讀取"
                 return "這個附件目前無法讀取。"
-            if _is_pdf(attachment):
-                tool_labels[ctx.tool_call_id] = f"讀取附件：{name}"
-                return f"（{name} 是 PDF；若目前訊息中沒有該檔案，請使用者在新訊息提及附件名稱以再次查看。）"
             try:
                 text, total = await self._read_document_text(
                     attachment, start=max(0, start), max_chars=max(1, min(20_000, max_chars)),
@@ -556,6 +639,8 @@ class AgentsSdkChatEngine:
                 tool_labels[ctx.tool_call_id] = "附件無法讀取"
                 return "這個附件目前無法讀取。"
             tool_labels[ctx.tool_call_id] = f"讀取附件：{name}"
+            if _is_pdf(attachment) and total == 0:
+                return f"（{name} 是沒有可擷取文字的 PDF（可能是掃描檔），無法以文字讀取。）"
             if not text:
                 return f"（{name} 沒有可讀取的文字內容，共 {total} 字元。）"
             return f"（{name} 第 {start}-{start + len(text)} 字，共 {total} 字元）\n{text}"
@@ -564,6 +649,56 @@ class AgentsSdkChatEngine:
             read_attachment,
             name_override=READ_ATTACHMENT_TOOL_NAME,
             description_override="讀取這個對話中某個文件附件的內容片段。",
+        )
+
+    def _find_in_attachment_tool(
+        self,
+        attachments_by_id: Mapping[UUID, ChatAttachmentView],
+        tool_labels: dict[str, str],
+    ) -> FunctionTool:
+        by_name = {attachment.display_name: attachment for attachment in attachments_by_id.values()}
+
+        async def find_in_attachment(ctx: ToolContext, name: str, query: str, max_hits: int = 8) -> str:
+            """Search inside one long document attachment and return the matching passages.
+
+            Use this before read_attachment for long documents: it returns each
+            match with its character offset, which read_attachment's ``start``
+            can then read around.
+
+            Args:
+                name: The attachment's display name, exactly as listed in the
+                    current turn context.
+                query: One or more keywords separated by spaces, e.g. "113年 點值 牙醫".
+                    Passages containing more of the keywords rank higher.
+                max_hits: Maximum number of passages to return (1-20).
+            """
+
+            attachment = by_name.get(name)
+            if attachment is None or attachment.kind != ChatAttachmentKind.DOCUMENT.value:
+                tool_labels[ctx.tool_call_id] = "找不到此附件"
+                return "找不到這個附件。"
+            if attachment.status != ChatAttachmentStatus.READY.value:
+                tool_labels[ctx.tool_call_id] = "附件無法讀取"
+                return "這個附件目前無法讀取。"
+            try:
+                text, total = await self._read_document_text(attachment, start=0, max_chars=None)
+            except AttachmentError:
+                tool_labels[ctx.tool_call_id] = "附件無法讀取"
+                return "這個附件目前無法讀取。"
+            tool_labels[ctx.tool_call_id] = f"搜尋附件：{name}"
+            if not text:
+                return f"（{name} 沒有可搜尋的文字內容。）"
+            hits = find_passages(text, query, max_hits=max(1, min(20, max_hits)))
+            if not hits:
+                return f"（在 {name} 中找不到「{query}」；可換關鍵字再試，共 {total} 字元。）"
+            lines = [f"（{name} 共 {total} 字元，找到 {len(hits)} 段；可用 read_attachment 的 start 讀取前後文）"]
+            lines.extend(f"[位置 {offset}]\n{passage}" for offset, passage in hits)
+            return "\n\n".join(lines)
+
+        return function_tool(
+            find_in_attachment,
+            name_override=FIND_IN_ATTACHMENT_TOOL_NAME,
+            description_override="在這個對話的某個長文件附件中搜尋關鍵字，回傳相符段落與位置。",
         )
 
     async def run_turn(
@@ -654,6 +789,7 @@ class AgentsSdkChatEngine:
         tools = [
             self._search_tool(collected_sources, tool_labels),
             self._read_attachment_tool(attachments_by_id, tool_labels),
+            self._find_in_attachment_tool(attachments_by_id, tool_labels),
         ]
         instructions = BASE_INSTRUCTIONS
         pending_cards: list[ChatEvent] = []
@@ -747,7 +883,6 @@ class AgentsSdkChatEngine:
                 lines.append(f"附件名稱：{attachment.display_name}（{_attachment_note(attachment)}）")
                 if (
                     attachment.kind == ChatAttachmentKind.DOCUMENT.value
-                    and not _is_pdf(attachment)
                     and _has_readable_text(attachment)
                 ):
                     excerpt, _ = await self._read_document_text(attachment, start=0, max_chars=2_000)
@@ -788,7 +923,7 @@ def _translate_stream_event(
         item = event.item
         tool_name = item.tool_name
         call_id = item.call_id
-        if tool_name not in (SEARCH_TOOL_NAME, READ_ATTACHMENT_TOOL_NAME, *qa_skill.SKILL_TOOL_NAMES) or not call_id:
+        if tool_name not in (SEARCH_TOOL_NAME, READ_ATTACHMENT_TOOL_NAME, FIND_IN_ATTACHMENT_TOOL_NAME, *qa_skill.SKILL_TOOL_NAMES) or not call_id:
             return
         tool_call_names[call_id] = tool_name
         yield ChatEvent(

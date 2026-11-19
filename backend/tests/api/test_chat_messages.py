@@ -245,6 +245,24 @@ async def test_message_stream_order_and_persistence():
 
 
 @pytest.mark.asyncio
+async def test_skill_continuation_keeps_its_display_text_on_the_stored_user_message():
+    repository = InMemoryChatRepository()
+    session = await create_chat_session(ChatSessionCreate(), repository)
+    engine = FakeChatEngine([ChatEvent("text_delta", {"text": "好"})])
+    response = await send_chat_message(
+        session.id,
+        ChatMessageCreate(content="使用者已在卡片上確認了題目清單，請進行下一個階段。", model="gpt-6.2-astra",
+                          display_text="✓ 已確認題目清單"),
+        repository, engine,
+    )
+    await _collect_sse(response)
+    user = (await repository.list_messages(session.id))[0]
+    assert user.display_text == "✓ 已確認題目清單" and "確認了題目清單" in user.content
+    detail = await get_chat_session(session.id, repository)
+    assert detail.messages[0].display_text == "✓ 已確認題目清單"
+
+
+@pytest.mark.asyncio
 async def test_assistant_message_content_and_sources_are_persisted():
     repository = InMemoryChatRepository()
     session = await create_chat_session(ChatSessionCreate(), repository)

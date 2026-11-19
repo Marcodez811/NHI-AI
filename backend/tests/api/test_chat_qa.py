@@ -169,7 +169,7 @@ async def test_skill_cards_stream_and_persist_with_the_assistant_message():
     engine = CardEngine()
 
     async def send(text):
-        response = await send_chat_message(session_id, ChatMessageCreate(content=text, model="gpt-6-astra"), repository, engine)
+        response = await send_chat_message(session_id, ChatMessageCreate(content=text, model="gpt-6.2-astra"), repository, engine)
         chunks = [chunk async for chunk in response.body_iterator]
         return [json.loads(c[len("data: "):]) for c in chunks if c.startswith("data: ")]
 

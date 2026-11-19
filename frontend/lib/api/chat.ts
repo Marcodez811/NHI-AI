@@ -48,6 +48,8 @@ export interface ChatMessageRecord {
     created_at: string;
     /** Skill cards produced by this turn (立院QA). */
     cards?: QaCard[] | null;
+    /** Set on an automatic skill continuation: shown as a muted status line, not a bubble. */
+    display_text?: string | null;
 }
 
 export interface ChatSessionSummary {
@@ -81,6 +83,7 @@ export interface ChatSendMessagePayload {
     content: string;
     attachment_ids: string[];
     model: string;
+    display_text?: string;
 }
 
 /** Kinds accepted by the chat attachment picker; enforced again server-side. */

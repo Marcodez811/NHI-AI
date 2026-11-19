@@ -9,7 +9,9 @@ so editing an earlier step moves the flow back and nothing can drift.
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +51,9 @@ EVIDENCE_LABELS = {
 DEFAULT_DETAIL_TITLES = ("背景說明", "目前辦理情形", "未來工作重點")
 DISPUTE_TITLE = "爭議點"
 MAX_QUESTIONS = 50
-MAX_CANDIDATES_PER_QUESTION = 5
+MAX_CANDIDATES_PER_QUESTION = 6
+MAX_QUERIES_PER_QUESTION = 4
+SEARCH_HITS_PER_QUERY = 10
 
 TOOL_SET_QUESTIONS = "set_questions"
 TOOL_SUGGEST_DOCUMENTS = "suggest_documents"
@@ -102,6 +106,47 @@ class ToolQuestion(BaseModel):
     note: str
 
 
+class QuestionQueries(BaseModel):
+    question_no: int
+    queries: list[str]
+
+
+_CONTACT_PERSON = re.compile(r"(?:承\s*辦\s*人|聯\s*絡\s*人)\s*[:：]\s*[^\s，,。；;：:]{1,10}")
+_CONTACT_FRAGMENT = re.compile(
+    r"(?:承\s*辦\s*人?|聯\s*絡\s*人?|電\s*話|手\s*機|分\s*機|TEL|Tel|tel)\s*[:：]?\s*[\d()（）\-－#＃ ,、，轉分機及]*"
+    r"(?:[一二三四五六七八九十][)）])?"
+)
+_PHONE_NUMBER = re.compile(r"(?<!\d)(?:\(?0\d{1,2}\)?[\s\-－]?\d{3,4}[\s\-－]?\d{3,4}(?:\s*(?:#|轉|分機)\s*\d+)?|09\d{2}[\s\-－]?\d{3}[\s\-－]?\d{3})(?!\d)")
+
+
+def clean_snippet(text: str, limit: int = 200) -> str:
+    """Display-only snippet: phone/mobile numbers and 承辦人/電話/手機/分機 fragments removed."""
+
+    text = _CONTACT_PERSON.sub("", text)
+    text = _CONTACT_FRAGMENT.sub("", text)
+    text = _PHONE_NUMBER.sub("", text)
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def merge_hits(hit_lists: Sequence[Sequence[dict[str, Any]]], cap: int) -> list[dict[str, Any]]:
+    """Merge per-query hits by document; rank by best score, then hit count, then first appearance."""
+
+    merged: dict[Any, dict[str, Any]] = {}
+    for hits in hit_lists:
+        for rank, hit in enumerate(hits):
+            score = hit.get("score")
+            score = float(score) if score is not None else 1.0 - rank / (len(hits) + 1)
+            entry = merged.get(hit["document_id"])
+            if entry is None:
+                merged[hit["document_id"]] = {"hit": hit, "best": score, "count": 1, "order": len(merged)}
+                continue
+            entry["count"] += 1
+            if score > entry["best"]:
+                entry["best"], entry["hit"] = score, hit
+    ranked = sorted(merged.values(), key=lambda e: (-e["best"], -e["count"], e["order"]))
+    return [entry["hit"] for entry in ranked[:cap]]
+
+
 class EvidenceItemInput(BaseModel):
     field: Literal["figures", "aim", "status", "dispute", "next_steps"]
     text: str
@@ -122,6 +167,7 @@ class OutlineInput(BaseModel):
     short: list[str]
     detail: list[DetailSection] = []
     dispute_requested: bool = False
+    notes: list[str] = []
 
 
 # ── Workspace rules ─────────────────────────────────────────────────────────
@@ -292,7 +338,14 @@ def _clean_outline(workspace: ChatQaWorkspace, outline: OutlineInput) -> dict[st
         raise QaError("qa_outline_dispute", "使用者沒有要求時，詳答不放「爭議點」。")
     if outline.dispute_requested and not has_dispute:
         detail.append({"title": DISPUTE_TITLE, "points": []})
-    return {"short": short, "detail": detail, "dispute_requested": outline.dispute_requested, "confirmed": False}
+    notes = [note.strip() for note in outline.notes if note.strip()]
+    return {
+        "short": short,
+        "detail": detail,
+        "dispute_requested": outline.dispute_requested,
+        "notes": notes,
+        "confirmed": False,
+    }
 
 
 def apply_outline(
@@ -412,6 +465,8 @@ def render_context(workspace: ChatQaWorkspace | None) -> str:
             lines.append("簡答：" + "；".join(outline["short"]))
             for section in outline["detail"]:
                 lines.append(f"詳答／{section['title']}：" + "；".join(section["points"]))
+            if outline.get("notes"):
+                lines.append("備註（不放入答詢內容）：" + "；".join(outline["notes"]))
     return "\n".join(lines)
 
 
@@ -456,11 +511,15 @@ def build_tools(
         tool_labels[ctx.tool_call_id] = f"整理出 {len(workspace.questions)} 題"
         return f"已列出 {len(workspace.questions)} 題，題目清單卡片已顯示；請使用者確認或修改後再往下。"
 
-    async def suggest_documents(ctx: ToolContext, question_nos: list[int]) -> str:
+    async def suggest_documents(
+        ctx: ToolContext, question_nos: list[int], queries: list[QuestionQueries] | None = None
+    ) -> str:
         """Find knowledge-base documents that may help answer the questions. Does not attach anything.
 
         Args:
             question_nos: The question numbers to search for; empty means every question.
+            queries: For each question, 2-4 distinct search queries (question number plus query strings).
+                Questions without queries are searched with their own text.
         """
 
         workspace = await load()
@@ -471,26 +530,30 @@ def build_tools(
         if not wanted:
             tool_labels[ctx.tool_call_id] = "找不到指定的題目"
             return "沒有符合的題號。"
+        by_question: dict[int, list[str]] = {}
+        for entry in queries or []:
+            cleaned = [item.strip() for item in entry.queries if item.strip()]
+            by_question.setdefault(entry.question_no, []).extend(cleaned)
         attached_ids = {item.id for item in attachments}
         card_items: list[dict[str, Any]] = []
         lines: list[str] = []
         for question in wanted:
-            candidates: dict[Any, dict[str, Any]] = {}
-            for hit in await search(question["text"], 10):
-                if hit["document_id"] in candidates:
-                    continue
-                candidates[hit["document_id"]] = {
+            terms = list(dict.fromkeys(by_question.get(question["no"], [])))[:MAX_QUERIES_PER_QUESTION]
+            terms = terms or [question["text"]]
+            hit_lists = await asyncio.gather(*(search(term, SEARCH_HITS_PER_QUERY) for term in terms))
+            candidates = [
+                {
                     "id": str(hit["document_id"]),
                     "name": hit["name"],
-                    "snippet": hit["snippet"][:200],
+                    "snippet": clean_snippet(hit["snippet"]),
                     "attached": hit["document_id"] in attached_ids,
                 }
-                if len(candidates) >= MAX_CANDIDATES_PER_QUESTION:
-                    break
+                for hit in merge_hits(hit_lists, MAX_CANDIDATES_PER_QUESTION)
+            ]
             card_items.append(
-                {"question_no": question["no"], "question_text": question["text"], "candidates": list(candidates.values())}
+                {"question_no": question["no"], "question_text": question["text"], "candidates": candidates}
             )
-            names = "、".join(f"【{c['name']}】" for c in candidates.values()) or "（沒有找到相關資料）"
+            names = "、".join(f"【{c['name']}】" for c in candidates) or "（沒有找到相關資料）"
             lines.append(f"第 {question['no']} 題：{names}")
         emit("documents", {"items": card_items, "confirmed": bool((workspace.documents or {}).get("confirmed"))})
         tool_labels[ctx.tool_call_id] = f"為 {len(wanted)} 題找資料"
@@ -525,6 +588,7 @@ def build_tools(
         short: list[str],
         detail: list[DetailSection],
         dispute_requested: bool,
+        notes: list[str] | None = None,
     ) -> str:
         """Propose the answer outline for one question; the user confirms it on the card.
 
@@ -534,12 +598,18 @@ def build_tools(
             detail: 詳答 sections with their points; pass an empty list to use the defaults
                 背景說明 / 目前辦理情形 / 未來工作重點.
             dispute_requested: True only if the user asked for a 爭議點 section.
+            notes: 備註／待補, for the user/drafter only: verification steps, caveats, data still
+                needed, writing instructions. short/detail must contain only answer text addressed
+                to the committee in 本署 voice: no instructions about how to write, no verification
+                steps, no requests to the user. Put all of those here instead.
         """
 
         workspace = await load()
         try:
             apply_outline(
-                workspace, question_no, OutlineInput(short=short, detail=detail, dispute_requested=dispute_requested)
+                workspace,
+                question_no,
+                OutlineInput(short=short, detail=detail, dispute_requested=dispute_requested, notes=notes or []),
             )
         except QaError as error:
             tool_labels[ctx.tool_call_id] = "未記錄：" + error.message[:40]
@@ -567,5 +637,5 @@ __all__ = [name for name in dir() if not name.startswith("_") and name.isupper()
     "QaError", "SkillRuntime", "QuestionEdit", "EvidenceItemInput", "DetailSection", "OutlineInput",
     "apply_questions", "confirm_documents", "apply_evidence", "apply_outline", "confirm_outline",
     "confirm_all_outlines", "recompute_stage", "to_read", "render_context", "build_tools",
-    "new_workspace", "clone", "load_instructions", "usable_attachments",
+    "new_workspace", "clone", "clean_snippet", "merge_hits", "QuestionQueries", "load_instructions", "usable_attachments",
 ]

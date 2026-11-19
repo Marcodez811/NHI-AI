@@ -46,7 +46,8 @@ def _ctx(name: str, arguments: dict) -> ToolContext:
 
 
 class Harness:
-    def __init__(self, attachments=(), hits=()):
+    def __init__(self, attachments=(), hits=(), hits_by_query=None):
+        self.hits_by_query = hits_by_query
         self.repository = InMemoryChatRepository()
         self.session_id = uuid4()
         self.attachments = list(attachments)
@@ -57,6 +58,8 @@ class Harness:
 
         async def search(query, max_results):
             self.queries.append(query)
+            if self.hits_by_query is not None:
+                return self.hits_by_query.get(query, [])
             return self.hits
 
         runtime = qa.SkillRuntime(skill=qa.SKILL_ID, session_id=self.session_id, repository=self.repository)
@@ -133,6 +136,58 @@ async def test_suggest_documents_needs_confirmed_questions_and_never_attaches():
     assert harness.repository.document_links == {}
 
 
+def test_clean_snippet_strips_contact_details():
+    text = "請洽承辦人：王小明 電話：02-2706-5866分機123 手機 0912-345-678 其餘內容 (02)2321 4567 照舊"
+    cleaned = qa.clean_snippet(text)
+    assert "承辦" not in cleaned and "電話" not in cleaned and "手機" not in cleaned
+    assert "5866" not in cleaned and "345" not in cleaned and "4567" not in cleaned
+    assert "其餘內容" in cleaned and "照舊" in cleaned
+    assert qa.clean_snippet("113年預算 100 億元，點值 0.95") == "113年預算 100 億元，點值 0.95"
+    assert len(qa.clean_snippet("字" * 500)) == 200
+
+
+def test_merge_hits_ranks_by_best_score_then_count_and_caps():
+    hit = lambda doc, score=None: {"document_id": doc, "name": str(doc), "snippet": f"s{doc}{score}", "score": score}
+    merged = qa.merge_hits([[hit("a", 0.5), hit("b", 0.9)], [hit("a", 0.5), hit("c", 0.5)], [hit("a", 0.7)]], cap=3)
+    assert [h["document_id"] for h in merged] == ["b", "a", "c"]
+    # best-scoring passage is the one shown for a document
+    assert [h["snippet"] for h in merged if h["document_id"] == "a"] == ["sa0.7"]
+    assert [h["document_id"] for h in qa.merge_hits([[hit("a", 0.5), hit("b", 0.9)]], cap=1)] == ["b"]
+
+
+@pytest.mark.asyncio
+async def test_suggest_documents_runs_every_query_merges_and_caps():
+    docs = [uuid4() for _ in range(8)]
+    hit = lambda i, score: {"document_id": docs[i], "name": f"文件{i}", "snippet": "內容 電話：02-1234-5678", "score": score}
+    harness = Harness(hits_by_query={
+        "q1": [hit(0, 0.9), hit(1, 0.8), hit(2, 0.7), hit(3, 0.6)],
+        "q2": [hit(1, 0.85), hit(4, 0.5), hit(5, 0.4), hit(6, 0.3), hit(7, 0.2)],
+    })
+    await harness.call("set_questions", QUESTIONS)
+    workspace = await harness.workspace()
+    workspace.questions_confirmed = True
+    await harness.repository.save_qa_workspace(workspace)
+    harness.cards.clear()
+    await harness.call("suggest_documents", {
+        "question_nos": [2], "queries": [{"question_no": 2, "queries": ["q1", " q2 ", "q1", ""]}],
+    })
+    assert sorted(harness.queries) == ["q1", "q2"]
+    candidates = harness.cards[0][1]["items"][0]["candidates"]
+    assert [c["name"] for c in candidates] == ["文件0", "文件1", "文件2", "文件3", "文件4", "文件5"]
+    assert "5678" not in candidates[0]["snippet"]
+
+
+@pytest.mark.asyncio
+async def test_suggest_documents_falls_back_to_question_text_without_queries():
+    harness = Harness(hits_by_query={})
+    await harness.call("set_questions", QUESTIONS)
+    workspace = await harness.workspace()
+    workspace.questions_confirmed = True
+    await harness.repository.save_qa_workspace(workspace)
+    await harness.call("suggest_documents", {"question_nos": [2], "queries": [{"question_no": 2, "queries": ["  "]}]})
+    assert harness.queries == ["藥價調整進度？"]
+
+
 @pytest.mark.asyncio
 async def test_record_evidence_requires_attached_sources_and_is_all_or_nothing():
     attached = _attachment("衛福部年報")
@@ -190,6 +245,13 @@ async def test_propose_outline_defaults_dispute_rule_and_moves_the_stage():
     assert workspace.outline["1"]["confirmed"] is False and workspace.stage == "outline"
     kind, data = harness.cards[-1]
     assert kind == "outline" and data["outline"] == workspace.outline["1"]
+    assert workspace.outline["1"]["notes"] == []
+
+    await harness.call("propose_outline", {
+        "question_no": 1, "short": ["重點一"], "detail": [], "dispute_requested": False, "notes": [" 請補全年資料 ", " "],
+    })
+    assert (await harness.workspace()).outline["1"]["notes"] == ["請補全年資料"]
+    assert "備註" in qa.render_context(await harness.workspace())
 
     sneaky = {"question_no": 2, "short": ["a"], "detail": [{"title": "爭議點", "points": []}], "dispute_requested": False}
     assert "爭議點" in await harness.call("propose_outline", sneaky)
@@ -302,7 +364,7 @@ async def test_skill_tools_instructions_and_workspace_context_only_in_skill_mode
 
     [e async for e in engine.run_turn(history=[], user_message=_message(session_id), attachments=[], model="gpt-6-luna")]
     plain_agent, plain_items = runner.calls[-1]
-    assert {t.name for t in plain_agent.tools} == {"search_knowledge_base", "read_attachment"}
+    assert {t.name for t in plain_agent.tools} == {"search_knowledge_base", "read_attachment", "find_in_attachment"}
     assert plain_agent.instructions == BASE_INSTRUCTIONS and plain_items[-1]["content"] == "開始"
 
     [e async for e in engine.run_turn(
@@ -310,7 +372,7 @@ async def test_skill_tools_instructions_and_workspace_context_only_in_skill_mode
     )]
     agent, items = runner.calls[-1]
     assert {t.name for t in agent.tools} == {
-        "search_knowledge_base", "read_attachment", "set_questions", "suggest_documents", "record_evidence",
+        "search_knowledge_base", "read_attachment", "find_in_attachment", "set_questions", "suggest_documents", "record_evidence",
         "propose_outline",
     }
     assert agent.instructions.startswith(BASE_INSTRUCTIONS) and "立院QA" in agent.instructions
@@ -379,3 +441,12 @@ async def test_in_memory_delete_removes_the_workspace_but_clearing_the_skill_kee
     assert await repository.get_qa_workspace(session.id) is not None
     await repository.delete_session(session.id)
     assert await repository.get_qa_workspace(session.id) is None
+
+
+def test_clean_snippet_strips_names_and_spaced_labels_but_keeps_figures() -> None:
+    from app.services.chat.skills.legislative_qa import clean_snippet
+
+    raw = "司 署：中央健康保險署 承辦人：杜安琇科長 電 話：2706-5866#1554 手 機：0919349858(二) 點值 0.9523，預算 250,000,000"
+    cleaned = clean_snippet(raw)
+    assert "杜安琇" not in cleaned and "2706" not in cleaned and "0919" not in cleaned and "二)" not in cleaned
+    assert "0.9523" in cleaned and "250,000,000" in cleaned

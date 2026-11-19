@@ -45,6 +45,7 @@ export interface QaOutline {
     short: string[];
     detail: QaDetailSection[];
     dispute_requested: boolean;
+    notes?: string[];
     confirmed: boolean;
 }
 
@@ -63,6 +64,7 @@ export interface QaOutlineInput {
     short: string[];
     detail?: QaDetailSection[];
     dispute_requested?: boolean;
+    notes?: string[];
     confirm?: boolean;
 }
 

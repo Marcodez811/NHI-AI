@@ -119,11 +119,22 @@ describe("question card", () => {
         expect(qa.saveQuestions).toHaveBeenCalledWith([{ no: 1, text: "改過的題目", note: "備註" }], false);
     });
 
-    it("shows the confirmed badge from the live workspace and disables confirm", () => {
+    it("shows the confirmed badge from the live workspace and hides the action row", () => {
         const qa = controller({}, workspace({ questions: { items: [{ no: 1, text: "請說明A" }], confirmed: true } }));
         render(<ChatMessageList messages={[turn([card])]} qa={qa} />);
         expect(screen.getByText("已確認")).toBeInTheDocument();
-        expect(screen.getByRole("button", { name: "確認" })).toBeDisabled();
+        expect(screen.queryByRole("button", { name: "確認" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "編輯" })).not.toBeInTheDocument();
+    });
+
+    it("renders an automatic continuation as a status line, not a user bubble", () => {
+        const message: ChatTurn = {
+            id: "u1", localKey: "u1", role: "user", content: "使用者已在卡片上確認了題目清單，請進行下一個階段。",
+            display_text: "✓ 已確認題目清單", status: "complete", created_at: "2026-10-08T00:00:00Z",
+        };
+        render(<ChatMessageList messages={[message]} qa={controller()} />);
+        expect(screen.getByText("✓ 已確認題目清單")).toBeInTheDocument();
+        expect(screen.queryByText(/請進行下一個階段/)).not.toBeInTheDocument();
     });
 
     it("shows the server message inline when an action fails", async () => {
@@ -201,6 +212,23 @@ describe("outline card", () => {
         expect(qa.confirmOutline).toHaveBeenCalledWith(1);
     });
 
+    it("shows notes under the 備註 heading", () => {
+        const withNotes: QaCard = {
+            kind: "outline",
+            data: { question_no: 1, question_text: "題1", outline: { ...outline(), notes: ["請補全年資料"] } },
+        };
+        render(<ChatMessageList messages={[turn([withNotes])]} qa={controller()} />);
+        expect(screen.getByText(/備註／待補/)).toBeInTheDocument();
+        expect(screen.getByText("請補全年資料")).toBeInTheDocument();
+    });
+
+    it("hides 確認 on a confirmed outline but keeps 修改", () => {
+        const ws = workspace({ stage: "outline", outline: { "1": outline(true) } });
+        render(<ChatMessageList messages={[turn([card(1)])]} qa={controller({}, ws)} />);
+        expect(screen.queryByRole("button", { name: "確認" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "修改" })).toBeInTheDocument();
+    });
+
     it("edits an outline with the dispute toggle", async () => {
         const qa = controller();
         render(<ChatMessageList messages={[turn([card(1)])]} qa={qa} />);
@@ -208,7 +236,7 @@ describe("outline card", () => {
         await userEvent.click(screen.getByRole("checkbox", { name: "加入爭議點" }));
         await userEvent.click(screen.getByRole("button", { name: "儲存" }));
         await waitFor(() => expect(qa.saveOutline).toHaveBeenCalledWith(1, {
-            short: ["要點一"], detail: [{ title: "背景", points: ["說明一"] }], dispute_requested: true, confirm: false,
+            short: ["要點一"], detail: [{ title: "背景", points: ["說明一"] }], dispute_requested: true, notes: [], confirm: false,
         }));
     });
 

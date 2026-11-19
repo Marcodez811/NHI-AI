@@ -20,7 +20,7 @@ from app.models.chat import (
     ChatMessageRole,
 )
 from app.models.documents import Document, DocumentCategory, DocumentStatus
-from app.services.chat.attachments import ChatAttachmentStorage
+from app.services.chat.attachments import TEXT_EXTRACTION_VERSION, ChatAttachmentStorage
 from app.services.chat.engine import (
     BASE_INSTRUCTIONS,
     EXPIRED_ATTACHMENT_NOTE,
@@ -34,6 +34,8 @@ from app.services.chat.engine import (
     _message_to_input_item,
 )
 from app.services.documents.repository import InMemoryDocumentRepository
+from app.services.documents.storage import CHAT_TEXT_SUFFIX
+from app.services.chat.engine import _attachment_note
 
 
 
@@ -249,25 +251,81 @@ async def test_read_attachment_cannot_see_attachments_outside_the_session(tmp_pa
     assert "找不到" in output
 
 
-@pytest.mark.asyncio
-async def test_read_attachment_pdf_requests_a_new_name_mention_and_failed_pdf_is_unavailable(tmp_path):
+def _make_pdf(path, pages):
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    font = writer._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    }))
+    for text in pages:
+        page = writer.add_blank_page(width=200, height=200)
+        if text:
+            stream = DecodedStreamObject()
+            stream.set_data(f"BT /F1 12 Tf 10 100 Td ({text}) Tj ET".encode())
+            page[NameObject("/Contents")] = writer._add_object(stream)
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+            })
+    with open(path, "wb") as handle:
+        writer.write(handle)
+
+
+def _pdf_attachment(tmp_path, pages, *, kb):
     storage = ChatAttachmentStorage(tmp_path)
+    document_dir = tmp_path / str(uuid4())
+    document_dir.mkdir()
+    _make_pdf(document_dir / "x.pdf", pages)
     attachment = ChatAttachment(
         session_id=uuid4(), display_name="舊公文.pdf", mime_type="application/pdf",
-        kind=ChatAttachmentKind.DOCUMENT.value, size_bytes=1, storage_key="unused",
+        kind=ChatAttachmentKind.DOCUMENT.value, size_bytes=1, storage_key=f"{document_dir.name}/x.pdf",
         status=ChatAttachmentStatus.READY.value,
+        source=(ChatAttachmentSource.KNOWLEDGE_BASE if kb else ChatAttachmentSource.UPLOAD).value,
     )
     engine = _engine(document_repository=InMemoryDocumentRepository(), storage=storage)
+    return engine, attachment, document_dir
+
+
+async def _read(engine, attachment, **args):
     tool = engine._read_attachment_tool({attachment.id: attachment}, {})
-    ctx = _tool_context(READ_ATTACHMENT_TOOL_NAME, {"name": attachment.display_name})
-    output = await tool.on_invoke_tool(ctx, json.dumps({"name": attachment.display_name}))
-    assert "新訊息提及附件名稱" in output
-    assert "已直接附" not in output
+    payload = {"name": attachment.display_name, **args}
+    return await tool.on_invoke_tool(_tool_context(READ_ATTACHMENT_TOOL_NAME, payload), json.dumps(payload))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kb", [True, False])
+async def test_read_attachment_extracts_pdf_text_pages_and_caches(tmp_path, kb):
+    engine, attachment, document_dir = _pdf_attachment(tmp_path, ["HelloWorld", "SecondPage"], kb=kb)
+
+    output = await _read(engine, attachment)
+    assert "HelloWorld" in output and "SecondPage" in output
+    assert (document_dir / f"x.pdf.v{TEXT_EXTRACTION_VERSION}{CHAT_TEXT_SUFFIX}").is_file()
+
+    paged = await _read(engine, attachment, start=(document_dir / f"x.pdf.v{TEXT_EXTRACTION_VERSION}{CHAT_TEXT_SUFFIX}").read_text(encoding="utf-8").index("HelloWorld") + 2, max_chars=4)
+    assert "lloW" in paged and "SecondPage" not in paged
+    assert "新訊息提及" not in output
+
+
+@pytest.mark.asyncio
+async def test_read_attachment_pdf_without_text_says_so_and_failed_pdf_is_unavailable(tmp_path):
+    engine, attachment, _ = _pdf_attachment(tmp_path, [""], kb=True)
+    output = await _read(engine, attachment)
+    assert "沒有可擷取文字" in output
 
     attachment.status = ChatAttachmentStatus.FAILED.value
-    failed_tool = engine._read_attachment_tool({attachment.id: attachment}, {})
-    failed = await failed_tool.on_invoke_tool(ctx, json.dumps({"name": attachment.display_name}))
-    assert failed == "這個附件目前無法讀取。"
+    assert await _read(engine, attachment) == "這個附件目前無法讀取。"
+
+
+def test_pdf_attachment_note_points_to_read_attachment():
+    attachment = ChatAttachment(
+        session_id=uuid4(), display_name="a.pdf", mime_type="application/pdf",
+        kind=ChatAttachmentKind.DOCUMENT.value, size_bytes=1, storage_key="k",
+        status=ChatAttachmentStatus.READY.value,
+    )
+    note = _attachment_note(attachment)
+    assert "read_attachment" in note and "新訊息" not in note
 
 
 # ── History rebuild: only final text replayed, images re-attached ──────────
@@ -684,7 +742,7 @@ async def test_attached_kb_docx_is_extracted_once_and_read_through_read_attachme
 
     assert "第一段\n\n第二段" in first and "第一段\n\n第二段" in second
     assert len(calls) == 1
-    assert (document_dir / "guide.docx.chat-text").is_file()
+    assert (document_dir / f"guide.docx.v{TEXT_EXTRACTION_VERSION}.chat-text").is_file()
     # The cached text must not break the knowledge-base source lookup.
     from app.services.documents.storage import LocalDocumentStorage
 
@@ -717,3 +775,28 @@ def test_provider_error_log_redacts_api_keys():
 
     assert "credential validation failed" in lines[0]
     assert "SECRETSECRET" not in lines[0] and "AIzaSyDUMMY" not in lines[0]
+
+
+def test_find_passages_ignores_pdf_whitespace_and_ranks_by_keywords() -> None:
+    from app.services.chat.engine import find_passages
+
+    text = ("前言 " * 300) + "牙醫 113 年 第1季 浮動點值 0.9512" + (" 其他 " * 300) + "113 年 預算說明" + (" 結尾" * 300)
+    hits = find_passages(text, "113年 點值 牙醫", max_hits=5)
+    assert hits, "expected a match despite the space in '113 年'"
+    offset, passage = hits[0]
+    assert "0.9512" in passage and text[offset:].startswith(text[offset:offset + 5])
+    assert len(hits) == 2  # the budget passage matches only '113年'
+    assert find_passages(text, "   ") == [] and find_passages(text, "不存在的詞") == []
+
+
+def test_find_passages_inside_a_table_carries_page_and_header_row() -> None:
+    from app.services.chat.engine import find_passages
+
+    rows = "\n".join(f"| 1{n:02d}年 | 0.9{n:03d} | 0.8{n:03d} |" for n in range(5, 40))
+    text = ("前言\n" * 50) + "— 第 7 頁 —\n點值表\n| 年季 | 牙醫 浮動點值 | 中醫 浮動點值 |\n| --- | --- | --- |\n" + rows + "\n\n結語"
+    offset, passage = find_passages(text, "130年", max_hits=1, window=60)[0]
+    lines = passage.split("\n")
+    assert lines[0] == "（第 7 頁）"
+    assert lines[1] == "| 年季 | 牙醫 浮動點值 | 中醫 浮動點值 |" and lines[2].startswith("| ---")
+    assert any(line.startswith("| 130年 | 0.9030 |") for line in lines)
+    assert text[offset] == "|"

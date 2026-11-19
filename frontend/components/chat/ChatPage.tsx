@@ -29,7 +29,7 @@ export function ChatPage() {
     };
     let latestUserKey: string | null = null;
     for (let index = chat.messages.length - 1; index >= 0; index--) {
-        if (chat.messages[index].role === "user") {
+        if (chat.messages[index].role === "user" && !chat.messages[index].display_text) {
             latestUserKey = chat.messages[index].localKey;
             break;
         }
@@ -105,20 +105,20 @@ export function ChatPage() {
                             data-chat-layout="docked"
                             className="sticky bottom-0 z-10 bg-gradient-to-t from-background via-background/95 to-transparent pt-6 pb-7"
                         >
+                            {showLatest && chat.messages.length > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={() => scrollToBottom(true)}
+                                    className="absolute bottom-full left-1/2 z-10 mb-1 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border bg-card px-4 py-2 text-xs font-medium text-foreground shadow-md hover:bg-accent"
+                                >
+                                    <ArrowDown size={14} aria-hidden="true" />
+                                    最新訊息
+                                </button>
+                            )}
                             {composer}
                         </div>
                     )}
                 </>
-            )}
-            {showLatest && chat.messages.length > 0 && (
-                <button
-                    type="button"
-                    onClick={() => scrollToBottom(true)}
-                    className="fixed bottom-24 left-1/2 z-10 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border bg-card px-4 py-2 text-xs font-medium text-foreground shadow-md hover:bg-accent md:bottom-6"
-                >
-                    <ArrowDown size={14} aria-hidden="true" />
-                    最新訊息
-                </button>
             )}
         </section>
     );
