@@ -5,8 +5,8 @@ import type { ChatSessionSummary } from "./chat";
 export type ChatSkill = "legislative_qa";
 export const LEGISLATIVE_QA_SKILL: ChatSkill = "legislative_qa";
 
-export type QaStage = "questions" | "documents" | "evidence" | "outline" | "ready";
-export const QA_STAGES: readonly QaStage[] = ["questions", "documents", "evidence", "outline", "ready"];
+export type QaStage = "questions" | "documents" | "evidence" | "outline" | "ready" | "generating";
+export const QA_STAGES: readonly QaStage[] = ["questions", "documents", "evidence", "outline", "ready", "generating"];
 
 export interface QaQuestion {
     no: number;
@@ -51,6 +51,8 @@ export interface QaOutline {
 
 /** One produced Word file, newest first in `QaWorkspace.versions`. */
 export interface QaVersion {
+    /** "ai" = written by the AI writer; "outline" (or absent) = the deterministic outline wording. */
+    kind?: "ai" | "outline";
     artifact_id: string;
     title: string;
     created_at: string;
@@ -70,6 +72,8 @@ export interface QaWorkspace {
     evidence: Record<string, QaEvidence>;
     outline: Record<string, QaOutline>;
     versions?: QaVersion[];
+    /** The running AI-writing job, empty when idle. */
+    generation?: { job_id?: string; session_label?: string | null; started_at?: string };
     base_version_id?: string | null;
     updated_at?: string;
 }
@@ -179,4 +183,30 @@ export function createQaDocument(sessionId: string, sessionLabel?: string): Prom
         method: "POST",
         ...json(label ? { session_label: label } : {}),
     });
+}
+
+export type QaJobStatus = "queued" | "running" | "completed" | "failed";
+
+/** Progress of one AI-writing job (`phase` is the agent workflow phase, e.g. "drafting"). */
+export interface QaGenerationJob {
+    job_id: string;
+    status: QaJobStatus;
+    phase: string;
+    message?: string | null;
+    error?: string | null;
+    artifact_id?: string | null;
+    download_url?: string | null;
+}
+
+/** Starts the AI writer for the confirmed outlines; 409 when one is already running. */
+export function startQaGeneration(sessionId: string, sessionLabel?: string): Promise<QaGenerationJob> {
+    const label = sessionLabel?.trim();
+    return request<QaGenerationJob>(qaPath(sessionId, "/generate"), {
+        method: "POST",
+        ...json(label ? { session_label: label } : {}),
+    });
+}
+
+export function fetchQaGeneration(sessionId: string, jobId: string): Promise<QaGenerationJob> {
+    return request<QaGenerationJob>(qaPath(sessionId, `/generate/${encodeURIComponent(jobId)}`));
 }

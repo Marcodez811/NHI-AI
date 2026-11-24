@@ -34,10 +34,11 @@ async def publish_document(
     return await repository.create(artifact)
 
 
-def record_version(workspace: ChatQaWorkspace, artifact: Artifact) -> None:
-    """Newest first; ``versions`` is the workspace's history of produced files."""
+def record_version(workspace: ChatQaWorkspace, artifact: Artifact, kind: str = "outline") -> None:
+    """Newest first; ``versions`` is the workspace's history of produced files (``kind``: outline | ai)."""
 
     entry = {
+        "kind": kind,
         "artifact_id": str(artifact.id),
         "title": artifact.title,
         "created_at": artifact.created_at.isoformat(),

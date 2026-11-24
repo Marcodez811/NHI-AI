@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import { fetchChatSession, linkChatDocuments, unlinkChatDocument } from "../api/chat";
 import type { ChatAttachment, ChatSessionDetail } from "../api/chat";
@@ -10,12 +10,20 @@ import {
     confirmQaDocuments,
     confirmQaOutline,
     createQaDocument,
+    fetchQaGeneration,
     fetchQaWorkspace,
     putChatSkill,
     putQaOutline,
     putQaQuestions,
+    startQaGeneration,
 } from "../api/qa";
 import type { QaOutlineInput, QaQuestionInput, QaWorkspace } from "../api/qa";
+import { ApiError } from "../api/client";
+
+const POLL_MS = 2000;
+
+/** What the export card shows for the AI-writing job: running (with phase) or the last failure. */
+type QaGenerationView = { running: boolean; phase: string | null; error: string | null };
 
 /**
  * The 立院QA mode of one conversation: whether the skill is on, the live
@@ -33,6 +41,8 @@ export function useQaSkill(
     const [skill, setSkill] = useState<string | null>(null);
     const [workspace, setWorkspace] = useState<QaWorkspace | null>(null);
     const [sessionAttachments, setSessionAttachments] = useState<ChatAttachment[]>([]);
+    const [phase, setPhase] = useState<string | null>(null);
+    const [generationError, setGenerationError] = useState<string | null>(null);
     const skillRef = useRef<string | null>(null);
 
     const applySkill = useCallback((value: string | null) => {
@@ -44,6 +54,8 @@ export function useQaSkill(
         applySkill(null);
         setWorkspace(null);
         setSessionAttachments([]);
+        setPhase(null);
+        setGenerationError(null);
     }, [applySkill]);
 
     /** Re-reads the workspace and the session's attachments; a no-op outside skill mode. */
@@ -107,8 +119,52 @@ export function useQaSkill(
         onConfirmed?.({ label: "✓ 已確認全部大綱", instruction: "使用者已在卡片上確認了全部題目的答題大綱，請進行下一步。" });
     }, [act, onConfirmed]);
 
-    /** Produces the Word file, then re-reads the workspace so its versions list shows it. */
-    const createDocument = useCallback(async (sessionLabel?: string) => {
+    const jobId = workspace?.generation?.job_id ?? null;
+
+    /** Follows the running AI-writing job (also after a page refresh) until it ends. */
+    useEffect(() => {
+        const sessionId = activeSessionId.current;
+        if (!jobId || !sessionId) return;
+        let cancelled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = async (error: string | null) => {
+            if (cancelled) return;
+            setGenerationError(error);
+            setPhase(null);
+            await refresh();
+        };
+        const tick = async () => {
+            try {
+                const job = await fetchQaGeneration(sessionId, jobId);
+                if (cancelled) return;
+                if (job.status === "completed") return await finish(null);
+                if (job.status === "failed") return await finish(job.error || "AI 撰寫失敗。");
+                setPhase(job.phase);
+            } catch (caught) {
+                if (caught instanceof ApiError && caught.status === 404) return await finish(null);
+            }
+            if (!cancelled) timer = setTimeout(() => void tick(), POLL_MS);
+        };
+        void tick();
+        return () => {
+            cancelled = true;
+            clearTimeout(timer);
+        };
+    }, [activeSessionId, jobId, refresh]);
+
+    /** Starts the AI writer; progress then arrives through `generation`. */
+    const startGeneration = useCallback(async (sessionLabel?: string) => {
+        const id = activeSessionId.current;
+        if (!id) return;
+        setGenerationError(null);
+        await startQaGeneration(id, sessionLabel);
+        setWorkspace(await fetchQaWorkspace(id));
+    }, [activeSessionId]);
+
+    const generation: QaGenerationView = { running: Boolean(jobId), phase, error: generationError };
+
+    /** Produces the outline-wording Word file, then re-reads the workspace so its versions list shows it. */
+    const createOutlineDocument = useCallback(async (sessionLabel?: string) => {
         const id = activeSessionId.current;
         if (!id) return;
         await createQaDocument(id, sessionLabel);
@@ -146,7 +202,9 @@ export function useQaSkill(
         saveOutline,
         confirmOutline,
         confirmAllOutlines,
-        createDocument,
+        generation,
+        startGeneration,
+        createOutlineDocument,
         confirmDocuments,
         toggleDocument,
     };

@@ -441,6 +441,7 @@ class QaWorkspaceRead(BaseModel):
     evidence: dict[str, Any]
     outline: dict[str, Any]
     versions: list[dict[str, Any]]
+    generation: dict[str, Any] = PydanticField(default_factory=dict)
     base_version_id: str | None
     updated_at: Any
 

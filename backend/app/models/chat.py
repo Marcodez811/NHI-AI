@@ -118,6 +118,10 @@ class ChatQaWorkspace(SQLModel, table=True):
     outline: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
     # Phase 2: generated versions (structured content + artifact id), newest first.
     versions: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    # Phase 2: the running AI-writing job, ``{job_id, session_label, started_at}``; empty when idle.
+    generation: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False, server_default="{}")
+    )
     # Phase 2: the version this workspace was pre-filled from (update mode).
     base_version_id: str | None = Field(default=None, max_length=64)
     updated_at: datetime = Field(default_factory=utcnow, nullable=False)

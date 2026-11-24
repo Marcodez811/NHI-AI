@@ -7,8 +7,15 @@ import { NewsView } from "./NewsView";
 import { ConfirmDialog } from "../ui/confirm-dialog";
 import { UploadModal } from "./UploadModal";
 import { WorkflowList } from "./WorkflowList";
+import { LegislativeQaView } from "./LegislativeQaView";
 import type { WorkspaceController } from "../../lib/hooks/useWorkspaceController";
 import type { View } from "../../lib/workspace/types";
+
+/** The workflow overview and the workflow pages that hold no job state of their own. */
+function WorkflowPages({ view }: { view: View }) {
+    if (view === "legislative-qa") return <LegislativeQaView />;
+    return view === "workflows" ? <WorkflowList /> : null;
+}
 
 export function WorkspaceContent({
     workspace,
@@ -96,7 +103,7 @@ export function WorkspaceContent({
             {view === "news" && (
                 <NewsView docs={workspace.catalog.documents} onBrowseSources={onBrowseSources ?? (() => workspace.setView("files"))} />
             )}
-            {view === "workflows" && <WorkflowList />}
+            <WorkflowPages view={view} />
             {workspace.uploadOpen && (
                 <UploadModal
                     pending={workspace.pending}

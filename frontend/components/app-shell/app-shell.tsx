@@ -22,7 +22,7 @@ const sidebarIconButton =
   "inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
 
 function isCurrentPath(pathname: string, href: string): boolean {
-  if (href === "/workflows" && (pathname === "/slides" || pathname.startsWith("/slides/"))) return true
+  if (href === "/workflows" && ["/slides", "/legislative-qa"].some((base) => pathname === base || pathname.startsWith(`${base}/`))) return true
   // "新對話" only highlights on the fresh /chat composer, not on a saved
   // conversation route (/chat/[id]) — that highlight belongs to the
   // matching row in the recent-conversations list instead.

@@ -28,6 +28,7 @@ from app.api.routes.slides import (
     router as slides_router,
 )
 from app.api.routes.news import router as news_router
+from app.api.routes.legislative_qa import router as legislative_qa_router
 from app.api.routes.agent_settings import router as agent_settings_router
 from app.api.routes.config import router as config_router
 from app.api.routes.app_settings import router as app_settings_router
@@ -174,6 +175,7 @@ app.include_router(artifacts_router, prefix="/api/v1")
 app.include_router(retrieval_router, prefix="/api/v1")
 app.include_router(slides_router, prefix="/api/v1")
 app.include_router(news_router, prefix="/api/v1")
+app.include_router(legislative_qa_router, prefix="/api/v1")
 app.include_router(agent_settings_router, prefix="/api/v1")
 app.include_router(config_router, prefix="/api/v1")
 app.include_router(app_settings_router, prefix="/api/v1")

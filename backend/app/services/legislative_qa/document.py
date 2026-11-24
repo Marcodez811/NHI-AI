@@ -36,6 +36,8 @@ class QaDocQuestion(BaseModel):
 
 
 class QaDocument(BaseModel):
+    # "outline" = deterministic outline wording; "ai" = written by the legislative_qa workflow.
+    kind: str = "outline"
     title: str
     session_label: str | None = None
     questions: list[QaDocQuestion] = Field(default_factory=list)
@@ -47,7 +49,7 @@ def document_title(session_label: str | None, count: int) -> str:
     return f"{label} 立法院QA（{count} 題）" if label else f"立法院QA（{count} 題）"
 
 
-class _SourceIndex:
+class SourceIndex:
     """De-duplicated global source list; ``cite`` returns the 1-based number."""
 
     def __init__(self) -> None:
@@ -59,7 +61,7 @@ class _SourceIndex:
         return self.names.index(name) + 1
 
 
-def _paragraph(raw: str, sources: _SourceIndex) -> Paragraph | None:
+def _paragraph(raw: str, sources: SourceIndex) -> Paragraph | None:
     names = [part.strip() for part in SOURCE_TAG.findall(raw)]
     text = " ".join(SOURCE_TAG.sub("", raw).split())
     if not text:
@@ -72,11 +74,11 @@ def _paragraph(raw: str, sources: _SourceIndex) -> Paragraph | None:
     return Paragraph(text=text, cites=cites)
 
 
-def _paragraphs(points: list[str], sources: _SourceIndex) -> list[Paragraph]:
+def _paragraphs(points: list[str], sources: SourceIndex) -> list[Paragraph]:
     return [item for item in (_paragraph(point, sources) for point in points) if item is not None]
 
 
-def _question(item: dict[str, Any], outline: dict[str, Any], sources: _SourceIndex) -> QaDocQuestion:
+def _question(item: dict[str, Any], outline: dict[str, Any], sources: SourceIndex) -> QaDocQuestion:
     short = [Section(heading=None, paragraphs=_paragraphs(outline.get("short", []), sources))]
     detail = [
         Section(heading=section["title"], paragraphs=_paragraphs(section.get("points", []), sources))
@@ -95,7 +97,7 @@ def build_document(workspace: ChatQaWorkspace, session_label: str | None = None)
     ]
     if unconfirmed:
         raise QaError("qa_outline_unconfirmed", "第 " + "、".join(map(str, unconfirmed)) + " 題的大綱還沒有確認。")
-    sources = _SourceIndex()
+    sources = SourceIndex()
     questions = [_question(item, workspace.outline[str(item["no"])], sources) for item in workspace.questions]
     label = (session_label or "").strip() or None
     return QaDocument(

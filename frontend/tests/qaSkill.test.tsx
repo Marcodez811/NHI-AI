@@ -32,7 +32,9 @@ function controller(overrides: Partial<QaController> = {}, ws: QaWorkspace | nul
         saveOutline: vi.fn().mockResolvedValue(undefined),
         confirmOutline: vi.fn().mockResolvedValue(undefined),
         confirmAllOutlines: vi.fn().mockResolvedValue(undefined),
-        createDocument: vi.fn().mockResolvedValue(undefined),
+        generation: { running: false, phase: null, error: null },
+        startGeneration: vi.fn().mockResolvedValue(undefined),
+        createOutlineDocument: vi.fn().mockResolvedValue(undefined),
         confirmDocuments: vi.fn().mockResolvedValue(undefined),
         toggleDocument: vi.fn().mockResolvedValue(undefined),
         ...overrides,
@@ -251,11 +253,11 @@ describe("outline card", () => {
 
     it("offers the Word export once the stage is ready and lists produced versions", async () => {
         const versions = [
-            { artifact_id: "a2", title: "11-5 立法院QA（1 題）", created_at: "", download_url: "/x" },
+            { artifact_id: "a2", title: "11-5 立法院QA（1 題）", created_at: "", download_url: "/x", kind: "ai" as const },
             { artifact_id: "a1", title: "立法院QA（1 題）", created_at: "", download_url: "/y" },
         ];
         const ws = workspace({ stage: "ready", outline: { "1": outline(true) }, versions });
-        const qa = controller({ createDocument: vi.fn().mockResolvedValue(undefined) }, ws);
+        const qa = controller({}, ws);
         render(<ChatMessageList messages={[turn([card(1)])]} qa={qa} />);
         expect(screen.queryByRole("button", { name: "全部確認" })).not.toBeInTheDocument();
         const links = screen.getAllByRole("link");
@@ -264,6 +266,27 @@ describe("outline card", () => {
         ]);
         await userEvent.type(screen.getByPlaceholderText("會期（例如 11-5）"), "11-5");
         await userEvent.click(screen.getByRole("button", { name: "產生 Word 文件" }));
-        expect(qa.createDocument).toHaveBeenCalledWith("11-5");
+        expect(qa.startGeneration).toHaveBeenCalledWith("11-5");
+        await userEvent.click(screen.getByRole("button", { name: "僅輸出大綱版" }));
+        expect(qa.createOutlineDocument).toHaveBeenCalledWith("11-5");
+    });
+
+    it("shows the AI progress line, labels AI and outline versions, and offers a retry after a failure", () => {
+        const versions = [
+            { artifact_id: "a2", title: "新版", created_at: "", download_url: "/x", kind: "ai" as const },
+            { artifact_id: "a1", title: "舊版", created_at: "", download_url: "/y" },
+        ];
+        const ws = workspace({ stage: "generating", outline: { "1": outline(true) }, versions });
+        const running = controller({ generation: { running: true, phase: "drafting", error: null } }, ws);
+        const { unmount } = render(<ChatMessageList messages={[turn([card(1)])]} qa={running} />);
+        expect(screen.getByRole("status")).toHaveTextContent("AI 撰寫中");
+        expect(screen.getByRole("button", { name: "產生 Word 文件" })).toBeDisabled();
+        expect(screen.getByText("AI 撰寫")).toBeInTheDocument();
+        expect(screen.getByText("大綱版")).toBeInTheDocument();
+        unmount();
+        const failed = controller({ generation: { running: false, phase: null, error: "格式不正確" } }, workspace({ stage: "ready", outline: { "1": outline(true) } }));
+        render(<ChatMessageList messages={[turn([card(1)])]} qa={failed} />);
+        expect(screen.getByRole("alert")).toHaveTextContent("AI 撰寫失敗：格式不正確");
+        expect(screen.getByRole("button", { name: "重新產生 Word 文件" })).toBeEnabled();
     });
 });

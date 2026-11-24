@@ -25,6 +25,8 @@ const qaApi = vi.hoisted(() => ({
     putQaQuestions: vi.fn(),
     putQaOutline: vi.fn(),
     confirmQaOutline: vi.fn(),
+    startQaGeneration: vi.fn(),
+    fetchQaGeneration: vi.fn(),
 }));
 vi.mock("../lib/api/qa", async (importOriginal) => ({
     ...(await importOriginal<typeof import("../lib/api/qa")>()),
@@ -140,5 +142,42 @@ describe("useChatSession skill mode", () => {
             expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
             await act(async () => { finish(); });
         });
+    });
+
+    it("starts the AI writer, follows its progress and lists the new AI version when it ends", async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        try {
+            api.fetchChatSession.mockResolvedValue(detail({ skill: "legislative_qa" }));
+            qaApi.fetchQaWorkspace.mockResolvedValue({ ...workspace, stage: "ready" });
+            const { result } = renderHook(() => useChatSession("s1"));
+            await waitFor(() => expect(result.current.qa.workspace?.stage).toBe("ready"));
+            qaApi.startQaGeneration.mockResolvedValue({ job_id: "j1", status: "queued", phase: "queued" });
+            qaApi.fetchQaWorkspace.mockResolvedValue({ ...workspace, stage: "generating", generation: { job_id: "j1" } });
+            qaApi.fetchQaGeneration.mockResolvedValueOnce({ job_id: "j1", status: "running", phase: "drafting" });
+            await act(async () => { await result.current.qa.startGeneration("11-5"); });
+            expect(qaApi.startQaGeneration).toHaveBeenCalledWith("s1", "11-5");
+            await waitFor(() => expect(result.current.qa.generation).toEqual({ running: true, phase: "drafting", error: null }));
+
+            const versions = [{ kind: "ai", artifact_id: "a1", title: "11-5 立法院QA（1 題）", created_at: "", download_url: "/x" }];
+            qaApi.fetchQaWorkspace.mockResolvedValue({ ...workspace, stage: "ready", versions });
+            qaApi.fetchQaGeneration.mockResolvedValue({ job_id: "j1", status: "completed", phase: "completed", artifact_id: "a1" });
+            await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+            await waitFor(() => expect(result.current.qa.workspace?.versions).toEqual(versions));
+            expect(result.current.qa.generation).toEqual({ running: false, phase: null, error: null });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("resumes a running job after a refresh and reports a failure for retry", async () => {
+        api.fetchChatSession.mockResolvedValue(detail({ skill: "legislative_qa" }));
+        qaApi.fetchQaWorkspace
+            .mockResolvedValueOnce({ ...workspace, stage: "generating", generation: { job_id: "j9" } })
+            .mockResolvedValue({ ...workspace, stage: "ready" });
+        qaApi.fetchQaGeneration.mockResolvedValue({ job_id: "j9", status: "failed", phase: "failed", error: "格式不正確" });
+        const { result } = renderHook(() => useChatSession("s1"));
+        await waitFor(() => expect(result.current.qa.generation.error).toBe("格式不正確"));
+        expect(qaApi.fetchQaGeneration).toHaveBeenCalledWith("s1", "j9");
+        expect(result.current.qa.generation.running).toBe(false);
     });
 });

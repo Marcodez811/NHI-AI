@@ -668,6 +668,82 @@ async def _execute_planning(
     return None
 
 
+async def _execute_single_author(
+    *,
+    run_id: str,
+    adapter: Any,
+    value: Any,
+    workspace: Path,
+    staged: list[str],
+    initial_prompt: str,
+    selected_runner: Any,
+    progress_callback: Any,
+    event_callback: Any = None,
+) -> AgentExecutionResult:
+    """Run the author without a reviewer.
+
+    An output check that raises ``DeterministicValidationError`` is correctable:
+    the author is re-run with the message as ``revision_feedback`` while
+    ``max_author_attempts`` allows (default one attempt, i.e. no retry).
+    """
+
+    max_attempts = max(1, int(getattr(adapter, "max_author_attempts", 1)))
+    runner_name = str(getattr(adapter, "author_runner", "codex"))
+    role = str(getattr(adapter, "author_role", "presentation_author"))
+    author_runner = _runner_for_node(selected_runner, runner_name)
+    prompt = initial_prompt
+    for attempt in range(1, max_attempts + 1):
+        await _emit_phase(progress_callback, AgentPhase.DRAFTING if attempt == 1 else AgentPhase.REVISING)
+        request = AgentExecutionRequest(
+            run_id=run_id,
+            node_id="author",
+            role=role,
+            attempt=attempt,
+            model=getattr(adapter, "author_model", None),
+            reasoning_effort=getattr(adapter, "author_reasoning_effort", None),
+            workspace=workspace,
+            prompt=prompt,
+            sandbox=_stage_sandbox(adapter, "author"),
+            skill_names=_stage_skills(adapter, "author", staged),
+            audit_path=_attempt_audit_path(workspace, "author", attempt),
+            hidden_paths=_stage_hidden_paths(adapter, "author", workspace),
+            read_only_paths=_stage_read_only_paths(adapter, "author", workspace),
+            writable_paths=_stage_writable_paths(adapter, "author", workspace),
+            restrict_workspace=bool(getattr(adapter, "stage_isolation", False)),
+        )
+        event = {
+            "node_id": "author", "role": role, "model": request.model, "reasoning_effort": request.reasoning_effort,
+            "runner": runner_name, "attempt": attempt,
+        }
+        await _emit_event(event_callback, "node_started", **event, status="running", message="Author agent started.")
+        started = asyncio.get_running_loop().time()
+
+        def elapsed() -> int:
+            return round((asyncio.get_running_loop().time() - started) * 1000)
+
+        try:
+            run = await _run_agent(
+                author_runner, request, progress_callback=_node_progress_callback(progress_callback, request, runner_name)
+            )
+        except Exception:
+            await _emit_event(event_callback, "node_failed", **event, status="failed", message="Author agent failed.", duration_ms=elapsed())
+            raise
+        try:
+            await _check_author_completion(adapter, value, run, workspace)
+        except Exception as exc:
+            await _emit_event(event_callback, "node_failed", **event, status="failed", message="Author output check failed.", duration_ms=elapsed())
+            if isinstance(exc, DeterministicValidationError) and attempt < max_attempts:
+                prompt = str(await _call(adapter.build_prompt, value, workspace, revision_feedback=str(exc)))
+                continue
+            raise WorkflowExecutionError("author output check failed") from exc
+        await _emit_event(
+            event_callback, "node_completed", **event, status="completed", provider_run_id=run.provider_run_id,
+            message="Author agent completed.", duration_ms=run.duration_ms or elapsed(),
+        )
+        return run
+    raise WorkflowExecutionError("maximum author attempts exceeded")
+
+
 async def _execute_bounded_agents(
     *,
     run_id: str,
@@ -1221,91 +1297,16 @@ async def _execute_workflow(
                 event_callback=event_callback,
             )
         elif build_review is None and modern_runner:
-            await _emit_phase(progress_callback, AgentPhase.DRAFTING)
-            author_runner_name = str(getattr(adapter, "author_runner", "codex"))
-            author_runner = _runner_for_node(selected_runner, author_runner_name)
-            request = AgentExecutionRequest(
+            run = await _execute_single_author(
                 run_id=str(payload.job_id),
-                node_id="author",
-                role=str(getattr(adapter, "author_role", "presentation_author")),
-                attempt=1,
-                model=getattr(adapter, "author_model", None),
-                reasoning_effort=getattr(adapter, "author_reasoning_effort", None),
+                adapter=adapter,
+                value=value,
                 workspace=workspace,
-                prompt=str(prompt),
-                sandbox=_stage_sandbox(adapter, "author"),
-                skill_names=_stage_skills(adapter, "author", staged),
-                audit_path=_attempt_audit_path(workspace, "author", 1),
-                hidden_paths=_stage_hidden_paths(adapter, "author", workspace),
-                read_only_paths=_stage_read_only_paths(adapter, "author", workspace),
-                writable_paths=_stage_writable_paths(adapter, "author", workspace),
-                restrict_workspace=bool(getattr(adapter, "stage_isolation", False)),
-            )
-            author_role = str(getattr(adapter, "author_role", "presentation_author"))
-            await _emit_event(
-                event_callback,
-                "node_started",
-                node_id="author",
-                role=author_role,
-                model=request.model,
-                reasoning_effort=request.reasoning_effort,
-                runner=author_runner_name,
-                attempt=1,
-                status="running",
-                message="Author agent started.",
-            )
-            author_started = asyncio.get_running_loop().time()
-            try:
-                run = await _run_agent(
-                    author_runner,
-                    request,
-                    progress_callback=_node_progress_callback(progress_callback, request, author_runner_name),
-                )
-            except Exception:
-                await _emit_event(
-                    event_callback,
-                    "node_failed",
-                    node_id="author",
-                    role=author_role,
-                    model=request.model,
-                    reasoning_effort=request.reasoning_effort,
-                    runner=author_runner_name,
-                    attempt=1,
-                    status="failed",
-                    message="Author agent failed.",
-                    duration_ms=round((asyncio.get_running_loop().time() - author_started) * 1000),
-                )
-                raise
-            try:
-                await _check_author_completion(adapter, value, run, workspace)
-            except Exception as exc:
-                await _emit_event(
-                    event_callback,
-                    "node_failed",
-                    node_id="author",
-                    role=author_role,
-                    model=request.model,
-                    reasoning_effort=request.reasoning_effort,
-                    runner=author_runner_name,
-                    attempt=1,
-                    status="failed",
-                    message="Author output check failed.",
-                    duration_ms=round((asyncio.get_running_loop().time() - author_started) * 1000),
-                )
-                raise WorkflowExecutionError("author output check failed") from exc
-            await _emit_event(
-                event_callback,
-                "node_completed",
-                node_id="author",
-                role=author_role,
-                model=request.model,
-                reasoning_effort=request.reasoning_effort,
-                runner=author_runner_name,
-                attempt=1,
-                status="completed",
-                provider_run_id=run.provider_run_id,
-                message="Author agent completed.",
-                duration_ms=run.duration_ms or round((asyncio.get_running_loop().time() - author_started) * 1000),
+                staged=staged,
+                initial_prompt=str(prompt),
+                selected_runner=selected_runner,
+                progress_callback=progress_callback,
+                event_callback=event_callback,
             )
         elif build_review is not None:
             execution_runner = runner or CodexRunner()

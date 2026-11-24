@@ -2,7 +2,7 @@
 import { request } from "./client";
 
 export type AgentSettingStage = "extraction" | "planner" | "author" | "reviewer";
-export type AgentSettingWorkflow = "slides" | "news";
+export type AgentSettingWorkflow = "slides" | "news" | "legislative_qa";
 export type AgentReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface StoredAgentStageSettings {

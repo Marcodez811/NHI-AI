@@ -32,13 +32,14 @@ from app.models.chat import (
 SKILL_ID = "legislative_qa"
 INSTRUCTIONS_PATH = Path(__file__).resolve().parents[4] / "chat_skills" / "legislative_qa" / "SKILL.md"
 
-STAGES = ("questions", "documents", "evidence", "outline", "ready")
+STAGES = ("questions", "documents", "evidence", "outline", "ready", "generating")
 STAGE_LABELS = {
     "questions": "需求解析（確認題目）",
     "documents": "資料輸入（挑選資料）",
     "evidence": "資訊整理（數據、目的、現況、爭議、後續）",
     "outline": "答題架構（確認大綱）",
     "ready": "大綱已全部確認（使用者可按「產生 Word 文件」下載）",
+    "generating": "AI 正在撰寫 Word 文件（請稍候，不要再修改大綱）",
 }
 EVIDENCE_FIELDS = ("figures", "aim", "status", "dispute", "next_steps")
 EVIDENCE_LABELS = {
@@ -189,6 +190,7 @@ def clone(workspace: ChatQaWorkspace) -> ChatQaWorkspace:
         evidence=copy.deepcopy(workspace.evidence),
         outline=copy.deepcopy(workspace.outline),
         versions=copy.deepcopy(workspace.versions),
+        generation=copy.deepcopy(workspace.generation),
         base_version_id=workspace.base_version_id,
         updated_at=workspace.updated_at,
     )
@@ -203,7 +205,9 @@ def _question(workspace: ChatQaWorkspace, no: int) -> dict[str, Any]:
 
 def recompute_stage(workspace: ChatQaWorkspace) -> str:
     nos = [str(item["no"]) for item in workspace.questions]
-    if not workspace.questions or not workspace.questions_confirmed:
+    if (workspace.generation or {}).get("job_id"):
+        stage = "generating"
+    elif not workspace.questions or not workspace.questions_confirmed:
         stage = "questions"
     elif not (workspace.documents or {}).get("confirmed"):
         stage = "documents"
@@ -390,6 +394,7 @@ def to_read(workspace: ChatQaWorkspace) -> dict[str, Any]:
         "evidence": copy.deepcopy(workspace.evidence),
         "outline": copy.deepcopy(workspace.outline),
         "versions": copy.deepcopy(workspace.versions),
+        "generation": copy.deepcopy(workspace.generation or {}),
         "base_version_id": workspace.base_version_id,
         "updated_at": workspace.updated_at,
     }

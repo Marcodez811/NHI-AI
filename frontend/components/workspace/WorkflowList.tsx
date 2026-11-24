@@ -1,7 +1,7 @@
 "use client";
 
 import { PageContainer, PageHeader } from "@/components/app-shell/page-layout";
-import { ChevronRight, ClipboardList, Newspaper, Presentation } from "lucide-react";
+import { ChevronRight, ClipboardList, Landmark, Newspaper, Presentation } from "lucide-react";
 import Link from "next/link";
 
 const workflows = [
@@ -17,6 +17,13 @@ const workflows = [
         label: "新聞稿生成",
         description: "根據來源文件整理並撰寫新聞稿",
         icon: Newspaper,
+        available: true,
+    },
+    {
+        href: "/legislative-qa",
+        label: "立院QA 撰寫",
+        description: "在對話中由 AI 撰寫立法院模擬題的簡答與詳答（此處設定模型）",
+        icon: Landmark,
         available: true,
     },
     {

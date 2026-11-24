@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Check, ChevronDown, CircleAlert, FileText, Plus, Trash2, Upload } from "lucide-react";
+import { Check, ChevronDown, CircleAlert, FileText, Loader2, Plus, Trash2, Upload } from "lucide-react";
 import { ApiError } from "../../../lib/api/client";
 import { artifactDownloadUrl } from "../../../lib/api/artifacts";
 import { QA_EVIDENCE_GROUPS } from "../../../lib/api/qa";
@@ -412,33 +412,70 @@ function OutlineEditor({ no, outline, qa, onDone }: {
     );
 }
 
+const PHASE_LABELS: Record<string, string> = {
+    queued: "排隊中",
+    preparing: "整理資料",
+    drafting: "AI 撰寫中",
+    revising: "AI 修正中",
+    validating: "檢查內容",
+    publishing: "產生 Word 文件",
+};
+
+function GenerationStatus({ phase }: { phase: string | null }) {
+    return (
+        <div role="status" className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+            {PHASE_LABELS[phase ?? "queued"] ?? "處理中"}，約需幾分鐘，可以先離開這個頁面…
+        </div>
+    );
+}
+
+function VersionChip({ version }: { version: QaVersion }) {
+    return (
+        <a href={artifactDownloadUrl(version.artifact_id)} download
+            className="inline-flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-0.5 text-xs hover:bg-muted">
+            <FileText size={13} aria-hidden="true" />
+            <Badge variant="secondary">{version.kind === "ai" ? "AI 撰寫" : "大綱版"}</Badge>
+            {version.title}
+        </a>
+    );
+}
+
 function DocumentExport({ versions, qa }: { versions: QaVersion[]; qa: QaController }) {
     const [label, setLabel] = useState("");
     const { busy, error, run } = useRun();
+    const { running, phase, error: failure } = qa.generation;
     return (
         <div className="flex flex-col gap-2">
             <div className="flex flex-wrap items-center gap-2">
                 <Input aria-label="會期" className="h-8 w-44" placeholder="會期（例如 11-5）" value={label}
                     onChange={(event) => setLabel(event.target.value)} />
-                <Button type="button" size="sm" disabled={busy} onClick={() => void run(() => qa.createDocument(label))}>
-                    {busy ? "產生中…" : "產生 Word 文件"}
+                <Button type="button" size="sm" disabled={busy || running} onClick={() => void run(() => qa.startGeneration(label))}>
+                    {failure && !running ? "重新產生 Word 文件" : "產生 Word 文件"}
+                </Button>
+                <Button type="button" variant="ghost" size="sm" disabled={busy || running}
+                    onClick={() => void run(() => qa.createOutlineDocument(label))}>
+                    僅輸出大綱版
                 </Button>
             </div>
+            {running && <GenerationStatus phase={phase} />}
+            {failure && !running && <ErrorLine message={`AI 撰寫失敗：${failure}`} />}
             {versions.length > 0 && (
                 <ul className="flex flex-col gap-1">
                     {versions.map((version) => (
-                        <li key={version.artifact_id}>
-                            <a href={artifactDownloadUrl(version.artifact_id)} download
-                                className="inline-flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-0.5 text-xs hover:bg-muted">
-                                <FileText size={13} aria-hidden="true" />{version.title}
-                            </a>
-                        </li>
+                        <li key={version.artifact_id}><VersionChip version={version} /></li>
                     ))}
                 </ul>
             )}
             <ErrorLine message={error} />
         </div>
     );
+}
+
+/** The Word export, shown once every outline is confirmed (and while the AI writer runs). */
+function ExportSlot({ live, qa }: { live: QaWorkspace | null; qa: QaController }) {
+    if (live?.stage !== "ready" && live?.stage !== "generating") return null;
+    return <DocumentExport versions={live.versions ?? []} qa={qa} />;
 }
 
 function OutlineCard({ data, live, readOnly, qa, showConfirmAll }: {
@@ -476,9 +513,7 @@ function OutlineCard({ data, live, readOnly, qa, showConfirmAll }: {
                     )}
                 </div>
             )}
-            {!readOnly && showConfirmAll && live?.stage === "ready" && (
-                <DocumentExport versions={live.versions ?? []} qa={qa} />
-            )}
+            {!readOnly && showConfirmAll && <ExportSlot live={live} qa={qa} />}
             <ErrorLine message={error} />
         </CardShell>
     );

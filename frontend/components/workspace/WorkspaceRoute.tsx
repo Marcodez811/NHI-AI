@@ -9,6 +9,7 @@ const routeToView = {
   "/knowledge": "files",
   "/slides": "slides",
   "/news": "news",
+  "/legislative-qa": "legislative-qa",
   "/workflows": "workflows",
 } as const;
 
