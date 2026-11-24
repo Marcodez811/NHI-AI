@@ -57,6 +57,34 @@ def test_numbering_markers_question_numbers_and_names_are_not_numbers():
     assert _missing("1.2 倍", "成長 1.2 倍") == []
 
 
+def test_a_number_with_a_unit_needs_the_same_value_with_that_unit():
+    quote = "112年起，全國121個鄉鎮設有院所，共 179 家，預算 5,000 萬元，成長 3%。"
+    assert _missing("179家院所至121個鄉鎮", quote) == []
+    assert _missing("179家院所至112個鄉鎮", quote) == ["112"]  # 112 only appears as 112年
+    assert _missing("112年起", quote) == []
+    assert _missing("共 179 所，預算 5,000 萬", quote) == []
+    assert _missing("共 179 人", quote) == ["179"]
+    assert _missing("成長 3 家", quote) == ["3"]
+    assert _missing("成長 3％", quote) == []
+    assert _missing("點值 0.9594 元", "點值 0.9594") == []  # a bare figure in the quote may carry a unit
+    assert _missing("112年", "點值 112") == ["112"]  # but not a date's
+    assert _missing("共 179", quote) == []  # no unit: the value alone decides
+
+
+def test_range_and_list_units_apply_to_every_number_in_either_text():
+    assert _missing("補助20萬元至41萬元", "補助金額為20至41萬元") == []
+    assert _missing("補助20至41萬元", "補助金額為20萬元至41萬元") == []
+    assert _missing("補助20～41萬元", "補助20萬元~41萬元") == []
+    assert _missing("114年第2季", "114年第2季") == []
+    assert _missing("第2季", "114年第2季") == []
+    assert _missing("2季", "114年第2季") == []
+    assert _missing("113年第1至第3季", "113年第1季、第2季至第3季") == []
+    assert _missing("113年第1季至第3季", "113年第1至第3季") == []
+    assert _missing("設置3、5、7家", "設置3家、5家、7家") == []
+    assert _missing("設置3家、5家、7家", "設置3、5、7家") == []
+    assert _missing("補助20至42萬元", "補助20萬元至41萬元") == ["42萬"]
+
+
 def _frozen() -> dict:
     return {"questions": [{
         "no": 1, "text": "請說明 113年 點值", "short_points": ["114年第1季點值"],

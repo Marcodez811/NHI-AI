@@ -10,17 +10,35 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.services.legislative_qa.document import QaIssue
 
 _WIDE = str.maketrans("０１２３４５６７８９．％", "0123456789.%")
 _NUMBER = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?"
-_TOKEN = re.compile(rf"(?P<yi>{_NUMBER})\s*億\s*(?:(?P<wan>{_NUMBER})\s*萬)?|(?P<num>{_NUMBER})\s*(?P<unit>百萬|兆|萬|千)?")
-_UNITS = {"兆": Decimal(10) ** 12, "百萬": Decimal(10) ** 6, "萬": Decimal(10) ** 4, "千": Decimal(10) ** 3}
+_TOKEN = re.compile(rf"(?P<yi>{_NUMBER})\s*億\s*(?:(?P<wan>{_NUMBER})\s*萬)?|(?P<num>{_NUMBER})\s*(?P<scale>百萬|兆|萬|千)?")
+_SCALES = {"兆": Decimal(10) ** 12, "百萬": Decimal(10) ** 6, "萬": Decimal(10) ** 4, "千": Decimal(10) ** 3}
+_YI = Decimal(10) ** 8
 _MARKER = re.compile(r"^[ \t]*(?:[（(]\d{1,2}[)）]|\d{1,2}(?:[、]|[.．](?!\d)))[ \t]*", re.M)
 _CALENDAR_UNIT = "年月日季度"
+# the measure word right after a number; 點 is not one in 點值/點數
+_UNIT = re.compile(r"[ \t]?(個月|人次|年度|點(?![值數])|[家個所人名件次床元年月日季歲項筆張倍天例場科%])")
+_RANGE_JOIN = re.compile(r"\s*(?:至|到|~|～|-|－|、|及|和|或)\s*第?")
+_UNIT_ALIAS = {"所": "家", "名": "人", "年度": "年"}
+_CALENDAR = {"年", "月", "日", "季", "歲", "個月"}
+_NOT_COUNT = _CALENDAR | {"元", "%"}
+ANY_UNIT = "*"
 MAX_LISTED = 6
+
+Pair = tuple[Decimal, str | None]
+
+
+class _Tok(NamedTuple):
+    shown: str
+    value: Decimal
+    before: str
+    after: str
+    unit: str | None
 
 
 def _normalize(text: str) -> str:
@@ -34,69 +52,107 @@ def _decimal(raw: str) -> Decimal | None:
         return None
 
 
-def _scaled(match: re.Match[str]) -> Decimal | None:
+def _value(match: re.Match[str], inherited: Decimal | None) -> Decimal | None:
     if match.group("yi") is not None:
         total = _decimal(match.group("yi"))
         if total is None:
             return None
-        total *= Decimal(10) ** 8
+        total *= _YI
         if match.group("wan") is not None:
-            wan = _decimal(match.group("wan"))
-            total += (wan or Decimal(0)) * Decimal(10) ** 4
+            total += (_decimal(match.group("wan")) or Decimal(0)) * Decimal(10) ** 4
         return total.normalize()
     value = _decimal(match.group("num"))
-    unit = match.group("unit")
-    return value if value is None or unit is None else (value * _UNITS[unit]).normalize()
+    scale = _SCALES[match.group("scale")] if match.group("scale") else inherited
+    return value if value is None or scale is None else (value * scale).normalize()
 
 
-def _tokens(text: str) -> list[tuple[str, Decimal, str, str]]:
-    """(display form, value, previous character, next character) for every number in ``text``."""
+def _measure(text: str, end: int) -> str | None:
+    match = _UNIT.match(text, end)
+    return _UNIT_ALIAS.get(match.group(1), match.group(1)) if match else None
 
-    found = []
-    for match in _TOKEN.finditer(text):
-        value = _scaled(match)
+
+def _tokens(text: str) -> list[_Tok]:
+    """Every number of ``text`` with its measure word. In ``20至41萬元`` or ``第1至第3季`` the unit
+    stated after the last number of a range or list belongs to the others too."""
+
+    matches = list(_TOKEN.finditer(text))
+    found: list[_Tok | None] = [None] * len(matches)
+    scale: Decimal | None = None
+    unit: str | None = None
+    for index in range(len(matches) - 1, -1, -1):
+        match = matches[index]
+        own_scale = _SCALES[match.group("scale")] if match.group("scale") else (_YI if match.group("yi") and not match.group("wan") else None)
+        own_unit = _measure(text, match.end())
+        joined = index + 1 < len(matches) and _RANGE_JOIN.fullmatch(text, match.end(), matches[index + 1].start()) is not None
+        inherited_scale = scale if joined and own_scale is None and own_unit is None else None
+        inherited_unit = unit if joined and own_unit is None and own_scale is None else None
+        scale, unit = own_scale or inherited_scale, own_unit or inherited_unit
+        value = _value(match, inherited_scale)
         if value is None:
             continue
         before = text[max(match.start() - 1, 0):match.start()]
         if before == "-":  # COVID-19: the name's letters, not the dash, decide
             before = text[max(match.start() - 2, 0):match.start() - 1]
         after = text[match.end()] if match.end() < len(text) else ""
-        found.append(("".join(match.group(0).split()), value, before, after))
-    return found
+        found[index] = _Tok("".join(match.group(0).split()), value, before, after, unit)
+    return [token for token in found if token is not None]
 
 
-def evidence_values(quotes: list[str]) -> set[Decimal]:
-    """Every value the quotes state, including each Western year as its ROC year."""
+def evidence_values(quotes: list[str]) -> set[Pair]:
+    """Every (value, unit) the quotes state, including each Western year as its ROC year.
 
-    values: set[Decimal] = set()
+    A scaled amount without a unit (``10.662億``) stands for that amount in any unit."""
+
+    values: set[Pair] = set()
     for quote in quotes:
-        for _, value, _, after in _tokens(_normalize(quote)):
-            values.add(value)
-            if value > 1911 and after == "年":
-                values.add(value - 1911)
+        for token in _tokens(_normalize(quote)):
+            unit = token.unit
+            if unit is None and token.shown.endswith(("億", "萬", "千", "兆")):
+                unit = ANY_UNIT
+            values.add((token.value, unit))
+            if token.value > 1911 and token.after == "年":
+                values.add((token.value - 1911, "年"))
     return values
 
 
-def context_calendar_values(texts: list[str]) -> set[Decimal]:
+def context_calendar_values(texts: list[str]) -> set[Pair]:
     """Years, months, days and quarters stated in the question or confirmed outline."""
 
-    allowed: set[Decimal] = set()
+    allowed: set[Pair] = set()
     for text in texts:
-        for _, value, _, after in _tokens(_normalize(text)):
-            if after and after in _CALENDAR_UNIT:
-                allowed.add(value)
+        for token in _tokens(_normalize(text)):
+            if token.after and token.after in _CALENDAR_UNIT:
+                allowed.add((token.value, token.unit))
     return allowed
 
 
-def unsupported_numbers(text: str, supported: set[Decimal]) -> list[str]:
-    """Numbers of one written paragraph that no cited quote states, in order, without repeats."""
+def _compatible(draft: str, evidence: str | None) -> bool:
+    if evidence == ANY_UNIT or draft == evidence:
+        return True
+    if evidence is None:  # a bare figure (table cell, 點值 0.9594) may carry any unit but a date's
+        return draft not in _CALENDAR
+    if draft == "個":  # a generic counter fits any counted thing, never a date, money or percentage
+        return evidence not in _NOT_COUNT
+    return evidence == "個" and draft not in _NOT_COUNT
+
+
+def _supported(token: _Tok, supported: set[Pair]) -> bool:
+    if token.unit is None:
+        return any(value == token.value for value, _ in supported)
+    return any(value == token.value and _compatible(token.unit, unit) for value, unit in supported)
+
+
+def unsupported_numbers(text: str, supported: set[Pair]) -> list[str]:
+    """Numbers of one written paragraph that no cited quote states, in order, without repeats.
+
+    A number with a measure word (家, 個, 元, 年, ...) needs the same value with a compatible one."""
 
     body = _MARKER.sub("", _normalize(text))
     missing: list[str] = []
-    for shown, value, before, after in _tokens(body):
-        if value in supported or before.isascii() and before.isalpha() or after == "題" or shown in missing:
+    for token in _tokens(body):
+        if _supported(token, supported) or token.before.isascii() and token.before.isalpha() or token.after == "題" or token.shown in missing:
             continue
-        missing.append(shown)
+        missing.append(token.shown)
     return missing
 
 
@@ -105,7 +161,7 @@ def _label(part: str, heading: str, number: int) -> str:
 
 
 def _paragraph_issue(
-    spec: dict[str, Any], part: str, section: Any, number: int, paragraph: Any, quotes: dict[str, str], allowed: set[Decimal],
+    spec: dict[str, Any], part: str, section: Any, number: int, paragraph: Any, quotes: dict[str, str], allowed: set[Pair],
 ) -> QaIssue | None:
     cited = [quotes[cite] for cite in paragraph.cites if cite in quotes]
     missing = unsupported_numbers(paragraph.text, evidence_values(cited) | allowed)

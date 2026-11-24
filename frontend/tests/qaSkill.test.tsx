@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatComposer } from "../components/chat/ChatComposer";
@@ -312,6 +312,12 @@ describe("outline card", () => {
         render(<ChatMessageList messages={[turn([card(1)])]} qa={controller({}, ws)} />);
         expect(screen.getAllByText("檢核通過")).toHaveLength(1);
         expect(screen.queryByText(/待確認/)).not.toBeInTheDocument();
+        const exportCard = screen.getByRole("region", { name: "Word 文件" });
+        const rows = within(exportCard).getAllByRole("listitem");
+        expect(rows[0]).toHaveTextContent("乾淨");
+        expect(rows[0]).toHaveTextContent("檢核通過");
+        expect(rows[0]).toHaveTextContent("最新");
+        expect(rows[1]).not.toHaveTextContent("檢核通過");
     });
 
     it("shows the AI progress line, labels AI and outline versions, and offers a retry after a failure", () => {

@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Check, ChevronDown, CircleAlert, FileText, Loader2, Plus, Trash2, Upload } from "lucide-react";
+import { Check, ChevronDown, CircleAlert, Download, FileText, Loader2, Plus, Trash2, Upload } from "lucide-react";
 import { ApiError } from "../../../lib/api/client";
 import { artifactDownloadUrl } from "../../../lib/api/artifacts";
 import { QA_EVIDENCE_GROUPS } from "../../../lib/api/qa";
@@ -443,45 +443,65 @@ function GenerationStatus({ phase }: { phase: string | null }) {
 }
 
 function IssueList({ issues }: { issues: QaIssue[] }) {
-    const [open, setOpen] = useState(false);
     return (
-        <div className="flex flex-col gap-1">
-            <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)}
-                className="inline-flex w-fit items-center gap-1 rounded-md text-xs font-medium text-destructive hover:underline">
-                ⚠ {issues.length} 項待確認
-                <ChevronDown size={13} aria-hidden="true" className={open ? "rotate-180" : undefined} />
-            </button>
-            {open && (
-                <ul className="flex flex-col gap-1 rounded-lg border border-border/60 p-2 text-xs">
-                    {issues.map((issue, index) => (
-                        <li key={index} className="flex flex-wrap items-baseline gap-x-1.5 break-words">
-                            <span className="font-medium">第 {issue.question_no} 題　{issue.part === "short" ? "簡答" : "詳答"}</span>
-                            <Badge variant="outline">{ISSUE_KIND_LABELS[issue.kind] ?? issue.kind}</Badge>
-                            <span className="text-muted-foreground">{issue.message}</span>
-                        </li>
-                    ))}
-                </ul>
-            )}
-        </div>
+        <ul className="flex flex-col gap-1 rounded-lg bg-muted/40 p-2 text-xs">
+            {issues.map((issue, index) => (
+                <li key={index} className="flex flex-wrap items-baseline gap-x-1.5 break-words">
+                    <span className="font-medium">第 {issue.question_no} 題　{issue.part === "short" ? "簡答" : "詳答"}</span>
+                    <Badge variant="outline">{ISSUE_KIND_LABELS[issue.kind] ?? issue.kind}</Badge>
+                    <span className="text-muted-foreground">{issue.message}</span>
+                </li>
+            ))}
+        </ul>
     );
 }
 
-/** Verification result of an AI version: the open issues, or a quiet pass. Outline versions show nothing. */
-function VerificationLine({ version }: { version: QaVersion }) {
-    if (version.kind !== "ai" || !version.checked) return null;
-    const issues = version.issues ?? [];
-    if (issues.length > 0) return <IssueList issues={issues} />;
-    return <span className="text-xs text-muted-foreground">檢核通過</span>;
+function versionTime(createdAt: string): string {
+    const date = new Date(createdAt);
+    if (!createdAt || Number.isNaN(date.getTime())) return "";
+    const pad = (value: number) => String(value).padStart(2, "0");
+    return `${date.getMonth() + 1}/${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-function VersionChip({ version }: { version: QaVersion }) {
+/** Verification result of an AI version: the open issues toggle, or a quiet pass. Outline versions show nothing. */
+function VerificationBadge({ version, open, onToggle }: { version: QaVersion; open: boolean; onToggle: () => void }) {
+    if (version.kind !== "ai" || !version.checked) return null;
+    const count = version.issues?.length ?? 0;
+    if (count === 0) {
+        return (
+            <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                <Check size={13} aria-hidden="true" />檢核通過
+            </span>
+        );
+    }
     return (
-        <a href={artifactDownloadUrl(version.artifact_id)} download
-            className="inline-flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-0.5 text-xs hover:bg-muted">
-            <FileText size={13} aria-hidden="true" />
-            <Badge variant="secondary">{version.kind === "ai" ? "AI 撰寫" : "大綱版"}</Badge>
-            {version.title}
-        </a>
+        <button type="button" aria-expanded={open} onClick={onToggle}
+            className="inline-flex shrink-0 items-center gap-1 rounded-md text-xs font-medium text-destructive hover:underline">
+            ⚠ {count} 項待確認
+            <ChevronDown size={13} aria-hidden="true" className={open ? "rotate-180" : undefined} />
+        </button>
+    );
+}
+
+function VersionRow({ version, latest }: { version: QaVersion; latest: boolean }) {
+    const [open, setOpen] = useState(false);
+    const time = versionTime(version.created_at);
+    return (
+        <li className="flex flex-col gap-2 px-3 py-2.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <FileText size={15} aria-hidden="true" className="shrink-0 text-muted-foreground" />
+                <Badge variant={version.kind === "ai" ? "secondary" : "outline"}>{version.kind === "ai" ? "AI 撰寫" : "大綱版"}</Badge>
+                <span className="min-w-0 flex-1 truncate font-medium">{version.title}</span>
+                {latest && <span className="text-xs text-primary">最新</span>}
+                {time && <span className="text-xs tabular-nums text-muted-foreground">{time}</span>}
+                <VerificationBadge version={version} open={open} onToggle={() => setOpen((value) => !value)} />
+                <a href={artifactDownloadUrl(version.artifact_id)} download aria-label={`下載 ${version.title}`}
+                    className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-medium hover:bg-muted">
+                    <Download size={13} aria-hidden="true" />下載
+                </a>
+            </div>
+            {open && <IssueList issues={version.issues ?? []} />}
+        </li>
     );
 }
 
@@ -490,7 +510,12 @@ function DocumentExport({ versions, qa }: { versions: QaVersion[]; qa: QaControl
     const { busy, error, run } = useRun();
     const { running, phase, error: failure } = qa.generation;
     return (
-        <div className="flex flex-col gap-2">
+        <section data-qa-card="document" aria-label="Word 文件"
+            className="mt-3 flex min-w-0 flex-col gap-3 rounded-2xl border border-border bg-card p-3 text-sm sm:p-4">
+            <div className="flex flex-col gap-0.5">
+                <h3 className="font-medium">Word 文件</h3>
+                <p className="text-xs text-muted-foreground">依已確認的答題架構撰寫簡答與詳答，並由第二個模型檢核數字與內容。</p>
+            </div>
             <div className="flex flex-wrap items-center gap-2">
                 <Input aria-label="會期" className="h-8 w-44" placeholder="會期（例如 11-5）" value={label}
                     onChange={(event) => setLabel(event.target.value)} />
@@ -505,21 +530,18 @@ function DocumentExport({ versions, qa }: { versions: QaVersion[]; qa: QaControl
             {running && <GenerationStatus phase={phase} />}
             {failure && !running && <ErrorLine message={`AI 撰寫失敗：${failure}`} />}
             {versions.length > 0 && (
-                <ul className="flex flex-col gap-1">
-                    {versions.map((version) => (
-                        <li key={version.artifact_id} className="flex flex-col items-start gap-1">
-                            <VersionChip version={version} />
-                            <VerificationLine version={version} />
-                        </li>
+                <ul aria-label="已產生的版本" className="flex flex-col divide-y divide-border/60 rounded-xl border border-border/60">
+                    {versions.map((version, index) => (
+                        <VersionRow key={version.artifact_id} version={version} latest={index === 0 && versions.length > 1} />
                     ))}
                 </ul>
             )}
             <ErrorLine message={error} />
-        </div>
+        </section>
     );
 }
 
-/** The Word export, shown once every outline is confirmed (and while the AI writer runs). */
+/** The Word export card, shown once every outline is confirmed (and while the AI writer runs). */
 function ExportSlot({ live, qa }: { live: QaWorkspace | null; qa: QaController }) {
     if (live?.stage !== "ready" && live?.stage !== "generating") return null;
     return <DocumentExport versions={live.versions ?? []} qa={qa} />;
@@ -536,33 +558,35 @@ function OutlineCard({ data, live, readOnly, qa, showConfirmAll }: {
         && live!.questions.items.every((q) => live!.outline?.[String(q.no)]);
     const allConfirmed = allHave && live!.questions.items.every((q) => live!.outline[String(q.no)].confirmed);
     return (
-        <CardShell kind="outline" readOnly={readOnly} badge={outline.confirmed ? <ConfirmedBadge /> : undefined}>
-            <div className="break-words text-xs font-medium text-muted-foreground">第 {no} 題　{data.question_text}</div>
-            {editing ? (
-                <OutlineEditor no={no} outline={outline} qa={qa} onDone={() => setEditing(false)} />
-            ) : (
-                <OutlineView outline={outline} />
-            )}
-            {!readOnly && !editing && (
-                <div className="flex flex-wrap gap-2">
-                    {!outline.confirmed && (
-                        <Button type="button" size="sm" disabled={busy}
-                            onClick={() => void run(() => qa.confirmOutline(no))}>
-                            確認
-                        </Button>
-                    )}
-                    <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setEditing(true)}>修改</Button>
-                    {showConfirmAll && allHave && !allConfirmed && (
-                        <Button type="button" variant="secondary" size="sm" disabled={busy}
-                            onClick={() => void run(() => qa.confirmAllOutlines())}>
-                            全部確認
-                        </Button>
-                    )}
-                </div>
-            )}
+        <>
+            <CardShell kind="outline" readOnly={readOnly} badge={outline.confirmed ? <ConfirmedBadge /> : undefined}>
+                <div className="break-words text-xs font-medium text-muted-foreground">第 {no} 題　{data.question_text}</div>
+                {editing ? (
+                    <OutlineEditor no={no} outline={outline} qa={qa} onDone={() => setEditing(false)} />
+                ) : (
+                    <OutlineView outline={outline} />
+                )}
+                {!readOnly && !editing && (
+                    <div className="flex flex-wrap gap-2">
+                        {!outline.confirmed && (
+                            <Button type="button" size="sm" disabled={busy}
+                                onClick={() => void run(() => qa.confirmOutline(no))}>
+                                確認
+                            </Button>
+                        )}
+                        <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setEditing(true)}>修改</Button>
+                        {showConfirmAll && allHave && !allConfirmed && (
+                            <Button type="button" variant="secondary" size="sm" disabled={busy}
+                                onClick={() => void run(() => qa.confirmAllOutlines())}>
+                                全部確認
+                            </Button>
+                        )}
+                    </div>
+                )}
+                <ErrorLine message={error} />
+            </CardShell>
             {!readOnly && showConfirmAll && <ExportSlot live={live} qa={qa} />}
-            <ErrorLine message={error} />
-        </CardShell>
+        </>
     );
 }
 
