@@ -34,7 +34,9 @@ async def publish_document(
     return await repository.create(artifact)
 
 
-def record_version(workspace: ChatQaWorkspace, artifact: Artifact, kind: str = "outline") -> None:
+def record_version(
+    workspace: ChatQaWorkspace, artifact: Artifact, kind: str = "outline", document: QaDocument | None = None
+) -> None:
     """Newest first; ``versions`` is the workspace's history of produced files (``kind``: outline | ai)."""
 
     entry = {
@@ -44,4 +46,6 @@ def record_version(workspace: ChatQaWorkspace, artifact: Artifact, kind: str = "
         "created_at": artifact.created_at.isoformat(),
         "download_url": f"/api/v1/artifacts/{artifact.id}/download",
     }
+    if document is not None and document.checked:
+        entry |= {"checked": True, "issues": [issue.model_dump() for issue in document.issues], "review": document.review}
     workspace.versions = [entry, *workspace.versions]

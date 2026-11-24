@@ -49,6 +49,16 @@ export interface QaOutline {
     confirmed: boolean;
 }
 
+export type QaIssueKind = "numeric" | "inconsistent" | "unsupported" | "off_question" | "outline" | "style";
+
+/** A verification finding the writer left unresolved; shown as ⚠ for manual confirmation. */
+export interface QaIssue {
+    question_no: number;
+    part: "short" | "detail";
+    kind: QaIssueKind;
+    message: string;
+}
+
 /** One produced Word file, newest first in `QaWorkspace.versions`. */
 export interface QaVersion {
     /** "ai" = written by the AI writer; "outline" (or absent) = the deterministic outline wording. */
@@ -57,6 +67,9 @@ export interface QaVersion {
     title: string;
     created_at: string;
     download_url: string;
+    /** AI versions only: true once the document was verified; `issues` are then the unresolved findings. */
+    checked?: boolean;
+    issues?: QaIssue[];
 }
 
 export interface QaDocumentResult {
@@ -196,6 +209,8 @@ export interface QaGenerationJob {
     error?: string | null;
     artifact_id?: string | null;
     download_url?: string | null;
+    checked?: boolean;
+    issues?: QaIssue[];
 }
 
 /** Starts the AI writer for the confirmed outlines; 409 when one is already running. */

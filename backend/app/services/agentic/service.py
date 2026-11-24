@@ -778,6 +778,8 @@ async def _execute_bounded_agents(
     author_skills = _stage_skills(adapter, "author", staged)
     reviewer_skills = _stage_skills(adapter, "reviewer", staged)
     independent_review = bool(getattr(adapter, "independent_semantic_review", False))
+    # Advisory reviews never reject: unresolved findings stay with the published result.
+    advisory_review = bool(getattr(adapter, "advisory_review", False))
     author_attempt = 1
     reviewer_attempt = 0
     prompt = str(initial_prompt)
@@ -1060,12 +1062,20 @@ async def _execute_bounded_agents(
                 # runner that returns free-form text instead is a defect in
                 # that runner, not a correctable reviewer finding.
                 raise WorkflowExecutionError("reviewer runner did not return a validated review outcome")
-            review = normalize_review_outcome(review_result.output, continuity, attempt=reviewer_attempt)
+            if advisory_review:
+                # The adapter merges its own checks and assigns stable ids, so
+                # the model need not echo previous finding ids.
+                review = await _call(adapter.combine_review, value, workspace, review_result.output)
+                continuity = previous_review
+                review_attempt, review_cap = reviewer_attempt, int(adapter.review_round_limit) + 1
+            else:
+                review = normalize_review_outcome(review_result.output, continuity, attempt=reviewer_attempt)
+                review_attempt, review_cap = author_attempt, max_rounds
             evaluation = evaluate_review(
                 review,
                 continuity,
-                attempt=author_attempt,
-                max_attempts=max_rounds,
+                attempt=review_attempt,
+                max_attempts=review_cap,
                 stagnant_transitions=stagnant_transitions,
                 # Slides reviews are independent observations of the current
                 # candidate.  Repeated blockers still consume attempts, but
@@ -1116,6 +1126,9 @@ async def _execute_bounded_agents(
             previous_review = review
             stagnant_transitions = evaluation.stagnant_transitions
         if evaluation.decision is ReviewDecision.PUBLISH:
+            return author_result
+        if advisory_review and evaluation.decision is not ReviewDecision.RETRY:
+            # Round limit or stagnation: the draft is published with its open issues.
             return author_result
         if evaluation.decision in {ReviewDecision.REJECT_MAX_ATTEMPTS, ReviewDecision.REJECT_STAGNATED}:
             failure_message = (

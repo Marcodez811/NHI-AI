@@ -66,6 +66,7 @@ GROUP_LABELS = {
     "chat": "對話",
     "chat_dev": "對話（進階）",
     "agents": "Agent 流程",
+    "skills": "技能",
     "uploads": "上傳限制",
     "cleanup": "檔案清理",
 }
@@ -93,6 +94,7 @@ REGISTRY: tuple[SettingDef, ...] = (
     _d("agents.limits.event_retention_seconds", "int", "dev", "agents", "事件保留時間", "Agent 診斷事件在 Redis 中的保留時間。", min=1, max=2_592_000, unit_zh=_SEC, restart_required=True),
     _d("agents.limits.keep_workspace_on_failure", "bool", "dev", "agents", "失敗時保留工作區", "任務失敗後保留工作區以便除錯。"),
     _d("agents.limits.require_process_isolation", "bool", "dev", "agents", "要求程序隔離", "必須在隔離沙箱中執行 Agent。"),
+    _d("skills.legislative_qa.max_review_rounds", "int", "dev", "skills", "立院QA 檢核修訂輪數", "AI 撰寫後，檢核並修訂的最多輪數；0 表示只檢核不修訂。", min=0, max=5),
     _d("uploads.max_upload_bytes", "int", "dev", "uploads", "知識庫文件大小上限", "單一知識庫文件的大小上限。", min=1024, max=10 * 1024**3, unit_zh=_BYTES),
     _d("uploads.chat.max_attachments", "int", "dev", "uploads", "對話附件數量上限", "單則訊息可附加的檔案數量。", min=1, max=50),
     _d("uploads.chat.max_message_chars", "int", "dev", "uploads", "訊息字數上限", "單則訊息的最大字數。", min=1, max=1_000_000, unit_zh="字"),

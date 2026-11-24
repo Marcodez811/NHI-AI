@@ -59,6 +59,7 @@ YAML_FIELD_MAP: dict[tuple[str, ...], str] = {
             "require_process_isolation": "agent_require_process_isolation",
         }.items()
     },
+    ("skills", "legislative_qa", "max_review_rounds"): "legislative_qa_max_review_rounds",
     ("uploads", "max_upload_bytes"): "max_upload_bytes",
     **{
         ("uploads", "chat", key): f"chat_{key}"
@@ -256,6 +257,12 @@ class Settings(BaseSettings):
         default=5,
         ge=1,
         validation_alias=AliasChoices("AGENT_MAX_AUTHOR_ATTEMPTS", "AGENT_MAX_REVIEW_ROUNDS"),
+    )
+    legislative_qa_max_review_rounds: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        validation_alias=AliasChoices("LEGISLATIVE_QA_MAX_REVIEW_ROUNDS"),
     )
     agent_review_stagnation_limit: int = Field(
         default=2,

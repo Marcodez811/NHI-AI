@@ -9,6 +9,8 @@ import { QA_EVIDENCE_GROUPS } from "../../../lib/api/qa";
 import type {
     QaCard,
     QaDocumentsCardData,
+    QaIssue,
+    QaIssueKind,
     QaEvidenceCardData,
     QaEvidenceGroup,
     QaOutline,
@@ -416,9 +418,19 @@ const PHASE_LABELS: Record<string, string> = {
     queued: "排隊中",
     preparing: "整理資料",
     drafting: "AI 撰寫中",
-    revising: "AI 修正中",
-    validating: "檢查內容",
+    validating: "檢查格式",
+    reviewing: "AI 檢核中",
+    revising: "AI 修訂中",
     publishing: "產生 Word 文件",
+};
+
+const ISSUE_KIND_LABELS: Record<QaIssueKind, string> = {
+    numeric: "數字與原文不符",
+    inconsistent: "簡答與詳答不一致",
+    unsupported: "資料中沒有依據",
+    off_question: "偏離題目",
+    outline: "與大綱不符",
+    style: "格式或語氣",
 };
 
 function GenerationStatus({ phase }: { phase: string | null }) {
@@ -428,6 +440,38 @@ function GenerationStatus({ phase }: { phase: string | null }) {
             {PHASE_LABELS[phase ?? "queued"] ?? "處理中"}，約需幾分鐘，可以先離開這個頁面…
         </div>
     );
+}
+
+function IssueList({ issues }: { issues: QaIssue[] }) {
+    const [open, setOpen] = useState(false);
+    return (
+        <div className="flex flex-col gap-1">
+            <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)}
+                className="inline-flex w-fit items-center gap-1 rounded-md text-xs font-medium text-destructive hover:underline">
+                ⚠ {issues.length} 項待確認
+                <ChevronDown size={13} aria-hidden="true" className={open ? "rotate-180" : undefined} />
+            </button>
+            {open && (
+                <ul className="flex flex-col gap-1 rounded-lg border border-border/60 p-2 text-xs">
+                    {issues.map((issue, index) => (
+                        <li key={index} className="flex flex-wrap items-baseline gap-x-1.5 break-words">
+                            <span className="font-medium">第 {issue.question_no} 題　{issue.part === "short" ? "簡答" : "詳答"}</span>
+                            <Badge variant="outline">{ISSUE_KIND_LABELS[issue.kind] ?? issue.kind}</Badge>
+                            <span className="text-muted-foreground">{issue.message}</span>
+                        </li>
+                    ))}
+                </ul>
+            )}
+        </div>
+    );
+}
+
+/** Verification result of an AI version: the open issues, or a quiet pass. Outline versions show nothing. */
+function VerificationLine({ version }: { version: QaVersion }) {
+    if (version.kind !== "ai" || !version.checked) return null;
+    const issues = version.issues ?? [];
+    if (issues.length > 0) return <IssueList issues={issues} />;
+    return <span className="text-xs text-muted-foreground">檢核通過</span>;
 }
 
 function VersionChip({ version }: { version: QaVersion }) {
@@ -463,7 +507,10 @@ function DocumentExport({ versions, qa }: { versions: QaVersion[]; qa: QaControl
             {versions.length > 0 && (
                 <ul className="flex flex-col gap-1">
                     {versions.map((version) => (
-                        <li key={version.artifact_id}><VersionChip version={version} /></li>
+                        <li key={version.artifact_id} className="flex flex-col items-start gap-1">
+                            <VersionChip version={version} />
+                            <VerificationLine version={version} />
+                        </li>
                     ))}
                 </ul>
             )}

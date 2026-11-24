@@ -113,3 +113,18 @@ async def test_status_of_a_completed_job_links_the_download():
     })
     done = await get_qa_generation(session_id, job_id, repository, backend)
     assert done.artifact_id == artifact_id and done.download_url == f"/api/v1/artifacts/{artifact_id}/download"
+
+
+@pytest.mark.asyncio
+async def test_status_of_a_completed_job_carries_the_open_issues():
+    repository, backend, task = InMemoryChatRepository(), Backend(), Task()
+    session_id = await _ready(repository)
+    job_id = (await generate_qa_document(session_id, GenerateQaRequest(), repository, backend, task)).job_id
+    issue = {"question_no": 2, "part": "detail", "kind": "unsupported", "message": "沒有依據"}
+    backend.result = SimpleNamespace(return_value={
+        "workflow": "legislative_qa", "status": "completed",
+        "output": {"job_id": str(job_id), "artifact_id": str(uuid4()), "checked": True, "issues": [issue], "review": {"rounds": 3, "found": [4, 2, 1]}},
+    })
+    done = await get_qa_generation(session_id, job_id, repository, backend)
+    assert done.checked is True and [i.model_dump() for i in done.issues] == [issue]
+    assert done.review == {"rounds": 3, "found": [4, 2, 1]}

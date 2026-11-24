@@ -39,6 +39,7 @@ def _finished(job_id: UUID, value: Any) -> QaJobStatusResponse | None:
     return QaJobStatusResponse(
         job_id=job_id, status=JobStatus.COMPLETED, phase=AgentPhase.COMPLETED, artifact_id=result.artifact_id,
         download_url=f"/api/v1/artifacts/{result.artifact_id}/download",
+        checked=result.checked, issues=result.issues, review=result.review,
     )
 
 

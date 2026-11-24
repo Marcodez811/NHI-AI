@@ -76,6 +76,9 @@ agents:
     event_retention_seconds: 86400
     keep_workspace_on_failure: true
     require_process_isolation: true
+skills:
+  legislative_qa:
+    max_review_rounds: 2      # checker + revision rounds after the first draft
 uploads:
   max_upload_bytes: 262144000           # knowledge-base documents
   chat:

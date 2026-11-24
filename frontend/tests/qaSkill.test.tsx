@@ -271,6 +271,49 @@ describe("outline card", () => {
         expect(qa.createOutlineDocument).toHaveBeenCalledWith("11-5");
     });
 
+    it("names the checking and revising phases in the progress line", () => {
+        const ws = workspace({ stage: "generating", outline: { "1": outline(true) } });
+        const { rerender } = render(<ChatMessageList messages={[turn([card(1)])]}
+            qa={controller({ generation: { running: true, phase: "reviewing", error: null } }, ws)} />);
+        expect(screen.getByRole("status")).toHaveTextContent("AI 檢核中");
+        rerender(<ChatMessageList messages={[turn([card(1)])]}
+            qa={controller({ generation: { running: true, phase: "revising", error: null } }, ws)} />);
+        expect(screen.getByRole("status")).toHaveTextContent("AI 修訂中");
+    });
+
+    it("lists unresolved issues of a checked AI version behind a ⚠ toggle", async () => {
+        const issues = [
+            { question_no: 2, part: "detail" as const, kind: "unsupported" as const, message: "第一個說法沒有依據" },
+            { question_no: 1, part: "short" as const, kind: "numeric" as const, message: "數字 0.9999 不在原文" },
+        ];
+        const versions = [{
+            artifact_id: "a2", title: "新版", created_at: "", download_url: "/x", kind: "ai" as const, checked: true, issues,
+        }];
+        const ws = workspace({ stage: "ready", outline: { "1": outline(true) }, versions });
+        render(<ChatMessageList messages={[turn([card(1)])]} qa={controller({}, ws)} />);
+        expect(screen.queryByText("第一個說法沒有依據")).not.toBeInTheDocument();
+        expect(screen.queryByText("檢核通過")).not.toBeInTheDocument();
+        await userEvent.click(screen.getByRole("button", { name: /2 項待確認/ }));
+        expect(screen.getByText("第一個說法沒有依據")).toBeInTheDocument();
+        expect(screen.getByText(/第 2 題\s*詳答/)).toBeInTheDocument();
+        expect(screen.getByText("資料中沒有依據")).toBeInTheDocument();
+        expect(screen.getByText("數字與原文不符")).toBeInTheDocument();
+        await userEvent.click(screen.getByRole("button", { name: /2 項待確認/ }));
+        expect(screen.queryByText("第一個說法沒有依據")).not.toBeInTheDocument();
+    });
+
+    it("shows a quiet pass for a clean check and nothing for unchecked or outline versions", () => {
+        const versions = [
+            { artifact_id: "a3", title: "乾淨", created_at: "", download_url: "/x", kind: "ai" as const, checked: true, issues: [] },
+            { artifact_id: "a2", title: "舊 AI", created_at: "", download_url: "/y", kind: "ai" as const },
+            { artifact_id: "a1", title: "大綱", created_at: "", download_url: "/z" },
+        ];
+        const ws = workspace({ stage: "ready", outline: { "1": outline(true) }, versions });
+        render(<ChatMessageList messages={[turn([card(1)])]} qa={controller({}, ws)} />);
+        expect(screen.getAllByText("檢核通過")).toHaveLength(1);
+        expect(screen.queryByText(/待確認/)).not.toBeInTheDocument();
+    });
+
     it("shows the AI progress line, labels AI and outline versions, and offers a retry after a failure", () => {
         const versions = [
             { artifact_id: "a2", title: "新版", created_at: "", download_url: "/x", kind: "ai" as const },

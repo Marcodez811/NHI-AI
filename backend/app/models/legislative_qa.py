@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.slides import JobStatus
+from app.services.legislative_qa.document import QaIssue
 from app.services.agentic.contracts import AgentPhase
 
 
@@ -24,6 +25,9 @@ class QaTaskPayload(BaseModel):
 class QaTaskResult(BaseModel):
     job_id: UUID
     artifact_id: UUID
+    checked: bool = False
+    issues: list[QaIssue] = Field(default_factory=list)
+    review: dict = Field(default_factory=dict)
 
 
 class QaJobStatusResponse(BaseModel):
@@ -36,3 +40,7 @@ class QaJobStatusResponse(BaseModel):
     error: str | None = None
     artifact_id: UUID | None = None
     download_url: str | None = None
+    # Verification of the finished document: issues the writer could not resolve (for 人工確認).
+    checked: bool = False
+    issues: list[QaIssue] = Field(default_factory=list)
+    review: dict = Field(default_factory=dict)

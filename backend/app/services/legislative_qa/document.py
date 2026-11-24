@@ -35,6 +35,18 @@ class QaDocQuestion(BaseModel):
     detail: list[Section] = Field(default_factory=list)
 
 
+ISSUE_KINDS = ("numeric", "inconsistent", "unsupported", "off_question", "outline", "style")
+
+
+class QaIssue(BaseModel):
+    """A verification finding the writer could not (or was not asked to) resolve; shown as ⚠ for 人工確認."""
+
+    question_no: int
+    part: str  # "short" | "detail"
+    kind: str  # one of ISSUE_KINDS
+    message: str
+
+
 class QaDocument(BaseModel):
     # "outline" = deterministic outline wording; "ai" = written by the legislative_qa workflow.
     kind: str = "outline"
@@ -42,6 +54,10 @@ class QaDocument(BaseModel):
     session_label: str | None = None
     questions: list[QaDocQuestion] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
+    # Verification result of an AI version; ``checked`` is False for outline versions.
+    checked: bool = False
+    issues: list[QaIssue] = Field(default_factory=list)
+    review: dict[str, Any] = Field(default_factory=dict)
 
 
 def document_title(session_label: str | None, count: int) -> str:
