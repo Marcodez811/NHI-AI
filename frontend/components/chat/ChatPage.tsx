@@ -7,8 +7,53 @@ import { useStickToBottom } from "../../lib/hooks/useStickToBottom";
 import { ChatComposer } from "./ChatComposer";
 import { ChatEmptyState } from "./ChatEmptyState";
 import { ChatMessageList } from "./ChatMessageList";
+import { QaPreviewPanel } from "./qa/QaPreviewPanel";
+import type { QaController } from "./qa/QaCards";
 import { QaStepper } from "./qa/QaStepper";
+import type { ChatTurn } from "../../lib/hooks/useChatSession";
 import { ApiError } from "../../lib/api/client";
+
+function latestUserMessageKey(messages: ChatTurn[]): string | null {
+    for (let index = messages.length - 1; index >= 0; index--) {
+        if (messages[index].role === "user" && !messages[index].display_text) return messages[index].localKey;
+    }
+    return null;
+}
+
+/** The preview beside the chat (a sheet on phones) while a version is open. */
+function PreviewDock({ sessionId, qa }: { sessionId: string | null; qa: QaController | undefined }) {
+    if (!qa?.skill || !qa.previewId) return null;
+    return (
+        <QaPreviewPanel sessionId={sessionId} versions={qa.workspace?.versions ?? []} selectedId={qa.previewId}
+            onSelect={qa.openPreview} onClose={qa.closePreview} generation={qa.generation} onRevise={qa.reviseVersion} />
+    );
+}
+
+function ChatTranscript({ chat, qa }: { chat: ReturnType<typeof useChatEngine>; qa: QaController | undefined }) {
+    if (chat.loading) {
+        return (
+            <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+                <LoaderCircle size={16} className="animate-spin" />
+                正在載入對話…
+            </div>
+        );
+    }
+    if (chat.loadError) {
+        return (
+            <div role="alert" className="flex items-center justify-center gap-2 py-16 text-sm text-destructive">
+                <CircleAlert size={16} />
+                {chat.loadError}
+            </div>
+        );
+    }
+    return (
+        <>
+            {qa?.skill && <QaStepper stage={qa.workspace?.stage ?? "questions"} />}
+            <ChatMessageList messages={chat.messages} sessionId={chat.sessionId} attachmentLookup={chat.attachmentLookup} compactedThroughMessageId={chat.compactedThroughMessageId}
+                qa={qa} onUploadFiles={chat.attachFiles} />
+        </>
+    );
+}
 
 /**
  * The chat surface for both `/chat` (no session yet) and `/chat/[sessionId]`.
@@ -27,13 +72,7 @@ export function ChatPage() {
             setSkillError(caught instanceof ApiError ? caught.message : "技能切換失敗，請稍後再試。");
         }
     };
-    let latestUserKey: string | null = null;
-    for (let index = chat.messages.length - 1; index >= 0; index--) {
-        if (chat.messages[index].role === "user" && !chat.messages[index].display_text) {
-            latestUserKey = chat.messages[index].localKey;
-            break;
-        }
-    }
+    const latestUserKey = latestUserMessageKey(chat.messages);
     const { contentRef, showLatest, scrollToBottom } = useStickToBottom({
         sessionId: chat.sessionId,
         loading: chat.loading,
@@ -74,7 +113,8 @@ export function ChatPage() {
     );
 
     return (
-        <section ref={contentRef} className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-3xl flex-col px-4 sm:px-5">
+        <div className="flex items-start">
+        <section ref={contentRef} className="mx-auto flex min-h-[calc(100vh-4rem)] w-full min-w-0 max-w-3xl flex-1 flex-col px-4 sm:px-5">
             {showEmptyState ? (
                 <div data-chat-layout="centered" className="flex flex-1 flex-col items-center justify-center py-12">
                     <ChatEmptyState onPick={chat.setDraft}>{composer}</ChatEmptyState>
@@ -82,23 +122,7 @@ export function ChatPage() {
             ) : (
                 <>
                     <div className="flex flex-1 flex-col justify-start pt-12 pb-8 sm:pt-16">
-                        {chat.loading ? (
-                            <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
-                                <LoaderCircle size={16} className="animate-spin" />
-                                正在載入對話…
-                            </div>
-                        ) : chat.loadError ? (
-                            <div role="alert" className="flex items-center justify-center gap-2 py-16 text-sm text-destructive">
-                                <CircleAlert size={16} />
-                                {chat.loadError}
-                            </div>
-                        ) : (
-                            <>
-                                {qa?.skill && <QaStepper stage={qa.workspace?.stage ?? "questions"} />}
-                                <ChatMessageList messages={chat.messages} sessionId={chat.sessionId} attachmentLookup={chat.attachmentLookup} compactedThroughMessageId={chat.compactedThroughMessageId}
-                                    qa={qa} onUploadFiles={chat.attachFiles} />
-                            </>
-                        )}
+                        <ChatTranscript chat={chat} qa={qa} />
                     </div>
                     {!chat.loadError && (
                         <div
@@ -121,5 +145,7 @@ export function ChatPage() {
                 </>
             )}
         </section>
+        <PreviewDock sessionId={chat.sessionId} qa={qa} />
+        </div>
     );
 }

@@ -45,6 +45,9 @@ class QaIssue(BaseModel):
     part: str  # "short" | "detail"
     kind: str  # one of ISSUE_KINDS
     message: str
+    # 0-based place inside the part (section of ``short``/``detail``, paragraph of that section); optional.
+    section: int | None = None
+    paragraph: int | None = None
 
 
 class QaDocument(BaseModel):
@@ -58,6 +61,9 @@ class QaDocument(BaseModel):
     checked: bool = False
     issues: list[QaIssue] = Field(default_factory=list)
     review: dict[str, Any] = Field(default_factory=dict)
+    # A scoped revision: the base version's artifact id and a short note (the user's instruction).
+    revised_from: str | None = None
+    revision_note: str | None = None
 
 
 def document_title(session_label: str | None, count: int) -> str:

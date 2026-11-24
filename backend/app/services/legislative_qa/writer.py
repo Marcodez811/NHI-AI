@@ -171,7 +171,7 @@ def check_output(writer_input: dict[str, Any], raw: str) -> AiOutput:
     return output
 
 
-def _document_section(section: AiSection, ids: dict[str, str], sources: SourceIndex) -> Section:
+def document_section(section: AiSection, ids: dict[str, str], sources: SourceIndex) -> Section:
     paragraphs = []
     for paragraph in section.paragraphs:
         cites: list[int] = []
@@ -194,8 +194,8 @@ def build_ai_document(writer_input: dict[str, Any], output: AiOutput) -> QaDocum
         ids = {item["id"]: item["source"] for item in spec["evidence"]}
         questions.append(QaDocQuestion(
             no=answer.no, text=spec["text"],
-            short=[_document_section(section, ids, sources) for section in answer.short],
-            detail=[_document_section(section, ids, sources) for section in answer.detail],
+            short=[document_section(section, ids, sources) for section in answer.short],
+            detail=[document_section(section, ids, sources) for section in answer.detail],
         ))
     label = writer_input.get("session_label")
     return QaDocument(

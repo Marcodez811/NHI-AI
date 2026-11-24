@@ -27,6 +27,7 @@ const qaApi = vi.hoisted(() => ({
     confirmQaOutline: vi.fn(),
     startQaGeneration: vi.fn(),
     fetchQaGeneration: vi.fn(),
+    startQaRevision: vi.fn(),
 }));
 vi.mock("../lib/api/qa", async (importOriginal) => ({
     ...(await importOriginal<typeof import("../lib/api/qa")>()),
@@ -179,5 +180,43 @@ describe("useChatSession skill mode", () => {
         await waitFor(() => expect(result.current.qa.generation.error).toBe("格式不正確"));
         expect(qaApi.fetchQaGeneration).toHaveBeenCalledWith("s1", "j9");
         expect(result.current.qa.generation.running).toBe(false);
+    });
+
+    it("starts a revision and moves an open preview to the finished revised version", async () => {
+        api.fetchChatSession.mockResolvedValue(detail({ skill: "legislative_qa" }));
+        const base = { kind: "ai", artifact_id: "a1", title: "原版", created_at: "", download_url: "/x" };
+        qaApi.fetchQaWorkspace.mockResolvedValue({ ...workspace, stage: "ready", versions: [base] });
+        const { result } = renderHook(() => useChatSession("s1"));
+        await waitFor(() => expect(result.current.qa.workspace?.versions).toHaveLength(1));
+        act(() => result.current.qa.openPreview("a1"));
+        expect(result.current.qa.previewId).toBe("a1");
+
+        qaApi.startQaRevision.mockResolvedValue({ job_id: "j2", status: "queued", phase: "queued" });
+        qaApi.fetchQaWorkspace.mockResolvedValue({ ...workspace, stage: "generating", versions: [base], generation: { job_id: "j2" } });
+        qaApi.fetchQaGeneration.mockResolvedValue({ job_id: "j2", status: "running", phase: "drafting" });
+        const body = { question_no: 3, part: "short" as const, instruction: "肯定一點", base_artifact_id: "a1" };
+        await act(async () => { await result.current.qa.reviseVersion(body); });
+        expect(qaApi.startQaRevision).toHaveBeenCalledWith("s1", body);
+        await waitFor(() => expect(result.current.qa.generation.running).toBe(true));
+        expect(result.current.qa.previewId).toBe("a1");
+
+        const revised = { ...base, artifact_id: "a2", title: "修訂版", revised_from: "a1", revision_note: "肯定一點" };
+        qaApi.fetchQaWorkspace.mockResolvedValue({ ...workspace, stage: "ready", versions: [revised, base] });
+        qaApi.fetchQaGeneration.mockResolvedValue({ job_id: "j2", status: "completed", phase: "completed", artifact_id: "a2" });
+        await waitFor(() => expect(result.current.qa.previewId).toBe("a2"), { timeout: 4000 });
+    });
+
+    it("leaves a closed preview closed when a revision finishes", async () => {
+        api.fetchChatSession.mockResolvedValue(detail({ skill: "legislative_qa" }));
+        const base = { kind: "ai", artifact_id: "a1", title: "原版", created_at: "", download_url: "/x" };
+        qaApi.fetchQaWorkspace.mockResolvedValue({ ...workspace, stage: "ready", versions: [base] });
+        const { result } = renderHook(() => useChatSession("s1"));
+        await waitFor(() => expect(result.current.qa.workspace?.versions).toHaveLength(1));
+        qaApi.fetchQaWorkspace.mockResolvedValue({
+            ...workspace, stage: "ready", versions: [{ ...base, artifact_id: "a2", revised_from: "a1" }, base],
+        });
+        await act(async () => { await result.current.qa.refresh(); });
+        await waitFor(() => expect(result.current.qa.workspace?.versions).toHaveLength(2));
+        expect(result.current.qa.previewId).toBeNull();
     });
 });

@@ -35,6 +35,8 @@ function controller(overrides: Partial<QaController> = {}, ws: QaWorkspace | nul
         generation: { running: false, phase: null, error: null },
         startGeneration: vi.fn().mockResolvedValue(undefined),
         createOutlineDocument: vi.fn().mockResolvedValue(undefined),
+        reviseVersion: vi.fn().mockResolvedValue(undefined),
+        previewId: null, openPreview: vi.fn(), closePreview: vi.fn(),
         confirmDocuments: vi.fn().mockResolvedValue(undefined),
         toggleDocument: vi.fn().mockResolvedValue(undefined),
         ...overrides,
@@ -269,6 +271,21 @@ describe("outline card", () => {
         expect(qa.startGeneration).toHaveBeenCalledWith("11-5");
         await userEvent.click(screen.getByRole("button", { name: "僅輸出大綱版" }));
         expect(qa.createOutlineDocument).toHaveBeenCalledWith("11-5");
+    });
+
+    it("opens the preview from a version row, shows where a revision came from and keeps the download link", async () => {
+        const versions = [
+            { artifact_id: "a2", title: "修訂版", created_at: "2026-11-24T05:00:00", download_url: "/x", kind: "ai" as const,
+                revised_from: "a1", revision_note: "第 3 題簡答改肯定" },
+            { artifact_id: "a1", title: "原版", created_at: "2026-11-24T03:30:00", download_url: "/y", kind: "ai" as const },
+        ];
+        const qa = controller({ previewId: "a1" }, workspace({ stage: "ready", outline: { "1": outline(true) }, versions }));
+        render(<ChatMessageList messages={[turn([card(1)])]} qa={qa} />);
+        expect(screen.getByText(/修訂自 11\/24 03:30：第 3 題簡答改肯定/)).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "預覽 原版" })).toHaveAttribute("aria-pressed", "true");
+        await userEvent.click(screen.getByRole("button", { name: "預覽 修訂版" }));
+        expect(qa.openPreview).toHaveBeenCalledWith("a2");
+        expect(screen.getByRole("link", { name: "下載 修訂版" })).toHaveAttribute("href", "/api/v1/artifacts/a2/download");
     });
 
     it("names the checking and revising phases in the progress line", () => {

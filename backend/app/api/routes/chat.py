@@ -54,7 +54,10 @@ from app.services.chat import models as chat_models
 from app.models.documents import Document, DocumentStatus
 from app.models.artifacts import ArtifactRead
 from app.services.artifacts import ArtifactRepository, ArtifactStorage
+from app.api.routes.news import get_generate_news_task, get_result_backend
+from app.models.legislative_qa import ReviseQaRequest
 from app.services.legislative_qa.document import build_document
+from app.services.legislative_qa.jobs import start_revision
 from app.services.legislative_qa.publish import publish_document, record_version
 from app.services.chat.attachments import AttachmentError, ChatAttachmentStorage, process_upload
 from app.services.chat.engine import AgentsSdkChatEngine, ChatEngine
@@ -463,10 +466,14 @@ class QaOutlineUpdate(qa.OutlineInput):
     confirm: bool = False
 
 
-_QA_CONFLICT_CODES = {"qa_steps_unconfirmed", "qa_outline_missing", "qa_outline_unconfirmed"}
+_QA_CONFLICT_CODES = {
+    "qa_steps_unconfirmed", "qa_outline_missing", "qa_outline_unconfirmed", "qa_generation_running", "qa_revision_stale",
+}
 
 
 def _qa_http_error(error: qa.QaError) -> HTTPException:
+    if error.code == "qa_version_not_found":
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": error.code, "message": error.message})
     code = status.HTTP_409_CONFLICT if error.code in _QA_CONFLICT_CODES else status.HTTP_422_UNPROCESSABLE_CONTENT
     return HTTPException(status_code=code, detail={"code": error.code, "message": error.message})
 
@@ -482,6 +489,22 @@ async def _save_qa(workspace: ChatQaWorkspace, repository: ChatRepository) -> Qa
     qa.recompute_stage(workspace)
     saved = await repository.save_qa_workspace(workspace)
     return QaWorkspaceRead(**qa.to_read(saved))
+
+
+def _qa_reviser(session_id: UUID, repository: ChatRepository, backend: Any, task: Any, artifacts: Any, storage: Any):
+    """The chat tool's way to start a scoped revision of the latest AI version (None without a job queue)."""
+
+    if backend is None or task is None or artifacts is None or storage is None:
+        return None
+
+    async def revise(question_no: int, part: str, section: int | None, instruction: str) -> Any:
+        request = ReviseQaRequest(question_no=question_no, part=part, section=section, instruction=instruction)
+        return await start_revision(
+            session_id=session_id, workspace=await _load_qa(session_id, repository), request=request,
+            repository=repository, backend=backend, task=task, artifacts=artifacts, storage=storage,
+        )
+
+    return revise
 
 
 @router.get("/chat/sessions/{session_id}/qa", response_model=QaWorkspaceRead)
@@ -616,6 +639,10 @@ async def send_chat_message(
     repository: Annotated[ChatRepository, Depends(get_chat_repository)],
     engine: Annotated[ChatEngine, Depends(get_chat_engine)],
     document_repository: Annotated[DocumentRepository, Depends(get_chat_document_repository)] = None,
+    backend: Annotated[Any, Depends(get_result_backend)] = None,
+    task: Annotated[Any, Depends(get_generate_news_task)] = None,
+    artifacts: Annotated[ArtifactRepository, Depends(get_artifact_repository)] = None,
+    storage: Annotated[ArtifactStorage, Depends(get_artifact_storage)] = None,
 ) -> StreamingResponse:
     session = await repository.get_session(session_id)
     if session is None:
@@ -709,7 +736,10 @@ async def send_chat_message(
                     yield _sse("compacted", {"ok": False})
             # Only a skill turn passes ``skill``, so plain chat keeps the original engine call.
             skill_kwargs: dict[str, Any] = (
-                {"skill": qa.SkillRuntime(skill=session.skill, session_id=session_id, repository=repository)}
+                {"skill": qa.SkillRuntime(
+                    skill=session.skill, session_id=session_id, repository=repository,
+                    revise=_qa_reviser(session_id, repository, backend, task, artifacts, storage),
+                )}
                 if session.skill == qa.SKILL_ID
                 else {}
             )

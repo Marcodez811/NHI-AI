@@ -48,4 +48,6 @@ def record_version(
     }
     if document is not None and document.checked:
         entry |= {"checked": True, "issues": [issue.model_dump() for issue in document.issues], "review": document.review}
+    if document is not None and document.revised_from:
+        entry |= {"revised_from": document.revised_from, "revision_note": document.revision_note}
     workspace.versions = [entry, *workspace.versions]

@@ -16,8 +16,9 @@ import {
     putQaOutline,
     putQaQuestions,
     startQaGeneration,
+    startQaRevision,
 } from "../api/qa";
-import type { QaOutlineInput, QaQuestionInput, QaWorkspace } from "../api/qa";
+import type { QaOutlineInput, QaQuestionInput, QaRevisionInput, QaWorkspace } from "../api/qa";
 import { ApiError } from "../api/client";
 
 const POLL_MS = 2000;
@@ -43,6 +44,7 @@ export function useQaSkill(
     const [sessionAttachments, setSessionAttachments] = useState<ChatAttachment[]>([]);
     const [phase, setPhase] = useState<string | null>(null);
     const [generationError, setGenerationError] = useState<string | null>(null);
+    const [previewId, setPreviewId] = useState<string | null>(null);
     const skillRef = useRef<string | null>(null);
 
     const applySkill = useCallback((value: string | null) => {
@@ -56,6 +58,7 @@ export function useQaSkill(
         setSessionAttachments([]);
         setPhase(null);
         setGenerationError(null);
+        setPreviewId(null);
     }, [applySkill]);
 
     /** Re-reads the workspace and the session's attachments; a no-op outside skill mode. */
@@ -161,6 +164,28 @@ export function useQaSkill(
         setWorkspace(await fetchQaWorkspace(id));
     }, [activeSessionId]);
 
+    /** Starts a scoped revision of one part of a version; the finished one then opens in the preview. */
+    const reviseVersion = useCallback(async (body: QaRevisionInput) => {
+        const id = activeSessionId.current;
+        if (!id) return;
+        setGenerationError(null);
+        await startQaRevision(id, body);
+        setWorkspace(await fetchQaWorkspace(id));
+    }, [activeSessionId]);
+
+    const openPreview = useCallback((id: string) => setPreviewId(id), []);
+    const closePreview = useCallback(() => setPreviewId(null), []);
+
+    // A revision that finishes while the preview is open (started there or in chat) replaces what is shown.
+    const latest = workspace?.versions?.[0];
+    const seenLatest = useRef<string | null>(null);
+    useEffect(() => {
+        const next = latest?.artifact_id ?? null;
+        const previous = seenLatest.current;
+        seenLatest.current = next;
+        if (previous && next && next !== previous && latest?.revised_from) setPreviewId((open) => (open ? next : open));
+    }, [latest?.artifact_id, latest?.revised_from]);
+
     const generation: QaGenerationView = { running: Boolean(jobId), phase, error: generationError };
 
     /** Produces the outline-wording Word file, then re-reads the workspace so its versions list shows it. */
@@ -205,6 +230,10 @@ export function useQaSkill(
         generation,
         startGeneration,
         createOutlineDocument,
+        reviseVersion,
+        previewId,
+        openPreview,
+        closePreview,
         confirmDocuments,
         toggleDocument,
     };

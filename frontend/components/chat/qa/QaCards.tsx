@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Check, ChevronDown, CircleAlert, Download, FileText, Loader2, Plus, Trash2, Upload } from "lucide-react";
 import { ApiError } from "../../../lib/api/client";
+import { cn } from "../../../lib/utils";
 import { artifactDownloadUrl } from "../../../lib/api/artifacts";
 import { QA_EVIDENCE_GROUPS } from "../../../lib/api/qa";
 import type {
@@ -45,7 +46,7 @@ const TITLES: Record<QaCard["kind"], string> = {
 };
 
 /** Runs a card action, keeping its busy flag and the server's inline error message. */
-function useRun() {
+export function useRun() {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const run = async (action: () => Promise<unknown>) => {
@@ -64,7 +65,7 @@ function useRun() {
     return { busy, error, run };
 }
 
-function ErrorLine({ message }: { message: string | null }) {
+export function ErrorLine({ message }: { message: string | null }) {
     if (!message) return null;
     return (
         <div role="alert" className="flex items-center gap-1.5 text-xs text-destructive">
@@ -424,7 +425,7 @@ const PHASE_LABELS: Record<string, string> = {
     publishing: "產生 Word 文件",
 };
 
-const ISSUE_KIND_LABELS: Record<QaIssueKind, string> = {
+export const ISSUE_KIND_LABELS: Record<QaIssueKind, string> = {
     numeric: "數字與原文不符",
     inconsistent: "簡答與詳答不一致",
     unsupported: "資料中沒有依據",
@@ -433,7 +434,7 @@ const ISSUE_KIND_LABELS: Record<QaIssueKind, string> = {
     style: "格式或語氣",
 };
 
-function GenerationStatus({ phase }: { phase: string | null }) {
+export function GenerationStatus({ phase }: { phase: string | null }) {
     return (
         <div role="status" className="inline-flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
@@ -456,7 +457,7 @@ function IssueList({ issues }: { issues: QaIssue[] }) {
     );
 }
 
-function versionTime(createdAt: string): string {
+export function versionTime(createdAt: string): string {
     const date = new Date(createdAt);
     if (!createdAt || Number.isNaN(date.getTime())) return "";
     const pad = (value: number) => String(value).padStart(2, "0");
@@ -483,15 +484,29 @@ function VerificationBadge({ version, open, onToggle }: { version: QaVersion; op
     );
 }
 
-function VersionRow({ version, latest }: { version: QaVersion; latest: boolean }) {
+function RevisionNote({ version, baseTime }: { version: QaVersion; baseTime: string | null }) {
+    if (!version.revised_from) return null;
+    return (
+        <p className="break-words text-xs text-muted-foreground">
+            修訂自 {baseTime || "較早版本"}{version.revision_note ? `：${version.revision_note}` : ""}
+        </p>
+    );
+}
+
+function VersionRow({ version, latest, baseTime, onOpen, active }: {
+    version: QaVersion; latest: boolean; baseTime: string | null; onOpen: () => void; active: boolean;
+}) {
     const [open, setOpen] = useState(false);
     const time = versionTime(version.created_at);
     return (
-        <li className="flex flex-col gap-2 px-3 py-2.5">
+        <li className={cn("flex flex-col gap-2 px-3 py-2.5", active && "bg-muted/50")}>
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                 <FileText size={15} aria-hidden="true" className="shrink-0 text-muted-foreground" />
                 <Badge variant={version.kind === "ai" ? "secondary" : "outline"}>{version.kind === "ai" ? "AI 撰寫" : "大綱版"}</Badge>
-                <span className="min-w-0 flex-1 truncate font-medium">{version.title}</span>
+                <button type="button" onClick={onOpen} aria-label={`預覽 ${version.title}`} aria-pressed={active}
+                    className="min-w-0 flex-1 truncate rounded-md text-left font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                    {version.title}
+                </button>
                 {latest && <span className="text-xs text-primary">最新</span>}
                 {time && <span className="text-xs tabular-nums text-muted-foreground">{time}</span>}
                 <VerificationBadge version={version} open={open} onToggle={() => setOpen((value) => !value)} />
@@ -500,6 +515,7 @@ function VersionRow({ version, latest }: { version: QaVersion; latest: boolean }
                     <Download size={13} aria-hidden="true" />下載
                 </a>
             </div>
+            <RevisionNote version={version} baseTime={baseTime} />
             {open && <IssueList issues={version.issues ?? []} />}
         </li>
     );
@@ -532,7 +548,9 @@ function DocumentExport({ versions, qa }: { versions: QaVersion[]; qa: QaControl
             {versions.length > 0 && (
                 <ul aria-label="已產生的版本" className="flex flex-col divide-y divide-border/60 rounded-xl border border-border/60">
                     {versions.map((version, index) => (
-                        <VersionRow key={version.artifact_id} version={version} latest={index === 0 && versions.length > 1} />
+                        <VersionRow key={version.artifact_id} version={version} latest={index === 0 && versions.length > 1}
+                            baseTime={versionTime(versions.find((item) => item.artifact_id === version.revised_from)?.created_at ?? "")}
+                            active={qa.previewId === version.artifact_id} onOpen={() => qa.openPreview(version.artifact_id)} />
                     ))}
                 </ul>
             )}

@@ -57,6 +57,9 @@ export interface QaIssue {
     part: "short" | "detail";
     kind: QaIssueKind;
     message: string;
+    /** 0-based place inside the part; absent when the finding is about the whole part. */
+    section?: number | null;
+    paragraph?: number | null;
 }
 
 /** One produced Word file, newest first in `QaWorkspace.versions`. */
@@ -70,6 +73,54 @@ export interface QaVersion {
     /** AI versions only: true once the document was verified; `issues` are then the unresolved findings. */
     checked?: boolean;
     issues?: QaIssue[];
+    /** Scoped revisions only: the base version's artifact id and the user's instruction. */
+    revised_from?: string | null;
+    revision_note?: string | null;
+}
+
+export interface QaDocParagraph {
+    text: string;
+    /** 1-based indexes into `QaDocument.sources`. */
+    cites: number[];
+}
+export interface QaDocSection {
+    heading: string | null;
+    paragraphs: QaDocParagraph[];
+}
+export interface QaDocQuestion {
+    no: number;
+    text: string;
+    short: QaDocSection[];
+    detail: QaDocSection[];
+}
+/** The structured content one version's Word file is built from. */
+export interface QaDocument {
+    kind: "ai" | "outline";
+    title: string;
+    session_label?: string | null;
+    questions: QaDocQuestion[];
+    sources: string[];
+    checked: boolean;
+    issues: QaIssue[];
+    revised_from?: string | null;
+    revision_note?: string | null;
+}
+export interface QaVersionContent {
+    artifact_id: string;
+    kind: "ai" | "outline";
+    created_at?: string | null;
+    download_url: string;
+    document: QaDocument;
+}
+
+export type QaPart = "short" | "detail" | "both";
+export interface QaRevisionInput {
+    question_no: number;
+    part: QaPart;
+    section?: number | null;
+    instruction: string;
+    /** Defaults to the latest AI version on the server. */
+    base_artifact_id?: string;
 }
 
 export interface QaDocumentResult {
@@ -86,7 +137,12 @@ export interface QaWorkspace {
     outline: Record<string, QaOutline>;
     versions?: QaVersion[];
     /** The running AI-writing job, empty when idle. */
-    generation?: { job_id?: string; session_label?: string | null; started_at?: string };
+    generation?: {
+        job_id?: string;
+        session_label?: string | null;
+        started_at?: string;
+        revision?: { base_artifact_id: string; question_no: number; part: QaPart };
+    };
     base_version_id?: string | null;
     updated_at?: string;
 }
@@ -224,4 +280,13 @@ export function startQaGeneration(sessionId: string, sessionLabel?: string): Pro
 
 export function fetchQaGeneration(sessionId: string, jobId: string): Promise<QaGenerationJob> {
     return request<QaGenerationJob>(qaPath(sessionId, `/generate/${encodeURIComponent(jobId)}`));
+}
+
+export function fetchQaVersion(sessionId: string, artifactId: string, options: { signal?: AbortSignal } = {}): Promise<QaVersionContent> {
+    return request<QaVersionContent>(qaPath(sessionId, `/versions/${encodeURIComponent(artifactId)}`), options);
+}
+
+/** Starts a scoped revision of one part; 409 when a job is already running. Progress arrives via the workspace. */
+export function startQaRevision(sessionId: string, body: QaRevisionInput): Promise<QaGenerationJob> {
+    return request<QaGenerationJob>(qaPath(sessionId, "/revise"), { method: "POST", ...json(body) });
 }

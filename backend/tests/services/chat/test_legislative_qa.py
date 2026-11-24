@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from agents import Usage
@@ -62,7 +62,15 @@ class Harness:
                 return self.hits_by_query.get(query, [])
             return self.hits
 
-        runtime = qa.SkillRuntime(skill=qa.SKILL_ID, session_id=self.session_id, repository=self.repository)
+        self.revisions: list[tuple] = []
+        self.revise_error: Exception | None = None
+
+        async def revise(*args):
+            if self.revise_error is not None:
+                raise self.revise_error
+            self.revisions.append(args)
+
+        runtime = qa.SkillRuntime(skill=qa.SKILL_ID, session_id=self.session_id, repository=self.repository, revise=revise)
         tools = qa.build_tools(
             runtime, self.attachments, search, lambda kind, data: self.cards.append((kind, data)), self.labels,
         )
@@ -373,7 +381,7 @@ async def test_skill_tools_instructions_and_workspace_context_only_in_skill_mode
     agent, items = runner.calls[-1]
     assert {t.name for t in agent.tools} == {
         "search_knowledge_base", "read_attachment", "find_in_attachment", "set_questions", "suggest_documents", "record_evidence",
-        "propose_outline",
+        "propose_outline", "revise_document",
     }
     assert agent.instructions.startswith(BASE_INSTRUCTIONS) and "立院QA" in agent.instructions
     assert "民國年" in agent.instructions
@@ -450,3 +458,31 @@ def test_clean_snippet_strips_names_and_spaced_labels_but_keeps_figures() -> Non
     cleaned = clean_snippet(raw)
     assert "杜安琇" not in cleaned and "2706" not in cleaned and "0919" not in cleaned and "二)" not in cleaned
     assert "0.9523" in cleaned and "250,000,000" in cleaned
+
+
+@pytest.mark.asyncio
+async def test_revise_document_starts_a_scoped_revision_with_a_zero_based_section():
+    harness = Harness()
+    result = await harness.call("revise_document", {"question_no": 3, "part": "short", "instruction": "改得肯定一點，但不能說有編列預算"})
+    assert harness.revisions == [(3, "short", None, "改得肯定一點，但不能說有編列預算")]
+    assert "新版本" in result and harness.labels
+    await harness.call("revise_document", {"question_no": 2, "part": "detail", "section": 2, "instruction": "精簡"})
+    assert harness.revisions[1] == (2, "detail", 1, "精簡")
+
+
+@pytest.mark.asyncio
+async def test_revise_document_reports_why_it_could_not_start():
+    from fastapi import HTTPException
+
+    harness = Harness()
+    harness.revise_error = qa.QaError("qa_version_not_found", "還沒有 AI 撰寫的版本可以修訂。")
+    assert "還沒有 AI" in await harness.call("revise_document", {"question_no": 1, "part": "both", "instruction": "x"})
+    harness.revise_error = HTTPException(409, detail={"code": "qa_generation_running", "message": "已經有一份文件正在撰寫中。"})
+    assert "正在撰寫" in await harness.call("revise_document", {"question_no": 1, "part": "both", "instruction": "x"})
+
+
+def test_context_mentions_ai_versions_so_the_model_can_offer_revisions():
+    workspace = qa.new_workspace(UUID(int=1))
+    assert "revise_document" not in qa.render_context(workspace)
+    workspace.versions = [{"kind": "ai", "artifact_id": "a"}, {"kind": "outline", "artifact_id": "b"}]
+    assert "1 個 AI 撰寫的版本" in qa.render_context(workspace) and "revise_document" in qa.render_context(workspace)

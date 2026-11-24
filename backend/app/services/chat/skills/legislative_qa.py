@@ -60,11 +60,13 @@ TOOL_SET_QUESTIONS = "set_questions"
 TOOL_SUGGEST_DOCUMENTS = "suggest_documents"
 TOOL_RECORD_EVIDENCE = "record_evidence"
 TOOL_PROPOSE_OUTLINE = "propose_outline"
+TOOL_REVISE_DOCUMENT = "revise_document"
 SKILL_TOOL_LABELS = {
     TOOL_SET_QUESTIONS: "整理題目清單",
     TOOL_SUGGEST_DOCUMENTS: "尋找可能有用的資料",
     TOOL_RECORD_EVIDENCE: "記錄整理結果",
     TOOL_PROPOSE_OUTLINE: "擬定答題大綱",
+    TOOL_REVISE_DOCUMENT: "修改文件的一段",
 }
 SKILL_TOOL_NAMES = tuple(SKILL_TOOL_LABELS)
 
@@ -85,6 +87,8 @@ class SkillRuntime:
     skill: str
     session_id: UUID
     repository: Any  # ChatRepository (kept loose to avoid an import cycle)
+    # Starts a scoped revision job: ``async (question_no, part, section, instruction) -> job status``; None when unavailable.
+    revise: Callable[[int, str, int | None, str], Awaitable[Any]] | None = None
 
 
 SearchFn = Callable[[str, int], Awaitable[list[dict[str, Any]]]]
@@ -457,6 +461,11 @@ def render_context(workspace: ChatQaWorkspace | None) -> str:
         lines.append("資料：已確認使用 " + "、".join(f"【{item['name']}】" for item in docs.get("used", [])))
     else:
         lines.append("資料：使用者尚未確認要用哪些資料。")
+    ai_versions = [item for item in workspace.versions if item.get("kind") == "ai"]
+    if ai_versions:
+        lines.append(
+            f"Word 文件：已有 {len(ai_versions)} 個 AI 撰寫的版本（可用 revise_document 修改某一題的簡答或詳答）。"
+        )
     for item in workspace.questions:
         entry = workspace.evidence.get(str(item["no"]))
         if entry:
@@ -624,11 +633,46 @@ def build_tools(
         tool_labels[ctx.tool_call_id] = f"第 {question_no} 題大綱"
         return f"第 {question_no} 題大綱已提出，等使用者確認；目前還不會開始產製。"
 
+    async def revise_document(
+        ctx: ToolContext, question_no: int, part: Literal["short", "detail", "both"], instruction: str,
+        section: int | None = None,
+    ) -> str:
+        """Start a scoped revision of the latest AI-written Word version: one question's 簡答 and/or 詳答.
+
+        Args:
+            question_no: The question number to revise.
+            part: short (簡答), detail (詳答) or both.
+            instruction: The user's wording preference in their own words (tone, emphasis, what to drop),
+                for example 改得肯定一點，但不能說有編列預算. Pass the user's constraints along verbatim.
+            section: Optional 1-based section number inside that part when the user points at one section
+                (only with part short or detail); omit to revise the whole part.
+        """
+
+        if runtime.revise is None:
+            tool_labels[ctx.tool_call_id] = "目前無法修改文件"
+            return "目前無法啟動文件修改。"
+        try:
+            await runtime.revise(question_no, part, None if section is None else section - 1, instruction)
+        except QaError as error:
+            tool_labels[ctx.tool_call_id] = "未修改：" + error.message[:40]
+            return error.message
+        except Exception as error:
+            detail = getattr(error, "detail", None)
+            message = detail.get("message") if isinstance(detail, dict) else None
+            tool_labels[ctx.tool_call_id] = "未修改：" + (message or "暫時無法使用")[:40]
+            return message or "文件修改暫時無法使用，請稍後再試。"
+        tool_labels[ctx.tool_call_id] = f"修改第 {question_no} 題"
+        return "已開始修改，完成後會成為 Word 文件卡片中的新版本；請告訴使用者稍候，不要重複啟動，也不要自己撰寫答案。"
+
     descriptions = {
         TOOL_SET_QUESTIONS: ("set_questions", set_questions, "把使用者要準備的題目整理成清單（會取代舊清單），並顯示題目清單卡片。"),
         TOOL_SUGGEST_DOCUMENTS: ("suggest_documents", suggest_documents, "針對每一題搜尋知識庫，列出可能有用的資料供使用者勾選；不會自動附加。"),
         TOOL_RECORD_EVIDENCE: ("record_evidence", record_evidence, "記錄某一題整理出的數據、政策目的、辦理現況、爭議與後續工作，每項都要附來源文件與原文。"),
         TOOL_PROPOSE_OUTLINE: ("propose_outline", propose_outline, "提出某一題的簡答與詳答大綱，讓使用者確認。"),
+        TOOL_REVISE_DOCUMENT: (
+            "revise_document", revise_document,
+            "文件已有 AI 版本後，依使用者的意見只修改某一題的簡答或詳答（可指定段落）；會產生新版本，不會改動其他部分。",
+        ),
     }
     return [
         function_tool(fn, name_override=name, description_override=description, strict_mode=False)

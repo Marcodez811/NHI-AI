@@ -24,10 +24,13 @@ KIND_LABELS = {
     "style": "格式或語氣",
 }
 REVIEW_MARK = "[QA-REVIEW]"
-_LOCATION = re.compile(r"q(\d+)\s*[:：]\s*(short|detail)")
-_KEY_PREFIX = re.compile(r"^q\d+:(?:short|detail):", re.I)
+# ``q2:detail`` optionally followed by ``:s2:p1`` (1-based section and paragraph, as the checker reads them).
+_LOCATION = re.compile(r"q(\d+)\s*[:：]\s*(short|detail)(?:\s*[:：]\s*s(\d+))?(?:\s*[:：]\s*p(\d+))?", re.I)
+_KEY_PREFIX = re.compile(r"^q\d+:(?:short|detail):(?:s\d+:)?(?:p\d+:)?", re.I)
 
 Found = tuple[QaIssue, str]
+# (question no, part) -> paragraph count of every section; lets a located issue be checked against the draft.
+Shape = dict[tuple[int, str], list[int]]
 
 
 def _issue_key(issue: QaIssue, raw: str) -> str:
@@ -35,15 +38,28 @@ def _issue_key(issue: QaIssue, raw: str) -> str:
     return f"q{issue.question_no}:{issue.part}:{issue.kind}:{digest}"
 
 
-def _locate(finding: ReviewFinding) -> tuple[int, str] | None:
+def _locate(finding: ReviewFinding) -> tuple[int, str, int | None, int | None] | None:
     for place in (*finding.locations, finding.issue_key):
         match = _LOCATION.search(place or "")
         if match:
-            return int(match.group(1)), match.group(2)
+            section, paragraph = (int(group) - 1 if group and int(group) > 0 else None for group in match.group(3, 4))
+            return int(match.group(1)), match.group(2).lower(), section, paragraph
     return None
 
 
-def checker_issues(review: ReviewOutcome, question_numbers: set[int]) -> list[Found]:
+def _inside(shape: Shape | None, place: tuple[int, str, int | None, int | None]) -> tuple[int | None, int | None]:
+    """The section and paragraph of a location, dropped when the draft has no such place."""
+
+    number, part, section, paragraph = place
+    if shape is None:
+        return section, paragraph
+    counts = shape.get((number, part), [])
+    if section is None or section >= len(counts):
+        return None, None
+    return section, paragraph if paragraph is not None and paragraph < counts[section] else None
+
+
+def checker_issues(review: ReviewOutcome, question_numbers: set[int], shape: Shape | None = None) -> list[Found]:
     """The checker's findings as issues; those with an unknown kind, question or place are dropped."""
 
     found: list[Found] = []
@@ -58,7 +74,10 @@ def checker_issues(review: ReviewOutcome, question_numbers: set[int]) -> list[Fo
             continue
         if finding.correction.strip():
             message = f"{message}（建議：{finding.correction.strip()}）"
-        issue = QaIssue(question_no=place[0], part=place[1], kind=kind, message=message)
+        section, paragraph = _inside(shape, place)
+        issue = QaIssue(
+            question_no=place[0], part=place[1], kind=kind, message=message, section=section, paragraph=paragraph
+        )
         key = _issue_key(issue, _KEY_PREFIX.sub("", finding.issue_key.strip()) or message)
         if key not in seen:
             seen.add(key)
@@ -70,12 +89,21 @@ def numeric_found(issues: list[QaIssue]) -> list[Found]:
     return [(issue, _issue_key(issue, issue.message)) for issue in issues]
 
 
+def _place(issue: QaIssue) -> str:
+    place = f"q{issue.question_no}:{issue.part}"
+    if issue.section is not None:
+        place += f":s{issue.section + 1}"
+        if issue.paragraph is not None:
+            place += f":p{issue.paragraph + 1}"
+    return place
+
+
 def to_outcome(summary: str, found: list[Found]) -> ReviewOutcome:
     """Numeric first, then the checker's; ids are the stable keys so rounds can be compared."""
 
     findings = [
         ReviewFinding(
-            finding_id=key[:120], category=issue.kind, issue_key=key, locations=(f"q{issue.question_no}:{issue.part}",),
+            finding_id=key[:120], category=issue.kind, issue_key=key, locations=(_place(issue),),
             description=issue.message,
         )
         for issue, key in found
@@ -88,8 +116,21 @@ def outcome_issues(review: ReviewOutcome) -> list[QaIssue]:
     for finding in review.findings:
         place = _locate(finding)
         if place is not None:
-            issues.append(QaIssue(question_no=place[0], part=place[1], kind=finding.category, message=finding.description))
+            issues.append(QaIssue(
+                question_no=place[0], part=place[1], kind=finding.category, message=finding.description,
+                section=place[2], paragraph=place[3] if place[2] is not None else None,
+            ))
     return issues
+
+
+def draft_shape(output: Any) -> Shape:
+    """The draft's sections and paragraph counts (``output`` is a validated writer output)."""
+
+    return {
+        (answer.no, part): [len(section.paragraphs) for section in sections]
+        for answer in output.questions
+        for part, sections in (("short", answer.short), ("detail", answer.detail))
+    }
 
 
 def part_label(part: str) -> str:

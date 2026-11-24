@@ -161,15 +161,16 @@ def _label(part: str, heading: str, number: int) -> str:
 
 
 def _paragraph_issue(
-    spec: dict[str, Any], part: str, section: Any, number: int, paragraph: Any, quotes: dict[str, str], allowed: set[Pair],
+    spec: dict[str, Any], part: str, place: tuple[int, Any, int, Any], quotes: dict[str, str], allowed: set[Pair],
 ) -> QaIssue | None:
+    section_index, section, number, paragraph = place
     cited = [quotes[cite] for cite in paragraph.cites if cite in quotes]
     missing = unsupported_numbers(paragraph.text, evidence_values(cited) | allowed)
     if not missing:
         return None
     listed = "、".join(missing[:MAX_LISTED])
     return QaIssue(
-        question_no=spec["no"], part=part, kind="numeric",
+        question_no=spec["no"], part=part, kind="numeric", section=section_index, paragraph=number - 1,
         message=f"{_label(part, section.heading, number)}的數字 {listed} 沒有出現在所引用的資料原文中，請改成原文的數字或刪除。",
     )
 
@@ -187,9 +188,9 @@ def numeric_issues(writer_input: dict[str, Any], output: Any) -> list[QaIssue]:
             outline_text += [section["title"], *section["points"]]
         allowed = context_calendar_values(outline_text)
         for part, sections in (("short", answer.short), ("detail", answer.detail)):
-            for section in sections:
+            for section_index, section in enumerate(sections):
                 for number, paragraph in enumerate(section.paragraphs, 1):
-                    issue = _paragraph_issue(spec, part, section, number, paragraph, quotes, allowed)
+                    issue = _paragraph_issue(spec, part, (section_index, section, number, paragraph), quotes, allowed)
                     if issue is not None:
                         issues.append(issue)
     return issues
