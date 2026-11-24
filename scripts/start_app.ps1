@@ -13,6 +13,13 @@ function Fail($msg) {
     exit 1
 }
 
+# Double-clicking the .bat inside a ZIP runs a throw-away copy in the temp folder,
+# so the saved API key (and every later change) is lost on the next run.
+$here = (Get-Location).Path
+if ($here.StartsWith([System.IO.Path]::GetTempPath(), [System.StringComparison]::OrdinalIgnoreCase)) {
+    Fail "This is running from a temporary folder ($here). Right-click the ZIP, choose 'Extract All...', and run 'Start NHI-AI.bat' from the extracted folder."
+}
+
 # Native commands write progress to stderr; keep the exit code as the only signal.
 function Test-Docker {
     try { docker info *> $null } catch { return $false }
@@ -59,7 +66,9 @@ if (-not $keyLine -or $keyLine -match '^OPENAI_API_KEY=(replace-me)?\s*$') {
         $lines = @($lines) + "OPENAI_API_KEY=$key"
     }
     [System.IO.File]::WriteAllLines($envPath, [string[]]$lines, $utf8)
-    Write-Host "-> saved the key to backend\.env"
+    Write-Host "-> saved the key to $envPath"
+} else {
+    Write-Host "-> using the API key in $envPath"
 }
 
 Write-Host ""
